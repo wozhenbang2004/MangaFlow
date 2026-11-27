@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -49,7 +48,7 @@ internal fun AnimeDownloadsPanel(visible: Boolean, controller: AnimeController, 
     backdrop: HazeState, onDismiss: () -> Unit, onPlay: (AnimeDownloadSelection) -> Unit) {
     var pendingPlayback by remember { mutableStateOf<AnimeDownloadSelection?>(null) }
     LaunchedEffect(visible) { if (visible) pendingPlayback = null }
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 640.dp, onClosed = {
+    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = animePanelWidth(940.dp, 640.dp), properties = animePanelDialogProperties, onClosed = {
         val request = pendingPlayback
         pendingPlayback = null
         if (request != null) onPlay(request)
@@ -58,7 +57,7 @@ internal fun AnimeDownloadsPanel(visible: Boolean, controller: AnimeController, 
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Text("离线下载", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+                    Text("离线下载", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge)
                     MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭离线下载") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
@@ -77,6 +76,7 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
     val downloads by controller.downloads.state.collectAsStateWithLifecycle()
     val enhancement by controller.enhancements.state.collectAsStateWithLifecycle()
     var filter by rememberSaveable { mutableIntStateOf(0) }
+    var selectedSubjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var removing by remember { mutableStateOf<String?>(null) }
     var actionsOpen by remember { mutableStateOf(false) }
     var actionsPresent by remember { mutableStateOf(false) }
@@ -92,6 +92,7 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
         }.sortedByDescending { it.createdAt }
     }
     val downloadGroups = remember(rows) { rows.groupBy { it.subject.id } }
+    val selectedWork = selectedSubjectId?.takeIf(downloadGroups::containsKey)
     val versionsByDownload = remember(enhancement.entries) { enhancement.entries.groupBy { it.downloadId } }
     val readyRows = remember(rows) { rows.filter { it.status == AnimeDownloadStatus.COMPLETED } }
     Column(modifier.fillMaxWidth()) {
@@ -119,7 +120,7 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
         } else {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                MotionTabs(filter, listOf("全部", "待完成", "可离线"), onSelect = { filter = it },
+                MotionTabs(filter, listOf("全部", "待完成", "可离线"), onSelect = { filter = it; selectedSubjectId = null },
                     modifier = Modifier.weight(1f).motionInputGate(!actionsPresent), controlHeight = 44.dp,
                     treatment = MotionTabTreatment.Soft, fullWidthIndicator = true)
                 Box {
@@ -135,7 +136,7 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                             else -> "返回应用后可以继续下载。"
                         }, Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
                         if (readyRows.isNotEmpty()) {
-                            CompactMenuAction(Icons.Outlined.AutoAwesome, "增强当前列表的已下载剧集", onClick = {
+                            CompactMenuAction(Icons.Outlined.AutoAwesome, "增强此分类全部作品的已下载剧集（${readyRows.size}）", onClick = {
                                 actionsOpen = false
                                 readyRows.forEach { controller.enhanceDownload(it.id) }
                             })
@@ -143,10 +144,27 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                     }
                 }
             }
-            Box(Modifier.weight(1f, fill = false).fillMaxWidth()) {
-                positions.SaveableStateProvider(filter) {
+            AnimePaneLayout(modifier = Modifier.weight(1f, fill = false), railWidth = 208.dp,
+                minimumWidth = 716.dp, showSidebar = downloadGroups.size > 1, sidebar = {
+                    AnimeScrollableList(Modifier.fillMaxSize(), userScrollEnabled = !actionsPresent,
+                        contentPadding = PaddingValues(vertical = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        item(key = "all") {
+                            AnimePaneChoice("全部番剧", selectedWork == null, { selectedSubjectId = null },
+                                count = downloadGroups.size.toString(), enabled = !actionsPresent)
+                        }
+                        downloadGroups.forEach { (subjectId, episodes) ->
+                            item(key = "work:$subjectId") {
+                                AnimePaneChoice(episodes.first().subject.title, selectedWork == subjectId,
+                                    { selectedSubjectId = subjectId }, detail = "${episodes.size} 集", enabled = !actionsPresent)
+                            }
+                        }
+                    }
+                }) { wide ->
+                val groupId = selectedWork.takeIf { wide }
+                val shownGroups = if (groupId == null) downloadGroups else downloadGroups.filterKeys { it == groupId }
+                positions.SaveableStateProvider(if (groupId == null) filter else "$filter:$groupId") {
                     val scroll = rememberLazyListState()
-                    LazyColumn(Modifier.fillMaxWidth().motionInputGate(!actionsPresent), state = scroll,
+                    AnimeScrollableList(Modifier.fillMaxWidth().motionInputGate(!actionsPresent), state = scroll,
                         userScrollEnabled = !actionsPresent, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         downloads.readIssue?.let { issue ->
@@ -180,13 +198,13 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                                 AnimeMessage(title, detail, icon = Icons.Outlined.Download)
                             }
                         }
-                        downloadGroups.forEach { (subjectId, episodes) ->
+                        shownGroups.forEach { (subjectId, episodes) ->
                             item(key = "work:$subjectId") {
                                 Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 3.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                     val subject = episodes.first().subject
-                                    AnimePoster(subject, Modifier.size(48.dp, 72.dp))
+                                    AnimePoster(subject, Modifier.size(if (wide) 55.dp else 48.dp, if (wide) 80.dp else 72.dp))
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                         Text(subject.title, Modifier.semantics { heading() },
                                             style = animeWorkTitleStyle(),

@@ -81,7 +81,6 @@ import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
@@ -998,7 +997,7 @@ fun DownloadsScreen(
                 selectFilter(DownloadFilter.entries[index])
                 selectedIds = emptySet()
             })
-        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp))
+        MangaSnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp))
         // Keep the modal host composed through a resize so its exit and settings handoff can settle.
         if (desktop) renderTaskDetails(if (inPane) null else desktopTask, false)
     }

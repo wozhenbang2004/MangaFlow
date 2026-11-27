@@ -1,5 +1,10 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
@@ -10,6 +15,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
@@ -19,14 +27,19 @@ import dev.mangaflow.data.ReviewProviders
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.net.*
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.storage.BodySourceRegistryEntry
+import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionIconButton
 import kotlinx.coroutines.flow.MutableStateFlow
 
 private data class NetworkDirectorySource(val id: String, val name: String, val targetId: String,
     val category: DownloadCategory? = null, val chapterDownload: Boolean = false)
+
+private enum class RouteScopeFilter(val label: String) { ALL("全部"), CUSTOM("单独设置"), LOCKED("已锁定") }
 
 /** Configuration inventory only. Opening a group never probes a site or enables a source. */
 @Composable
@@ -44,6 +57,10 @@ internal fun NetworkRouteDirectory(repository: UnifiedMangaRepository?, registry
     val schedule by checks.schedule.collectAsStateWithLifecycle()
     var expanded by rememberSaveable { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var scopeFilter by remember { mutableStateOf(RouteScopeFilter.ALL) }
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val colors = MaterialTheme.colorScheme
     val mangaSources = (repository?.sources.orEmpty().map { it.id to it.name } +
         registryEntries.map { it.source.id to it.source.name } +
         packages.map { it.sourceId to it.metadata.optString("name").ifBlank { it.sourceId } })
@@ -65,7 +82,7 @@ internal fun NetworkRouteDirectory(repository: UnifiedMangaRepository?, registry
     @Composable fun lock(targetId: String) {
         val locked = targetId in schedule.lockedTargetIds
         MotionIconButton(onClick = {
-            if (!checks.lockTarget(targetId, !locked)) notice = "锁定状态未保存，请重试"
+            notice = if (checks.lockTarget(targetId, !locked)) null else "锁定状态未保存，请重试"
         }, enabled = active, modifier = Modifier.size(44.dp),
             tooltip = if (locked) "已禁止自动改线；点击允许" else "允许自动改线；点击禁止") {
             Icon(if (locked) Icons.Outlined.Lock else Icons.Outlined.LockOpen,
@@ -95,8 +112,63 @@ internal fun NetworkRouteDirectory(repository: UnifiedMangaRepository?, registry
         }
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("使用默认会跟随默认线路；单独设置只用于该来源。锁图标控制自动改线：锁定后仍可检测和手动改线。",
-            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (desktop) {
+            Row(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(10.dp)).heightIn(min = 44.dp)
+                .padding(start = 12.dp, end = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Search, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+                BasicTextField(query, { query = it }, modifier = Modifier.weight(1f).semantics { contentDescription = "筛选来源或下载类型" },
+                    singleLine = true, enabled = active, cursorBrush = SolidColor(colors.primary),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
+                    decorationBox = { input -> Box {
+                        if (query.isEmpty()) Text("筛选来源或下载类型", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                        input()
+                    } })
+                if (query.isNotEmpty()) MotionIconButton({ query = "" }, enabled = active, modifier = Modifier.size(40.dp),
+                    tooltip = "清除筛选") { Icon(Icons.Outlined.Close, "清除筛选", Modifier.size(16.dp)) }
+            }
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                RouteScopeFilter.entries.forEach { option ->
+                    ManagementResultFilter(option.label, option == scopeFilter, active) { scopeFilter = option }
+                }
+            }
+        }
+        Text("默认线路适用于未单设的来源。锁定后仍可检测和手动改线。", style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant)
+        if (desktop && (query.isNotBlank() || scopeFilter != RouteScopeFilter.ALL)) {
+            val term = query.trim()
+            fun match(name: String, id: String, custom: Boolean, locked: Boolean): Boolean =
+                (name.contains(term, ignoreCase = true) || id.contains(term, ignoreCase = true)) && when (scopeFilter) {
+                    RouteScopeFilter.ALL -> true
+                    RouteScopeFilter.CUSTOM -> custom
+                    RouteScopeFilter.LOCKED -> locked
+                }
+            val groups = listOf("漫画来源" to mangaSources, "动漫来源" to animeSources,
+                "评分、资料与弹幕" to ratingSources, "其他已保存来源" to preserved)
+            val matching = groups.map { (name, rows) -> name to rows.filter {
+                match(it.name, it.id, it.id in settings.sourceOverrides, it.targetId in schedule.lockedTargetIds)
+            } }.filter { it.second.isNotEmpty() }
+            val categories = DownloadCategory.entries.filter { kind ->
+                match(downloadCategoryLabel(kind), kind.name, kind in settings.categoryOverrides,
+                    "category.${kind.name}" in schedule.lockedTargetIds)
+            }
+            matching.forEach { (name, rows) -> key(name) {
+                var limit by remember(term, scopeFilter) { mutableIntStateOf(12) }
+                Text("$name · ${rows.size}", Modifier.padding(top = 10.dp), style = MaterialTheme.typography.titleSmall)
+                sources(rows.take(limit))
+                if (rows.size > limit) MotionTextButton({ limit += 12 }, enabled = active) {
+                    Text("再显示 ${minOf(12, rows.size - limit)} 个来源")
+                }
+            } }
+            if (categories.isNotEmpty()) {
+                Text("下载与服务 · ${categories.size}", Modifier.padding(top = 10.dp), style = MaterialTheme.typography.titleSmall)
+                categories.forEach { category(it, downloadCategoryLabel(it)) }
+            }
+            if (matching.isEmpty() && categories.isEmpty()) {
+                Text("没有符合条件的线路", Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodyMedium)
+                MotionTextButton({ query = ""; scopeFilter = RouteScopeFilter.ALL }, enabled = active) { Text("清除筛选") }
+            }
+        } else {
         SettingsDisclosure("漫画来源", "${mangaSources.size} 源", Icons.Outlined.AutoStories,
             expanded == "manga", { if (active) expanded = if (expanded == "manga") null else "manga" }, compact = true) {
             category(DownloadCategory.CHAPTERS, "章节下载默认线路")
@@ -119,6 +191,7 @@ internal fun NetworkRouteDirectory(repository: UnifiedMangaRepository?, registry
         if (preserved.isNotEmpty()) SettingsDisclosure("其他已保存来源", "${preserved.size} 项", Icons.Outlined.Settings,
             expanded == "preserved", { if (active) expanded = if (expanded == "preserved") null else "preserved" }, compact = true) {
             sources(preserved)
+        }
         }
         notice?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
     }

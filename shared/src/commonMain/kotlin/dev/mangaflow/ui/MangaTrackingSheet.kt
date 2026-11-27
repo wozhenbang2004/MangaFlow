@@ -2,11 +2,11 @@ package dev.mangaflow.ui
 
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -28,11 +28,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -44,11 +47,14 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.tracking.*
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.*
 import dev.mangaflow.ui.platform.NativeTrackingWebsiteLogin
 import dev.mangaflow.ui.platform.trackingWebsiteLoginSupported
 
 /** Opaque Ovio panel: account, explicit identity review, then one visible sync direction. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun MangaTrackingSheet(
     visible: Boolean,
@@ -59,6 +65,7 @@ internal fun MangaTrackingSheet(
 ) {
     val loginVisible by rememberUpdatedState(visible)
     if (!visible) return
+    val desktop = platformKind == PlatformKind.DESKTOP
     val colors = MaterialTheme.colorScheme
     val uri = LocalUriHandler.current
     var providerIndex by remember(state.ready) {
@@ -90,6 +97,13 @@ internal fun MangaTrackingSheet(
     var remoteId by remember(provider, work?.id) { mutableStateOf("") }
     var selectedNumbering by remember(preview?.subject?.id, preview?.ownerId, work?.id) {
         mutableStateOf<MangaTrackingNumbering?>(null)
+    }
+    var inspectedId by remember(provider, account?.ownerId, work?.id) { mutableStateOf(preview?.subject?.id) }
+    val inspectVersion = desktop && work != null && preview != null && inspectedId == preview.subject.id
+    fun inspect(id: String) {
+        if (!enabled) return
+        inspectedId = id
+        controller.review(provider, id)
     }
     var changeNumbering by remember(bound?.key) { mutableStateOf(false) }
     var externalError by remember { mutableStateOf<String?>(null) }
@@ -130,13 +144,23 @@ internal fun MangaTrackingSheet(
         }
     }
     LaunchedEffect(bound?.subject?.id) { if (bound != null) showSearch = false }
+    LaunchedEffect(review?.token) {
+        if (desktop && review != null && inspectedId == bound?.subject?.id) {
+            showSearch = false
+            inspectedId = null
+        }
+    }
 
     // Account inputs and login actions must never sample the chapter grid underneath this sheet.
-    MotionBottomSheet(onDismissRequest = dismissPanel, containerColor = colors.surface.copy(alpha = 1f)) { dismiss ->
+    MotionBottomSheet(onDismissRequest = dismissPanel, desktopWidth = if (authorization == null) 740.dp else 920.dp,
+        containerColor = colors.surface.copy(alpha = 1f)) { dismiss ->
         val website = authorization
+        val window = LocalMangaWindow.current
+        val short = desktop && window.height < 310.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val availableHeight = if (desktop) window.height.coerceAtMost(760.dp) else window.panelHeight
         Column(Modifier.fillMaxWidth().then(if (website != null)
-            Modifier.height(LocalMangaWindow.current.panelHeight.coerceAtMost(720.dp))
-            else Modifier.heightIn(max = LocalMangaWindow.current.panelHeight))) {
+            Modifier.height(availableHeight.coerceAtMost(720.dp))
+            else Modifier.heightIn(max = availableHeight))) {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 6.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 if (website != null) MotionIconButton(onClick = {
@@ -182,15 +206,29 @@ internal fun MangaTrackingSheet(
                         }
                     }, modifier = Modifier.fillMaxWidth().weight(1f).padding(12.dp))
             } else {
-                MotionTabs(providerIndex, MangaTrackingProvider.entries.map { it.label }, onSelect = {
-                    providerIndex = it; externalError = null
-                }, modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
-                    controlHeight = 48.dp, fullWidthIndicator = true,
-                    track = colors.onSurface.copy(alpha = .045f))
-                val list = key(provider, work?.id, account?.ownerId) { rememberLazyListState() }
-                LazyColumn(Modifier.weight(1f, fill = false), state = list,
+                val pickProvider: (Int) -> Unit = { providerIndex = it; externalError = null }
+                val providerLabels = MangaTrackingProvider.entries.map { it.label }
+                val providerTabs: @Composable () -> Unit = {
+                    if (desktop) DesktopSectionTabs(providerIndex, providerLabels, pickProvider,
+                        Modifier.widthIn(max = 360.dp).fillMaxWidth().padding(horizontal = 18.dp))
+                    else MotionTabs(providerIndex, providerLabels, onSelect = pickProvider,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
+                        controlHeight = 48.dp, fullWidthIndicator = true,
+                        track = colors.onSurface.copy(alpha = .045f))
+                }
+                if (!short) providerTabs()
+                val browseList = key(provider, work?.id, account?.ownerId) { rememberLazyListState() }
+                val versionList = key(provider, work?.id, preview?.subject?.id) { rememberLazyListState() }
+                AccountReviewList(Modifier.weight(1f, fill = false), state = if (inspectVersion) versionList else browseList,
                     contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 6.dp, bottom = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (short) item(key = "tracking-provider") { providerTabs() }
+                    if (inspectVersion) item(key = "tracking-return") {
+                        MotionTextButton(onClick = { inspectedId = null }, enabled = enabled) {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, null, Modifier.size(17.dp))
+                            Text("返回条目列表", Modifier.padding(start = 6.dp))
+                        }
+                    }
                     if (busy) item {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
@@ -205,7 +243,7 @@ internal fun MangaTrackingSheet(
                             color = if (externalError != null || state.error != null) colors.error else colors.onSurfaceVariant,
                             modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                     }
-                    if (account != null) item {
+                    if (!inspectVersion && account != null) item {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                 Text(account.displayName.ifBlank { account.ownerId }, style = MaterialTheme.typography.titleSmall)
@@ -215,7 +253,7 @@ internal fun MangaTrackingSheet(
                             MotionTextButton(onClick = { controller.disconnect(provider) }, enabled = enabled) { Text("断开") }
                         }
                     }
-                    if (account == null || showCredential) {
+                    if (!inspectVersion && (account == null || showCredential)) {
                         item {
                             val websiteConfigured = provider == MangaTrackingProvider.BANGUMI || state.aniListClientId.isNotBlank()
                             if (trackingWebsiteLoginSupported() && websiteConfigured) {
@@ -264,8 +302,8 @@ internal fun MangaTrackingSheet(
                         TrackingHint("账号连接后，可在任意普通漫画的详情页打开进度同步，确认条目后对照。")
                     }
                     if (account != null && work != null) {
-                        item { HorizontalDivider(color = colors.outline.copy(alpha = .12f)) }
-                        if (bound != null) {
+                        if (!inspectVersion) item { HorizontalDivider(color = colors.outline.copy(alpha = .12f)) }
+                        if (!inspectVersion && bound != null) {
                             item {
                                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -292,16 +330,18 @@ internal fun MangaTrackingSheet(
                                 }
                             }
                         }
-                        if (bound == null || showSearch) {
+                        if (!inspectVersion && (bound == null || showSearch)) {
                             item {
-                                TrackingInput(query, { query = it }, "搜索漫画名称", enabled = enabled)
-                                MotionOutlinedButton(onClick = { controller.search(provider, query) },
+                                val search: () -> Unit = { if (enabled && query.isNotBlank()) controller.search(provider, query) }
+                                TrackingInput(query, { query = it }, "搜索漫画名称", enabled = enabled,
+                                    onSubmit = if (desktop) search else null)
+                                MotionOutlinedButton(onClick = search,
                                     enabled = enabled && query.isNotBlank(), modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
                                     Text("搜索 " + provider.label + " 漫画")
                                 }
                             }
                             items(state.candidates[provider].orEmpty(), key = { "candidate-" + provider.id + "-" + it.id }) { subject ->
-                                MotionTextButton(onClick = { controller.review(provider, subject.id) }, enabled = enabled,
+                                MotionTextButton(onClick = { inspect(subject.id) }, enabled = enabled,
                                     modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp)) {
                                     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                         Text(subject.title, color = colors.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -310,22 +350,25 @@ internal fun MangaTrackingSheet(
                                 }
                             }
                             item {
+                                val canRead = enabled && remoteId.toIntOrNull()?.let { it > 0 } == true
+                                val read: () -> Unit = { if (canRead) inspect(remoteId) }
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     TrackingInput(remoteId, { remoteId = it.filter { char -> char in '0'..'9' }.take(10) },
-                                        "原站漫画条目 ID", enabled = enabled, number = true, modifier = Modifier.weight(1f))
-                                    MotionTextButton(onClick = { controller.review(provider, remoteId) },
-                                        enabled = enabled && remoteId.toIntOrNull()?.let { it > 0 } == true) { Text("读取") }
+                                        "原站漫画条目 ID", enabled = enabled, number = true, modifier = Modifier.weight(1f),
+                                        onSubmit = if (desktop) read else null)
+                                    MotionTextButton(onClick = read, enabled = canRead) { Text("读取") }
                                 }
                                 state.suggestedIds[provider]?.let { suggested ->
-                                    MotionTextButton(onClick = { controller.review(provider, suggested) }, enabled = enabled) {
+                                    MotionTextButton(onClick = { inspect(suggested) }, enabled = enabled) {
                                         Text("核对已有评分条目 · " + suggested)
                                     }
                                 }
                             }
                         }
-                        if (preview != null) {
+                        if (preview != null && (!desktop || inspectVersion)) {
                             item {
-                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Column(Modifier.fillMaxWidth().accountReviewRow(selected = true),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     Text("确认漫画版本", style = MaterialTheme.typography.titleSmall)
                                     Text(preview.subject.title, style = MaterialTheme.typography.bodyLarge)
                                     TrackingHint(preview.subject.subtitle)
@@ -348,9 +391,12 @@ internal fun MangaTrackingSheet(
                                 }
                             }
                         }
-                        if (review != null && bound != null) {
+                        if (!inspectVersion && review != null && bound != null) {
                             item {
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                                if (desktop) ReviewComparison(
+                                    left = { TrackingComparisonValue("本机对照", review.local) },
+                                    right = { TrackingComparisonValue(provider.label + " 云端", review.remote.progress) },
+                                ) else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                         TrackingHint("本机对照")
                                         Text(progressLabel(review.local), style = MaterialTheme.typography.bodyMedium)
@@ -367,15 +413,18 @@ internal fun MangaTrackingSheet(
                                 val statuses = MangaTrackingStatus.entries.filter {
                                     provider != MangaTrackingProvider.BANGUMI || it != MangaTrackingStatus.REPEATING
                                 }
-                                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 4.dp)) {
+                                val statusChoices: @Composable () -> Unit = {
                                     statuses.forEach { status ->
                                         MotionTextButton(onClick = { chosenStatus = status }, enabled = enabled,
+                                            modifier = Modifier.semantics { selected = chosenStatus == status },
                                             colors = ButtonDefaults.textButtonColors(
                                                 contentColor = if (chosenStatus == status) colors.primary else colors.onSurfaceVariant)) {
                                             Text(status.label, fontWeight = if (chosenStatus == status) FontWeight.SemiBold else FontWeight.Normal)
                                         }
                                     }
                                 }
+                                if (desktop) FlowRow(Modifier.fillMaxWidth().padding(top = 4.dp)) { statusChoices() }
+                                else Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 4.dp)) { statusChoices() }
                             }
                             item {
                                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -390,6 +439,7 @@ internal fun MangaTrackingSheet(
                             }
                             item {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    if (desktop && selectedProgress != null) TrackingHint("准备回写 · " + progressLabel(selectedProgress))
                                     MotionButton(onClick = { controller.applyLocal(provider, selectedProgress, review.token) },
                                         enabled = enabled && selectedProgress != null,
                                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("回写所选进度到 " + provider.label) }
@@ -408,7 +458,7 @@ internal fun MangaTrackingSheet(
                                 } else TrackingHint("当前目录没有唯一对应的下一话／卷，可从目录选择续读章节。")
                             }
                         }
-                        if (bound != null) {
+                        if (!inspectVersion && bound != null) {
                             item {
                                 SettingsToggle("读完后自动同步", bound.autoSync, Icons.Outlined.Sync,
                                     enabled = enabled && bound.numbering != null,
@@ -421,7 +471,7 @@ internal fun MangaTrackingSheet(
                             }
                         }
                     }
-                    if (pending.isNotEmpty()) {
+                    if (!inspectVersion && pending.isNotEmpty()) {
                         item {
                             HorizontalDivider(color = colors.outline.copy(alpha = .12f))
                             Text("待核对的同步记录 · " + pending.size, style = MaterialTheme.typography.titleSmall,
@@ -465,6 +515,14 @@ private fun TrackingNumberingChoices(
 }
 
 @Composable
+private fun TrackingComparisonValue(label: String, progress: MangaTrackingProgress) {
+    Column(Modifier.fillMaxWidth().accountReviewRow(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        TrackingHint(label)
+        Text(progressLabel(progress), style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+@Composable
 private fun TrackingHint(value: String, modifier: Modifier = Modifier) {
     Text(value, modifier, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
@@ -478,12 +536,16 @@ private fun TrackingInput(
     modifier: Modifier = Modifier.fillMaxWidth(),
     secret: Boolean = false,
     number: Boolean = false,
+    onSubmit: (() -> Unit)? = null,
 ) {
     OutlinedTextField(value, onValueChange, modifier = modifier, enabled = enabled, singleLine = true,
         label = { Text(label) }, shape = RoundedCornerShape(16.dp),
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(autoCorrectEnabled = false,
+            imeAction = if (onSubmit == null) ImeAction.Default else ImeAction.Done,
             keyboardType = if (secret) KeyboardType.Password else if (number) KeyboardType.Number else KeyboardType.Text),
+        keyboardActions = if (onSubmit != null) KeyboardActions(onDone = { if (enabled) onSubmit() })
+            else KeyboardActions.Default,
         colors = settingsInputColors())
 }
 

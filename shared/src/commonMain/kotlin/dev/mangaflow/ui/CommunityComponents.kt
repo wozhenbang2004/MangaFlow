@@ -13,6 +13,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -25,6 +26,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -69,6 +71,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -264,27 +267,31 @@ internal fun CommunityPanel(
                 onLongOnly = { longOnly = it; resetPosition() },
                 onHidePromotions = { hidePromotions = it; resetPosition() },
                 onRetry = onRetry, onMatch = onMatch, onDismiss = onFilterDismiss)
-            LazyColumn(state = listState, userScrollEnabled = active,
-                modifier = Modifier.weight(1f).fillMaxWidth().motionInputGate(active),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomPadding)) {
-                items(clusters, key = { it.key }) { cluster ->
-                    CuratedReviewCluster(mangaId, cluster, sourcesById, hidePromotions, loadReplies)
-                }
-                item("mixed-footer") {
-                    Column(Modifier.fillMaxWidth()) {
-                        when {
-                            relevantBusy -> SmallLoading()
-                            clusters.isEmpty() && unavailableSources.isNotEmpty() ->
-                                CommentUnavailableNotice(unavailableSources, allUnavailable, onRetry)
-                            clusters.isEmpty() -> Text(if (selectedSource != null || longOnly) "暂没有符合筛选的评论" else "还没有可显示的评论",
-                                color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 18.dp))
-                            unavailableSources.isNotEmpty() -> CommentUnavailableNotice(unavailableSources, allUnavailable, onRetry)
-                        }
-                        if (clusters.isEmpty() && nextSource != null && !relevantBusy) {
-                            TextButton(onClick = { onMore(nextSource.id) }) { Text("继续查找评论", color = CommunityMuted) }
+            val desktop = platformKind == PlatformKind.DESKTOP
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(state = listState, userScrollEnabled = active,
+                    modifier = Modifier.align(Alignment.TopCenter).widthIn(max = 756.dp).fillMaxSize().motionInputGate(active),
+                    contentPadding = PaddingValues(start = 16.dp, end = if (desktop) 28.dp else 16.dp, bottom = bottomPadding)) {
+                    items(clusters, key = { it.key }) { cluster ->
+                        CuratedReviewCluster(mangaId, cluster, sourcesById, hidePromotions, loadReplies)
+                    }
+                    item("mixed-footer") {
+                        Column(Modifier.fillMaxWidth()) {
+                            when {
+                                relevantBusy -> SmallLoading()
+                                clusters.isEmpty() && unavailableSources.isNotEmpty() ->
+                                    CommentUnavailableNotice(unavailableSources, allUnavailable, onRetry)
+                                clusters.isEmpty() -> Text(if (selectedSource != null || longOnly) "暂没有符合筛选的评论" else "还没有可显示的评论",
+                                    color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 18.dp))
+                                unavailableSources.isNotEmpty() -> CommentUnavailableNotice(unavailableSources, allUnavailable, onRetry)
+                            }
+                            if (clusters.isEmpty() && nextSource != null && !relevantBusy) {
+                                TextButton(onClick = { onMore(nextSource.id) }) { Text("继续查找评论", color = CommunityMuted) }
+                            }
                         }
                     }
                 }
+                if (desktop && active) DesktopVerticalScrollbar(listState, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
             }
         }
     }
@@ -461,7 +468,7 @@ internal fun CommentSourceBadge(sourceId: String) {
         else -> dev.mangaflow.data.ReviewProviders.find(sourceId)?.mark ?: providerName(sourceId)
     }
     Text(name, modifier = Modifier.clip(RoundedCornerShape(5.dp))
-        .background(accent.copy(alpha = .12f)).padding(horizontal = 4.dp, vertical = 1.dp)
+        .background(accent.copy(alpha = .085f)).padding(horizontal = 4.dp, vertical = 1.dp)
         .semantics { contentDescription = "评论来自" + providerName(sourceId) },
         color = accent, fontSize = 10.sp, lineHeight = 13.sp,
         fontWeight = FontWeight.Medium, maxLines = 1)
@@ -512,6 +519,7 @@ private fun CommentContent(
     comfortable: Boolean = false,
     compactReply: Boolean = false,
 ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
     val text = review.body.ifBlank { review.summary }.trim()
     val reviewHeading = review.summary.trim().takeIf {
         review.kind == ReviewKind.REVIEW && review.body.isNotBlank() && it.isNotBlank() && it != text
@@ -537,15 +545,35 @@ private fun CommentContent(
     val hasForeignText = remember(translationText) { hasForeignCommentText(translationText) }
     val canTranslate = revealed && hasForeignText
     val contentInteraction = remember(review.id, sourceId) { MutableInteractionSource() }
+    val context = LocalContext.current
+    val actions = if (desktop && revealed && translationText.isNotBlank()) listOf(
+        DesktopMenuAction("复制评论原文") {
+            val copied = copyText(context, "评论原文", translationText)
+            showPlatformMessage(context, if (copied) "已复制评论原文" else "暂时无法复制评论")
+        },
+    ) else emptyList()
     Row(modifier.fillMaxWidth().animateContentSize(
         animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap())
-        .then(if (expandable) Modifier.clickable(interactionSource = contentInteraction, indication = null,
+        .then(if (expandable && !desktop) Modifier.clickable(interactionSource = contentInteraction, indication = null,
             role = Role.Button, onClickLabel = if (expanded) "收起评论" else "展开评论", onClick = toggleContent)
             .motionPress(contentInteraction, pressedScale = .99f) else Modifier),
         horizontalArrangement = Arrangement.spacedBy(if (comfortable) 10.dp else 8.dp)) {
         CommentAvatar(review, foreground, size = if (compactReply) 24.dp else if (comfortable) 32.dp else 28.dp)
         Column(Modifier.weight(1f)) {
-            Row(Modifier.fillMaxWidth().heightIn(min = 18.dp), verticalAlignment = Alignment.CenterVertically,
+            if (desktop) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(review.author.ifBlank { "未署名" }, Modifier.align(Alignment.CenterVertically),
+                        color = foreground, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (sourceId != null) Box(Modifier.align(Alignment.CenterVertically)) { CommentSourceBadge(sourceId) }
+                    if (review.date.isNotBlank()) Text(compactCommentDate(review.date),
+                        Modifier.align(Alignment.CenterVertically).semantics { contentDescription = review.date },
+                        color = muted, style = mangaMetricValueStyle(12.sp, 18.sp))
+                }
+                if (canTranslate) CommentTranslationAction(translationText, muted)
+                if (actions.isNotEmpty()) DesktopMoreButton(actions, "评论操作")
+            } else Row(Modifier.fillMaxWidth().heightIn(min = 18.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(review.author, color = foreground, fontSize = if (comfortable) 14.sp else 13.sp,
                     fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -577,28 +605,42 @@ private fun CommentContent(
                     Icon(Icons.Outlined.ChevronRight, null, tint = muted, modifier = Modifier.size(15.dp))
                 }
             } else {
-                if (reviewHeading != null) {
-                    Text(reviewHeading, fontFamily = mangaFontFamily(MangaFontScene.READING), color = foreground,
-                        fontSize = if (comfortable) 18.sp else 15.sp, lineHeight = if (comfortable) 25.sp else 22.sp,
-                        fontWeight = FontWeight.SemiBold, maxLines = if (expanded) Int.MAX_VALUE else 2,
-                        overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 5.dp))
+                val body: @Composable () -> Unit = {
+                    Column {
+                        if (reviewHeading != null) {
+                            Text(reviewHeading, fontFamily = mangaFontFamily(MangaFontScene.READING), color = foreground,
+                                fontSize = if (comfortable) 18.sp else 15.sp, lineHeight = if (comfortable) 25.sp else 22.sp,
+                                fontWeight = FontWeight.SemiBold, maxLines = if (expanded) Int.MAX_VALUE else 2,
+                                overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 5.dp))
+                        }
+                        Text(text, fontFamily = mangaFontFamily(MangaFontScene.READING), color = foreground.copy(alpha = .92f),
+                            fontSize = if (comfortable) 16.sp else 14.sp, lineHeight = if (comfortable) 27.sp else 22.sp,
+                            maxLines = if (expanded) Int.MAX_VALUE else if (comfortable) {
+                                if (review.kind == ReviewKind.REVIEW) 5 else 4
+                            } else 3, overflow = TextOverflow.Ellipsis,
+                            onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow })
+                    }
                 }
-                Text(text, fontFamily = mangaFontFamily(MangaFontScene.READING), color = foreground.copy(alpha = .92f),
-                    fontSize = if (comfortable) 16.sp else 14.sp, lineHeight = if (comfortable) 27.sp else 22.sp,
-                    maxLines = if (expanded) Int.MAX_VALUE else if (comfortable) {
-                        if (review.kind == ReviewKind.REVIEW) 5 else 4
-                    } else 3, overflow = TextOverflow.Ellipsis,
-                    onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow })
+                if (desktop) SelectionContainer { body() } else body()
             }
             val hasFeedback = (review.upVotes ?: 0) > 0 || (review.downVotes ?: 0) > 0 ||
-                (revealed && conceal) ||
+                (revealed && conceal) || (desktop && expandable) ||
                 (showReplyCount && (review.replyCount ?: 0) > 0)
             if (hasFeedback) Row(Modifier.fillMaxWidth().padding(top = 2.dp),
                 verticalAlignment = Alignment.Bottom) {
                 if (hasFeedback) FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (conceal && revealed) TextButton(onClick = toggleContent,
-                        contentPadding = PaddingValues(end = 12.dp)) {
-                        Text(if (review.kind == ReviewKind.REVIEW) "收起长评" else "隐藏剧透", color = muted, fontSize = 11.sp)
+                    if ((conceal && revealed) || (desktop && expandable)) {
+                        val label = when {
+                            !expanded -> "展开全文"
+                            review.spoiler -> "隐藏剧透"
+                            review.kind == ReviewKind.REVIEW -> "收起长评"
+                            else -> "收起全文"
+                        }
+                        TextButton(onClick = toggleContent, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                            Text(label, color = foreground, fontSize = 12.sp)
+                            Icon(if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
+                                null, Modifier.size(15.dp), tint = muted)
+                        }
                     }
                     review.upVotes?.takeIf { it > 0 }?.let {
                         Text(mangaNumberText("${review.positiveVoteLabel} $it"), color = muted, fontSize = 12.sp,
@@ -630,9 +672,17 @@ internal fun CommentAvatar(review: MangaReview, foreground: Color, size: Dp = 28
     val request = remember(review.avatarUrl, context) {
         ImageRequest.Builder(imagePlatformContext(context)).data(review.avatarUrl).size(88).crossfade(100).build()
     }
-    Box(Modifier.size(size).clip(CircleShape).background(foreground.copy(alpha = .075f))
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val colors = MaterialTheme.colorScheme
+    val tone = if (desktop) lerp(foreground, when (review.author.hashCode().ushr(1) % 4) {
+        0 -> colors.primary
+        1 -> colors.tertiary
+        2 -> colors.secondary
+        else -> foreground
+    }, .44f) else foreground
+    Box(Modifier.size(size).clip(CircleShape).background(tone.copy(alpha = if (desktop) .12f else .075f))
         .clearAndSetSemantics {}, contentAlignment = Alignment.Center) {
-        Text(initial, color = foreground.copy(alpha = .55f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        Text(initial, color = tone.copy(alpha = if (desktop) .85f else .55f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
         if (review.avatarUrl.isNotBlank() && !failed) {
             AsyncImage(request, contentDescription = null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(), onError = { failed = true })
@@ -730,7 +780,7 @@ private fun CommentReplies(
                 busy = false
             }
         }).motionPress(interaction, pressedScale = .98f)
-        .heightIn(min = 28.dp).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        .heightIn(min = if (platformKind == PlatformKind.DESKTOP) 34.dp else 28.dp).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(if (expanded) "收起回复" else review.replyCount?.let { "$it 条回复" } ?: "查看回复",
             color = muted, fontSize = 12.sp, lineHeight = 16.sp)
         Spacer(Modifier.width(4.dp))

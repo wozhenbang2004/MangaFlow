@@ -45,8 +45,21 @@ internal fun AnimePlaybackPanel(
     onDismiss: () -> Unit,
     onClosed: () -> Unit,
     content: @Composable () -> Unit,
+) = AnimePlaybackPanel(visible, overVideo, artwork, onDismiss, onClosed, 456.dp, onDismiss, content)
+
+@Composable
+internal fun AnimePlaybackPanel(
+    visible: Boolean,
+    overVideo: Boolean,
+    artwork: HazeState?,
+    onDismiss: () -> Unit,
+    onClosed: () -> Unit,
+    maximumWidth: Dp,
+    onWindowBack: () -> Unit,
+    content: @Composable () -> Unit,
 ) {
-    EnhancementPanelHost(visible, artwork, onDismiss, onClosed, maximumWidth = 456.dp, playbackOverlay = true,
+    EnhancementPanelHost(visible, artwork, onDismiss, onClosed, maximumWidth = maximumWidth,
+        playbackOverlay = true, onWindowBack = onWindowBack,
         surface = { modifier, body ->
             AnimePlaybackSurface(artwork.takeIf { overVideo }, modifier, overVideo = overVideo,
                 panel = true, cornerRadius = 24.dp, content = body)

@@ -1,10 +1,13 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -94,11 +97,14 @@ internal fun AnimeTagPicker(controller: AnimeController, provider: AnimeDiscover
                     Text("添加「$literal」标签", maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
                 if (nextOffset != null && error == null) {
-                    AnimeQuietLabel("已载入 ${catalogue.size} 个标签，可继续载入更多")
-                    MotionTextButton(onClick = {
-                        if (active && !loading) nextOffset?.let { requestOffset = it }
-                    }, enabled = active && !loading, modifier = Modifier.heightIn(min = 44.dp)) {
-                        Text(if (loading) "正在载入标签" else "载入更多标签")
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AnimeQuietLabel("已载入 ${catalogue.size} 个标签", Modifier.weight(1f))
+                        MotionTextButton(onClick = {
+                            if (active && !loading) nextOffset?.let { requestOffset = it }
+                        }, enabled = active && !loading, modifier = Modifier.heightIn(min = 44.dp)) {
+                            Text(if (loading) "正在载入" else "更多标签")
+                        }
                     }
                 }
             })

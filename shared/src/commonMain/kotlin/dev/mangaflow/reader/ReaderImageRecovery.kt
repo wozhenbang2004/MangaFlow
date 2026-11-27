@@ -5,6 +5,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,6 +41,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -60,6 +64,8 @@ import dev.mangaflow.data.sources.JmImageRefreshRequired
 import dev.mangaflow.storage.DownloadStorageException
 import dev.mangaflow.storage.DownloadPhase
 import dev.mangaflow.platform.wallTimeMillis
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.storage.StorageLock
 import dev.mangaflow.storage.DownloadProgress
@@ -256,12 +262,17 @@ internal fun ReaderImageRecovery(
     }
     val hasMore = alternatives.size > direct.size
     val expanded = !pending || slow
+    val desktop = platformKind == PlatformKind.DESKTOP
     var moreAnchor by remember { mutableStateOf<Rect?>(null) }
-    Column(modifier.widthIn(max = 300.dp)
+    Column(modifier.widthIn(max = if (desktop) 420.dp else 300.dp)
         .animateContentSize(tween(if (LocalMotionEnabled.current) MangaMotion.Quick else 0))
         .padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
         val liveTransfer = transferProgress?.takeIf { pending && attempt.acceptsResult }
+        val byteFraction = if (desktop && index != null && liveTransfer?.phase == DownloadPhase.TRANSFERRING) {
+            liveTransfer.expectedBytes?.takeIf { it > 0L && liveTransfer.receivedBytes in 0L..it }
+                ?.let { (liveTransfer.receivedBytes.toDouble() / it).toFloat() }
+        } else null
         val transferStage = liveTransfer?.let { transfer ->
             val expected = transfer.expectedBytes?.takeIf { it > 0L && it >= transfer.receivedBytes }
             transfer.phase.label + if (transfer.receivedBytes > 0L)
@@ -269,7 +280,7 @@ internal fun ReaderImageRecovery(
             else ""
         } ?: stage
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            if (pending) MotionBusyIndicator(Modifier.size(14.dp), color = foreground.copy(alpha = .65f), strokeWidth = 1.5.dp)
+            if (pending && byteFraction == null) MotionBusyIndicator(Modifier.size(14.dp), color = foreground.copy(alpha = .65f), strokeWidth = 1.5.dp)
             Text(if (pending) transferStage else readerPageErrorLabel(failure),
                 fontSize = 14.sp, fontWeight = FontWeight.Medium, color = foreground, maxLines = 2)
         }
@@ -281,6 +292,10 @@ internal fun ReaderImageRecovery(
                 overflow = TextOverflow.Ellipsis)
             if (pending) ReaderWaitCaption(startedAt, true, foreground.copy(alpha = .64f))
         }
+        if (byteFraction != null) LinearProgressIndicator(progress = { byteFraction },
+            modifier = Modifier.width(188.dp).padding(vertical = 5.dp).height(3.dp)
+                .semantics { contentDescription = "当前页传输进度" },
+            color = foreground.copy(alpha = .72f), trackColor = foreground.copy(alpha = .11f))
         FlowRow(horizontalArrangement = Arrangement.Center, verticalArrangement = Arrangement.spacedBy(2.dp)) {
             if (expanded) MotionTextButton(onClick = onRetry,
                 colors = ButtonDefaults.textButtonColors(containerColor = foreground.copy(alpha = .08f))) {
@@ -295,10 +310,18 @@ internal fun ReaderImageRecovery(
                     Text("补此页", fontSize = 12.sp, color = foreground)
                 }
             MotionTextButton(onClick = onControls) {
-                Icon(Icons.Outlined.Tune, "显示阅读工具", Modifier.size(16.dp), tint = foreground)
+                Icon(Icons.Outlined.Tune, if (desktop) null else "显示阅读工具", Modifier.size(16.dp), tint = foreground)
+                if (desktop) {
+                    Spacer(Modifier.width(5.dp))
+                    Text("阅读工具", fontSize = 12.sp, color = foreground)
+                }
             }
             if (pending) MotionTextButton(onClick = onStop) {
-                Icon(Icons.Outlined.Close, "停止等待", Modifier.size(16.dp), tint = foreground.copy(alpha = .65f))
+                Icon(Icons.Outlined.Close, if (desktop) null else "停止等待", Modifier.size(16.dp), tint = foreground.copy(alpha = .65f))
+                if (desktop) {
+                    Spacer(Modifier.width(5.dp))
+                    Text("停止等待", fontSize = 12.sp, color = foreground)
+                }
             }
         }
         if (expanded && alternatives.isNotEmpty()) {

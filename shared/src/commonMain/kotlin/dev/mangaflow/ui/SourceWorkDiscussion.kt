@@ -14,6 +14,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import androidx.compose.ui.platform.LocalDensity
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaReview
 import dev.mangaflow.data.ReviewPage
@@ -145,69 +148,78 @@ internal fun SourceCapabilityComments(
         if (!lane.initialized && lane.failure == null) load(0)
     }
     Column(modifier.motionInputGate(active)) {
-        if (works.size > 1) MotionTabs(
-            selected = works.indexOf(work), labels = works.map { candidate ->
+        val desktop = platformKind == PlatformKind.DESKTOP
+        if (works.size > 1) BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+            val labels = works.map { candidate ->
                 if (works.count { it.source.id == candidate.source.id } == 1) candidate.source.name
                 else "${candidate.source.name} · ${candidate.manga.title}"
-            },
-            onSelect = { index -> if (active) selected = works[index].manga.id },
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).horizontalScroll(rememberScrollState()),
-            controlHeight = 44.dp, compact = true, treatment = MotionTabTreatment.Underline,
-        )
+            }
+            val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+            val width = maxWidth.coerceAtLeast(92.dp * fontScale * labels.size)
+            Box(Modifier.horizontalScroll(rememberScrollState())) {
+                MotionTabs(selected = works.indexOf(work), labels = labels,
+                    onSelect = { index -> if (active) selected = works[index].manga.id },
+                    modifier = Modifier.width(width), controlHeight = 44.dp, compact = true,
+                    treatment = MotionTabTreatment.Underline, tooltips = labels)
+            }
+        }
         val source = remember(work, lane.session) {
             ReviewSource(provider.id, provider.name, ReviewStatus.READY, "", subjectId = manga.id,
                 supportsReplies = true)
         }
-        LazyColumn(Modifier.fillMaxSize(), state = lane.position, userScrollEnabled = active,
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = bottomPadding + 16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            item(key = "work-comments-scope") {
-                Text(if (works.size == 1) "${provider.name} · 作品评论" else "作品评论",
-                    Modifier.padding(top = 4.dp), style = MaterialTheme.typography.labelMedium,
-                    color = colors.onSurfaceVariant)
-            }
-            if (lane.rows.isEmpty() && (lane.loading || !lane.initialized && lane.failure == null))
-                item(key = "work-comments-loading") { QuietLoading("正在读取作品评论…") }
-            if (lane.initialized && lane.rows.isEmpty() && !lane.loading && lane.failure == null)
-                item(key = "work-comments-empty") { Text("暂无作品评论", style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant) }
-            items(lane.rows, key = { "comment:${it.id}" }) { row ->
-                key(identity, lane.session) {
-                    CommunityDiscussionComment(source, row.toReview(work.pagedReplies), loadReplies = { _, review, page ->
-                        val owner = lane.session
-                        if (owner == null || repository.sourceProbeIdentity(provider.id) != owner || review.id != row.id) {
-                            ReviewPage(emptyList(), error = "站点账号已变化，请重新打开评论。")
-                        } else if (row.inlineReplies.isNotEmpty()) {
-                            ReviewPage(if (page == 0) row.inlineReplies.filter { it.id.isNotBlank() }.map { it.toReview() } else emptyList())
-                        } else if (work.pagedReplies) {
-                            try {
-                                val result = repository.sourceCommentReplies(provider.id, manga.id, row.id, page)
-                                currentCoroutineContext().ensureActive()
-                                if (repository.sourceProbeIdentity(provider.id) != owner)
-                                    ReviewPage(emptyList(), error = "站点账号已变化，请重新打开评论。")
-                                else ReviewPage(result.items.filter { it.id.isNotBlank() }.map { it.toReview() },
-                                    nextPage = (page + 1).takeIf { result.hasMore })
-                            } catch (cancel: CancellationException) { throw cancel }
-                            catch (error: Exception) {
-                                ReviewPage(emptyList(), error = sourceFailureSummary(SourceStage.COMMENTS, error).message)
-                            }
-                        } else ReviewPage(emptyList())
-                    }, foreground = colors.onSurface, muted = colors.onSurfaceVariant, comfortable = true)
-                }
-            }
-            lane.failure?.let { (failedPage, message) -> item(key = "work-comments-error") {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(Modifier.fillMaxSize(), state = lane.position, userScrollEnabled = active,
+                contentPadding = PaddingValues(start = 20.dp, end = if (desktop) 28.dp else 20.dp, bottom = bottomPadding + 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                item(key = "work-comments-scope") {
+                    Text(if (works.size == 1) "${provider.name} · 作品评论" else "作品评论",
+                        Modifier.padding(top = 4.dp), style = MaterialTheme.typography.labelMedium,
                         color = colors.onSurfaceVariant)
-                    MotionTextButton(onClick = { if (lane.needsAccount) onAccount(provider.id) else load(failedPage) },
-                        enabled = active && !lane.loading) { Text(if (lane.needsAccount) "登录" else "重试") }
                 }
-            } }
-            lane.nextPage?.takeIf { lane.failure == null }?.let { page -> item(key = "work-comments-more") {
-                MotionTextButton(onClick = { load(page) }, enabled = active && !lane.loading,
-                    modifier = Modifier.fillMaxWidth()) { Text(if (lane.loading) "正在读取…" else "更多评论") }
-            } }
+                if (lane.rows.isEmpty() && (lane.loading || !lane.initialized && lane.failure == null))
+                    item(key = "work-comments-loading") { QuietLoading("正在读取作品评论…") }
+                if (lane.initialized && lane.rows.isEmpty() && !lane.loading && lane.failure == null)
+                    item(key = "work-comments-empty") { Text("暂无作品评论", style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant) }
+                items(lane.rows, key = { "comment:${it.id}" }) { row ->
+                    key(identity, lane.session) {
+                        CommunityDiscussionComment(source, row.toReview(work.pagedReplies), loadReplies = { _, review, page ->
+                            val owner = lane.session
+                            if (owner == null || repository.sourceProbeIdentity(provider.id) != owner || review.id != row.id) {
+                                ReviewPage(emptyList(), error = "站点账号已变化，请重新打开评论。")
+                            } else if (row.inlineReplies.isNotEmpty()) {
+                                ReviewPage(if (page == 0) row.inlineReplies.filter { it.id.isNotBlank() }.map { it.toReview() } else emptyList())
+                            } else if (work.pagedReplies) {
+                                try {
+                                    val result = repository.sourceCommentReplies(provider.id, manga.id, row.id, page)
+                                    currentCoroutineContext().ensureActive()
+                                    if (repository.sourceProbeIdentity(provider.id) != owner)
+                                        ReviewPage(emptyList(), error = "站点账号已变化，请重新打开评论。")
+                                    else ReviewPage(result.items.filter { it.id.isNotBlank() }.map { it.toReview() },
+                                        nextPage = (page + 1).takeIf { result.hasMore })
+                                } catch (cancel: CancellationException) { throw cancel }
+                                catch (error: Exception) {
+                                    ReviewPage(emptyList(), error = sourceFailureSummary(SourceStage.COMMENTS, error).message)
+                                }
+                            } else ReviewPage(emptyList())
+                        }, foreground = colors.onSurface, muted = colors.onSurfaceVariant, comfortable = true)
+                    }
+                }
+                lane.failure?.let { (failedPage, message) -> item(key = "work-comments-error") {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant)
+                        MotionTextButton(onClick = { if (lane.needsAccount) onAccount(provider.id) else load(failedPage) },
+                            enabled = active && !lane.loading) { Text(if (lane.needsAccount) "登录" else "重试") }
+                    }
+                } }
+                lane.nextPage?.takeIf { lane.failure == null }?.let { page -> item(key = "work-comments-more") {
+                    MotionTextButton(onClick = { load(page) }, enabled = active && !lane.loading,
+                        modifier = Modifier.fillMaxWidth()) { Text(if (lane.loading) "正在读取…" else "更多评论") }
+                } }
+            }
+            if (desktop && active) DesktopVerticalScrollbar(lane.position, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
         }
     }
 }

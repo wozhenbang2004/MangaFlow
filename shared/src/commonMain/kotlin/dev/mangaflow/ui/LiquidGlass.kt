@@ -50,6 +50,8 @@ import dev.chrisbanes.haze.glass.RefractionProfile
 import dev.chrisbanes.haze.glass.hazeGlass
 import dev.chrisbanes.haze.glass.hazeGlassContainer
 import dev.chrisbanes.haze.glass.material3.material3
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.glass.discoveryGlassShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -129,6 +131,8 @@ internal fun LiquidGlassSurface(
     // Declaring hover/press installs Haze's non-consuming, node-local pointer observer.
     // External sources add focus/keyboard/ancestor presses; raw touch needs no second detector.
     val interactive = liquid && motion && !tabLens && (trackPointer || interactionSource != null)
+    val pointerLens = platformKind == PlatformKind.DESKTOP && (toolbar || clear) &&
+        !accessibility.increaseContrast && !accessibility.reduceTransparency
     val expansion = rememberUpdatedState(materialExpansion)
     val lensDirection = if (tabLens) rememberUpdatedState(lensTravel) else null
     // Popups/dialogs, artwork-specific samples and nested glass controls need the
@@ -143,7 +147,7 @@ internal fun LiquidGlassSurface(
     }
     val material = if (liquid) {
         val themedGlass = (if (clear) GlassStyle.clear else GlassStyle.regular).material3(tintColor)
-        val glassStyle = remember(themedGlass, shape, role, interactive, light, accessibility, protectArtworkInk, compactHeader) {
+        val glassStyle = remember(themedGlass, shape, role, interactive, light, accessibility, protectArtworkInk, compactHeader, pointerLens) {
             themedGlass.then {
                 shape(shape)
                 val progress = expansion.value().coerceIn(0f, 1f)
@@ -298,11 +302,32 @@ internal fun LiquidGlassSurface(
                 if (interactive) {
                     val touchLens = (role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.SEARCH || role == GlassSurfaceRole.CONTROL) &&
                         !accessibility.reduceTransparency && !accessibility.increaseContrast
-                    interactionLightRadiusFraction(if (touchLens) .98f else if (clear) .76f else .66f)
-                    hovered { animate(tween(MangaMotion.Quick), tween(MangaMotion.Quick)) { lightingIntensity(.28f) } }
+                    interactionLightRadiusFraction(when {
+                        pointerLens && toolbar -> .34f
+                        pointerLens -> .56f
+                        touchLens -> .98f
+                        clear -> .76f
+                        else -> .66f
+                    })
+                    hovered {
+                        animate(tween(MangaMotion.Quick), tween(MangaMotion.Content)) {
+                            lightingIntensity(if (pointerLens) .36f else .28f)
+                            if (pointerLens) refractionMultiplier(if (clear) 1.09f else 1.06f)
+                        }
+                    }
                     focused { animate(tween(MangaMotion.Quick), tween(MangaMotion.Content)) { lightingIntensity(.36f) } }
                     pressed {
-                        if (touchLens) {
+                        if (pointerLens) {
+                            // Keep long mouse-driven toolbars anchored. The material catches the
+                            // pointer and recovers its depth; the text and hit targets stay still.
+                            animate(glassPressIn, tween(MangaMotion.Quick)) {
+                                lightingIntensity(if (light) .60f else .50f)
+                            }
+                            animate(glassPressIn, glassSettle) {
+                                refractionMultiplier(if (clear) 1.34f else 1.24f)
+                                scale(scaleX = if (toolbar) 1f else .989f, scaleY = if (toolbar) .982f else .962f)
+                            }
+                        } else if (touchLens) {
                             // The contact light fades first; the refracted edge and material then settle.
                             animate(glassPressIn, tween(MangaMotion.Quick)) {
                                 lightingIntensity(if (light) .82f else .70f)

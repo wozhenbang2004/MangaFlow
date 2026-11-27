@@ -14,8 +14,10 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.BoxWithConstraintsScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.absoluteOffset
@@ -25,11 +27,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Refresh
@@ -54,15 +60,26 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.isSpecified
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.ViewConfiguration
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
@@ -87,6 +104,9 @@ import dev.chrisbanes.haze.HazeSourceRetention
 import dev.chrisbanes.haze.blur.HazeBlurStyle
 import dev.chrisbanes.haze.blur.HazeColorEffect
 import dev.chrisbanes.haze.blur.hazeBlur
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -111,6 +131,8 @@ private object SourceOrbitWindowOrigin : PopupPositionProvider {
 @Composable
 internal fun ChapterSourceOrbit(
     identity: String,
+    title: String,
+    chapterTitle: String,
     anchor: Rect?,
     backdrop: HazeState,
     count: Int,
@@ -121,8 +143,9 @@ internal fun ChapterSourceOrbit(
     onClosingChange: (Boolean) -> Unit = {},
     hasStatus: Boolean = false,
     status: @Composable (active: Boolean) -> Unit = {},
-    item: @Composable (index: Int, modifier: Modifier, dismiss: () -> Unit, reveal: () -> Float, active: Boolean) -> Unit,
+    sourceItem: @Composable (index: Int, modifier: Modifier, dismiss: () -> Unit, reveal: () -> Float, active: Boolean) -> Unit,
 ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
     val sourceAnchor = remember(identity) { anchor }
     val motion = LocalMotionEnabled.current
     val feedback = rememberFeelFeedback()
@@ -188,7 +211,9 @@ internal fun ChapterSourceOrbit(
         Box(Modifier.fillMaxSize()) {
             // This sibling owns the full-window material; the source choices stay sharp above it.
             Box(Modifier.fillMaxSize()
-                .hazeBlur(input = blurInput, style = blurStyle, expandLayerBounds = false)
+                .then(if (desktop) Modifier.drawBehind { drawRect(scrim.copy(alpha = .065f * progress.value.coerceIn(0f, 1f))) }
+                    else Modifier.hazeBlur(input = blurInput, style = blurStyle, expandLayerBounds = false))
+                .focusProperties { canFocus = false }
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
                     onClickLabel = "收起来源", onClick = close))
             BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding()
@@ -196,6 +221,12 @@ internal fun ChapterSourceOrbit(
                     val position = it.localToScreen(Offset.Zero)
                     if (position.isSpecified) origin = position
                 }.semantics { dismiss { close(); true } }) {
+                if (desktop) {
+                    DesktopChapterSources(identity, title, chapterTitle, sourceAnchor?.translate(-(origin ?: Offset.Zero)),
+                        backdrop, count, canInteract, close, { if (origin == null) 0f else progress.value },
+                        if (hasStatus) status else null, sourceItem)
+                    return@BoxWithConstraints
+                }
                 val width = with(density) { maxWidth.toPx() }
                 val height = with(density) { maxHeight.toPx() }
                 val edge = with(density) { 8.dp.toPx() }
@@ -276,7 +307,7 @@ internal fun ChapterSourceOrbit(
                                     (4f * p * (1f - p) * spread() + (1f - turn) * .8f)
                                 alpha = .55f + .45f * turn
                             }
-                        if (slot < visibleCount) item(first + slot, modifier, close, reveal, canInteract)
+                        if (slot < visibleCount) sourceItem(first + slot, modifier, close, reveal, canInteract)
                         else {
                             val interaction = remember { MutableInteractionSource() }
                             Row(modifier.clip(RoundedCornerShape(10.dp))
@@ -312,6 +343,85 @@ internal fun ChapterSourceOrbit(
                         role = Role.Button, onClickLabel = if (closing) "展开来源" else "收起来源",
                         onClick = { if (closing) setClosing(false) else close() })
                     .semantics { contentDescription = if (closing) "展开来源" else "收起来源" })
+            }
+        }
+    }
+}
+
+@Composable
+private fun BoxWithConstraintsScope.DesktopChapterSources(
+    identity: String, title: String, chapterTitle: String, target: Rect?, backdrop: HazeState, count: Int,
+    canInteract: Boolean, close: () -> Unit, reveal: () -> Float, status: (@Composable (Boolean) -> Unit)?,
+    sourceItem: @Composable (Int, Modifier, () -> Unit, () -> Float, Boolean) -> Unit,
+) {
+    val density = LocalDensity.current
+    val availableWidth = (maxWidth - 20.dp).coerceAtLeast(1.dp)
+    val panelWidth = minOf(380.dp * density.fontScale.coerceIn(1f, 1.28f), availableWidth)
+    val availableHeight = (maxHeight - 20.dp).coerceAtLeast(1.dp)
+    val panelMaxHeight = minOf(availableHeight, 570.dp * density.fontScale.coerceAtLeast(1f))
+    val viewport = constraints
+    val panelPixels = with(density) { panelWidth.roundToPx() }
+    val inset = with(density) { 10.dp.roundToPx() }
+    var measuredHeight by remember(identity) { mutableIntStateOf(0) }
+    val left = if (target == null) (viewport.maxWidth - panelPixels) / 2 else when {
+        target.right + inset + panelPixels <= viewport.maxWidth - inset -> target.right.roundToInt() + inset
+        target.left - inset - panelPixels >= inset -> target.left.roundToInt() - inset - panelPixels
+        else -> target.center.x.roundToInt() - panelPixels / 2
+    }
+    val top = target?.center?.y?.roundToInt()?.minus(measuredHeight / 2)
+        ?: ((viewport.maxHeight - measuredHeight) / 2)
+    val focus = LocalFocusManager.current
+    val state = rememberLazyListState()
+    val colors = MaterialTheme.colorScheme
+    LiquidGlassSurface(backdrop, Modifier.absoluteOffset {
+        IntOffset(left.coerceIn(inset, (viewport.maxWidth - inset - panelPixels).coerceAtLeast(inset)),
+            top.coerceIn(inset, (viewport.maxHeight - inset - measuredHeight).coerceAtLeast(inset)))
+    }.width(panelWidth).heightIn(max = panelMaxHeight)
+        .onGloballyPositioned { measuredHeight = it.size.height }
+        .graphicsLayer {
+            val p = reveal().coerceIn(0f, 1f)
+            alpha = if (measuredHeight == 0) 0f else p
+            scaleX = .97f + .03f * p
+            scaleY = scaleX
+            translationY = (1f - p) * -6.dp.toPx()
+        }.pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } }
+        .semantics { paneTitle = title }
+        .onPreviewKeyEvent { event ->
+            if (!canInteract || event.type != KeyEventType.KeyDown) false
+            else when (event.key) {
+                Key.DirectionUp -> focus.moveFocus(FocusDirection.Previous)
+                Key.DirectionDown -> focus.moveFocus(FocusDirection.Next)
+                else -> false
+            }
+        }, cornerRadius = 20.dp, role = GlassSurfaceRole.PANEL, softCard = true) {
+        Box(Modifier.fillMaxWidth()) {
+            LazyColumn(state = state, modifier = Modifier.fillMaxWidth().motionInputGate(canInteract),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 10.dp, end = 16.dp,
+                    top = 8.dp, bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                item("heading") {
+                    Row(Modifier.fillMaxWidth().padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f).padding(vertical = 5.dp)) {
+                            Text(title, color = colors.onSurface, style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold)
+                            if (chapterTitle.isNotBlank()) Text(chapterTitle,
+                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        MotionIconButton(onClick = close, enabled = canInteract,
+                            modifier = Modifier.size(36.dp), tooltip = "关闭来源选择") {
+                            Icon(Icons.Outlined.Close, "关闭来源选择", Modifier.size(17.dp))
+                        }
+                    }
+                }
+                if (status != null) item("status") {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp)) { status(canInteract) }
+                }
+                items(count) { index ->
+                    sourceItem(index, Modifier.fillMaxWidth(), close, { 1f }, canInteract)
+                }
+            }
+            Box(Modifier.matchParentSize(), contentAlignment = Alignment.CenterEnd) {
+                DesktopVerticalScrollbar(state, Modifier.fillMaxHeight())
             }
         }
     }
@@ -355,6 +465,11 @@ internal fun ChapterSourceDisc(
     revealProgress: () -> Float = { 1f },
     onClick: () -> Unit,
 ) {
+    if (platformKind == PlatformKind.DESKTOP) {
+        DesktopChapterSourceOption(variant, modifier, selected, busy, enabled, details, secondary, entry,
+            resolution, resolutionActionEnabled, actionLabel, onClick)
+        return
+    }
     val interaction = remember(variant.storageId) { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
@@ -440,6 +555,70 @@ internal fun ChapterSourceDisc(
                             else -> "尺寸未知"
                         }, color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 14.sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DesktopChapterSourceOption(
+    variant: ChapterVariant, modifier: Modifier, selected: Boolean, busy: Boolean, enabled: Boolean,
+    details: String, secondary: String, entry: DownloadEntry?, resolution: ChapterResolutionState?,
+    resolutionActionEnabled: Boolean, actionLabel: String, onClick: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val interaction = remember(variant.storageId) { MutableInteractionSource() }
+    var inspect by remember(variant.storageId) { mutableStateOf(false) }
+    val metadata = listOfNotNull(secondary.takeIf(String::isNotBlank),
+        resolution?.takeIf { it.known }?.compactLabel,
+        "正在准备".takeIf { busy }).distinct().joinToString(" · ")
+    Column(modifier.clip(RoundedCornerShape(12.dp))
+        .background(colors.onSurface.copy(alpha = if (selected) .065f else .025f))) {
+        Row(Modifier.fillMaxWidth().padding(end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f).clip(RoundedCornerShape(10.dp))
+                .clickable(enabled = enabled, role = Role.Button, interactionSource = interaction, indication = null,
+                    onClickLabel = actionLabel, onClick = onClick)
+                .motionPress(interaction, enabled, pressedScale = .99f)
+                .semantics { stateDescription = listOfNotNull("当前来源".takeIf { selected },
+                    metadata.takeIf(String::isNotBlank)).joinToString("，") }
+                .heightIn(min = 54.dp).padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                    ChapterSourceLogo(variant.sourceId, variant.sourceName, Modifier.size(25.dp))
+                    if (entry != null) Box(Modifier.align(Alignment.BottomEnd).size(13.dp)
+                        .background(colors.surface, CircleShape), contentAlignment = Alignment.Center) {
+                        ChapterDownloadMark(entry, showDownload = false, size = 10.dp)
+                    }
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(variant.sourceName, color = colors.onSurface, style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (metadata.isNotBlank()) Text(mangaNumberText(metadata), color = colors.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                if (busy) MotionBusyIndicator(Modifier.size(15.dp), color = colors.primary, strokeWidth = 1.6.dp)
+                else if (selected) Icon(Icons.Outlined.Check, "当前来源", Modifier.size(16.dp), tint = colors.primary)
+            }
+            if (details.isNotBlank()) MotionIconButton(onClick = { inspect = !inspect },
+                modifier = Modifier.size(34.dp).semantics { stateDescription = if (inspect) "已展开" else "已收起" },
+                tooltip = if (inspect) "收起来源详情" else "查看来源详情") {
+                Icon(Icons.Outlined.Info, "来源详情", Modifier.size(17.dp), tint = if (inspect) colors.primary else colors.onSurfaceVariant)
+            }
+        }
+        CopyShelfReveal(inspect) {
+            Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(details, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                if (resolutionActionEnabled && resolution != null && (resolution.canMeasure || resolution.busy)) {
+                    dev.mangaflow.ui.motion.MotionTextButton(onClick = resolution.measure, enabled = !resolution.busy) {
+                        Text(when {
+                            resolution.busy -> "正在读取尺寸…"
+                            resolution.error != null -> "重试原图尺寸"
+                            resolution.known -> "重新读取原图尺寸"
+                            else -> "读取原图尺寸"
+                        })
                     }
                 }
             }

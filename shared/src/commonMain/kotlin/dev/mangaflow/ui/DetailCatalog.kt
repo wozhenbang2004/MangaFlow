@@ -175,6 +175,7 @@ internal fun DetailCatalog(
     onLocate: () -> Unit = {},
     onLocateSources: (() -> Unit)? = null,
     desktopFindRequest: Int = 0,
+    onBatchDownload: ((List<Chapter>) -> Unit)? = null,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
@@ -241,6 +242,19 @@ internal fun DetailCatalog(
                         Text("上次阅读", style = MaterialTheme.typography.labelMedium)
                     } else DetailAction(Icons.Outlined.MyLocation, "定位上次阅读",
                         enabled = active && !sourcePresent, onClick = onLocate)
+                }
+            }
+        }
+        if (desktop && downloadMode && onBatchDownload != null) {
+            val scope = remember(chapters, group, search, searchResults) {
+                if (searching) searchResults else if (group == null) chapters else chapters.filter { it.group == group }
+            }
+            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 14.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(if (searching) "搜索结果 · ${scope.size} 章" else "${group?.let(::chapterGroupLabel) ?: "全部章节"} · ${scope.size} 章",
+                    Modifier.weight(1f), color = DetailSecondary, style = MaterialTheme.typography.labelMedium)
+                TextButton(onClick = { onBatchDownload(scope) }, enabled = active && !sourcePresent && scope.isNotEmpty()) {
+                    Text("多选下载", style = MaterialTheme.typography.labelLarge)
                 }
             }
         }

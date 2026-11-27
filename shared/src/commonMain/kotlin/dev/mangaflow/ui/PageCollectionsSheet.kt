@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -45,6 +47,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +56,8 @@ import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,6 +80,7 @@ import dev.mangaflow.storage.PageCollection
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
 
 @Composable
@@ -89,15 +95,17 @@ internal fun PageCollectionsSheet(
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background, desktopWidth = 1050.dp) { dismiss ->
         Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Text("画面收藏", style = MaterialTheme.typography.titleLarge)
+            Text("画面收藏", modifier = Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
             Text(collections.size.toString(), modifier = Modifier.padding(start = 8.dp).weight(1f),
                 style = mangaMetricValueStyle(), color = colors.onSurfaceVariant)
             MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.Close, "关闭画面收藏", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
             }
         }
-        if (platformKind == PlatformKind.DESKTOP && collections.isNotEmpty()) {
-            DesktopPageGallery(collections, repository, onOpen = { onOpen(it); dismiss() }, onRemove = onRemove)
+        if (platformKind == PlatformKind.DESKTOP) {
+            if (collections.isEmpty()) CatalogueState("还没有收藏的画面", "在阅读器点爱心，可以保存当前单页或一整组跨页。",
+                Modifier.padding(horizontal = 14.dp))
+            else DesktopPageGallery(collections, repository, onOpen = { onOpen(it); dismiss() }, onRemove = onRemove)
         } else LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -121,7 +129,10 @@ internal fun PageCollectionsSheet(
     }
 }
 
+private enum class GalleryPageKind(val label: String) { ALL("全部"), SINGLE("单页"), SPREAD("跨页") }
+
 /** Single pages and real two-page spreads share a gallery in their saved order. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DesktopPageGallery(collections: List<PageCollection>, repository: MangaRepository,
     onOpen: (PageCollection) -> Unit, onRemove: (PageCollection) -> Unit) {
@@ -129,46 +140,102 @@ private fun DesktopPageGallery(collections: List<PageCollection>, repository: Ma
     val columns = MangaLayout.columns(window.width, 4, 210.dp * window.fontScale, 16.dp, 22.dp)
     val grid = rememberLazyGridState()
     val colors = MaterialTheme.colorScheme
-    Box(Modifier.fillMaxWidth().heightIn(max = (window.height - 64.dp).coerceIn(1.dp, 780.dp))) {
-        LazyVerticalGrid(GridCells.Fixed(columns), state = grid,
-            contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 5.dp, bottom = 20.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(17.dp)) {
-            items(collections, key = PageCollection::key,
-                span = { GridItemSpan(if (it.spread && columns > 1) 2 else 1) }) { entry ->
-                val actions = listOf(
-                    DesktopMenuAction("阅读收藏画面", icon = Icons.AutoMirrored.Outlined.MenuBook) { onOpen(entry) },
-                    DesktopMenuAction("移除画面收藏", icon = Icons.Outlined.DeleteOutline, destructive = true) { onRemove(entry) },
-                )
-                val interaction = remember(entry.key) { MutableInteractionSource() }
-                DesktopContextMenuArea(actions) {
-                    Column(Modifier.fillMaxWidth().clickable(interactionSource = interaction, indication = null,
-                        role = Role.Button, onClickLabel = "阅读收藏画面", onClick = { onOpen(entry) })
-                        .motionPress(interaction, pressedScale = .99f)) {
-                        val ratio = if (!entry.spread) 1.24f else if (columns > 1) 2.55f else 1.72f
-                        CollectionPreview(entry, repository, Modifier.fillMaxWidth().aspectRatio(ratio)
-                            .mangaCoverCard(8.dp, shadowRadius = 4.dp).background(colors.surfaceContainerLow))
-                        Row(Modifier.fillMaxWidth().padding(top = 7.dp),
-                            verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(entry.manga.title, style = MaterialTheme.typography.titleMedium,
-                                    fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis)
-                                Text(entry.chapter.title, style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                val date = remember(entry.savedAt) { if (entry.savedAt > 0L)
-                                    formatInstantMillis(entry.savedAt, "M月d日 HH:mm") else null }
-                                Text(mangaNumberText(listOfNotNull(pageCollectionLocation(entry), date).joinToString("  ·  ")),
-                                    style = mangaMetricValueStyle(), color = colors.onSurfaceVariant,
-                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+    var query by rememberSaveable { mutableStateOf("") }
+    var kind by rememberSaveable { mutableStateOf(GalleryPageKind.ALL) }
+    val term = remember(query) { normalizeNfkc(query).trim().lowercase() }
+    val searchText = remember(collections, term.isNotEmpty()) {
+        if (term.isEmpty()) emptyMap() else collections.associate { entry ->
+            entry.key to normalizeNfkc("${entry.manga.title} ${entry.chapter.title}").lowercase()
+        }
+    }
+    val filtering = term.isNotEmpty() || kind != GalleryPageKind.ALL
+    val matches = remember(collections, searchText, term, kind) {
+        if (!filtering) collections else {
+            val words = term.split(' ').filter(String::isNotEmpty)
+            collections.filter { entry ->
+                (kind == GalleryPageKind.ALL || entry.spread == (kind == GalleryPageKind.SPREAD)) &&
+                    words.all { it in searchText.getValue(entry.key) }
+            }
+        }
+    }
+    val hasBothKinds = remember(collections) { collections.any { it.spread } && collections.any { !it.spread } }
+    val boundedHeight = (window.height - 70.dp).coerceIn(1.dp, 780.dp)
+    val pinFilters = boundedHeight >= 330.dp * window.fontScale
+    val filters: @Composable () -> Unit = {
+        val wide = fitsDesktopIndex(window.width, 610.dp)
+        val showKinds = hasBothKinds || kind != GalleryPageKind.ALL
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Box(Modifier.fillMaxWidth(if (wide && showKinds) .52f else 1f).align(Alignment.CenterVertically)) {
+                CatalogueKeywordField(query, { query = it }, "查找作品或章节", true)
+            }
+            if (showKinds) DesktopFilterOptions("画面类型", GalleryPageKind.entries.map { it.label }, kind.ordinal, true) {
+                kind = GalleryPageKind.entries[it]
+            }
+        }
+    }
+    // Keep the editing field mounted. Only a different filter starts a new list position.
+    var previousTerm by remember { mutableStateOf(term) }
+    var previousKind by remember { mutableStateOf(kind) }
+    LaunchedEffect(term, kind) {
+        if (previousTerm != term || previousKind != kind) {
+            previousTerm = term
+            previousKind = kind
+            grid.scrollToItem(0)
+        }
+    }
+    Column(Modifier.fillMaxWidth().heightIn(max = boundedHeight)) {
+        if (pinFilters) Box(Modifier.fillMaxWidth().padding(start = 22.dp, end = 22.dp, bottom = 9.dp)) { filters() }
+        Box(Modifier.fillMaxWidth().weight(1f, fill = false)) {
+            LazyVerticalGrid(GridCells.Fixed(columns), state = grid,
+                contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 5.dp, bottom = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(17.dp)) {
+                if (!pinFilters) item(key = "gallery-filters", span = { GridItemSpan(maxLineSpan) }) { filters() }
+                if (matches.isEmpty()) item(key = "gallery-no-match", span = { GridItemSpan(maxLineSpan) }) {
+                    CatalogueState("没有符合筛选的画面", "可以换一个作品名、章节名，或查看全部收藏。") {
+                        MotionTextButton(onClick = { query = ""; kind = GalleryPageKind.ALL }) { Text("清除筛选") }
+                    }
+                } else if (filtering) item(key = "gallery-count", span = { GridItemSpan(maxLineSpan) }) {
+                    Text(mangaNumberText("显示 ${matches.size} / ${collections.size} 项"),
+                        style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                }
+                items(matches, key = PageCollection::key,
+                    span = { GridItemSpan(if (it.spread && columns > 1) 2 else 1) }) { entry ->
+                    val actions = listOf(
+                        DesktopMenuAction("阅读收藏画面", icon = Icons.AutoMirrored.Outlined.MenuBook) { onOpen(entry) },
+                        DesktopMenuAction("移除画面收藏", icon = Icons.Outlined.DeleteOutline, destructive = true) { onRemove(entry) },
+                    )
+                    val interaction = remember(entry.key) { MutableInteractionSource() }
+                    DesktopContextMenuArea(actions) {
+                        Column(Modifier.fillMaxWidth().clickable(interactionSource = interaction, indication = null,
+                            role = Role.Button, onClickLabel = "阅读收藏画面", onClick = { onOpen(entry) })
+                            .motionPress(interaction, pressedScale = .99f)) {
+                            val ratio = if (!entry.spread) 1.24f else if (columns > 1) 2.55f else 1.72f
+                            CollectionPreview(entry, repository, Modifier.fillMaxWidth().aspectRatio(ratio)
+                                .mangaCoverCard(8.dp, shadowRadius = 4.dp).background(colors.surfaceContainerLow))
+                            Row(Modifier.fillMaxWidth().padding(top = 7.dp),
+                                verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text(entry.manga.title, style = MaterialTheme.typography.titleMedium,
+                                        fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis)
+                                    Text(entry.chapter.title, style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    val date = remember(entry.savedAt) { if (entry.savedAt > 0L)
+                                        formatInstantMillis(entry.savedAt, "M月d日 HH:mm") else null }
+                                    Text(mangaNumberText(listOfNotNull(pageCollectionLocation(entry), date).joinToString("  ·  ")),
+                                        style = mangaMetricValueStyle(), color = colors.onSurfaceVariant,
+                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                                DesktopMoreButton(actions, "收藏画面操作")
                             }
-                            DesktopMoreButton(actions, "收藏画面操作")
                         }
                     }
                 }
             }
-        }
-        Box(Modifier.matchParentSize()) {
-            DesktopVerticalScrollbar(grid, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+            Box(Modifier.matchParentSize()) {
+                DesktopVerticalScrollbar(grid, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+            }
         }
     }
 }

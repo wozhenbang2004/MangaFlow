@@ -3,11 +3,24 @@ package dev.mangaflow.ui
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.ui.graphics.Color
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadPhase
 import dev.mangaflow.storage.DownloadStatus
 import kotlinx.coroutines.delay
+
+@Composable
+internal fun downloadStatusColor(status: DownloadStatus): Color {
+    val colors = mangaStatusColors()
+    return when (status) {
+        DownloadStatus.COMPLETED -> colors.success
+        DownloadStatus.RUNNING -> colors.activity
+        DownloadStatus.FAILED -> colors.error
+        DownloadStatus.WAITING, DownloadStatus.QUEUED -> colors.waiting
+        DownloadStatus.PAUSED -> colors.neutral
+    }
+}
 
 /** A visible row owns its clock; byte updates never restart a tab or a layout animation. */
 @Composable

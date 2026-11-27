@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -48,6 +50,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -68,6 +77,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.storage.WallpaperPcDevice
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.storage.createWallpaperPcClient
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -97,6 +108,7 @@ internal fun WallpaperPcSheet(
     var address by remember(client) { mutableStateOf("") }
     var paused by remember(client) { mutableStateOf(false) }
     val panelVisible by rememberUpdatedState(visible)
+    val desktop = platformKind == PlatformKind.DESKTOP
 
     DisposableEffect(client, lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
@@ -165,8 +177,24 @@ internal fun WallpaperPcSheet(
         paused = false
         client.discover()
     }
-    MotionDialog(visible = visible, onDismissRequest = dismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 624.dp) {
+    val returnToDevices = { target = null; pin = ""; client.disconnect(); client.discover() }
+    val useAddress = {
+        if (validPcAddress(address)) {
+            target = WallpaperPcDevice("manual:$address", address, address)
+            pin = ""
+            focus.clearFocus(force = true)
+            keyboard?.hide()
+        }
+    }
+    val dismissStep = {
+        when {
+            desktop && target != null && !state.connecting -> returnToDevices()
+            desktop && manual && !state.connecting && state.connectedName == null -> { manual = false; address = "" }
+            else -> dismiss()
+        }
+    }
+    MotionDialog(visible = visible, onDismissRequest = dismissStep,
+        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = if (desktop) 732.dp else 624.dp) {
         val panel: @Composable () -> Unit = {
             Column(Modifier.fillMaxWidth()
                 .height(minOf(LocalMangaWindow.current.height * .84f, 520.dp))
@@ -179,14 +207,16 @@ internal fun WallpaperPcSheet(
                         style = MaterialTheme.typography.titleMedium, maxLines = 1,
                         overflow = TextOverflow.Ellipsis)
                     if (state.supported && state.connectedName == null && !state.connecting)
-                        MotionIconButton(onClick = scan, modifier = Modifier.size(44.dp)) {
+                        MotionIconButton(onClick = scan, modifier = Modifier.size(44.dp), tooltip = "重新查找电脑") {
                             Icon(Icons.Outlined.Refresh, "重新查找电脑", Modifier.size(20.dp))
                         }
-                    MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Outlined.Close, "关闭电脑壁纸连接", Modifier.size(20.dp))
+                    val closeLabel = if (state.connectedName != null) "关闭并断开电脑连接" else "关闭电脑壁纸连接"
+                    MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = closeLabel) {
+                        Icon(Icons.Outlined.Close, closeLabel, Modifier.size(20.dp))
                     }
                 }
-                Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                val connectionControls: @Composable () -> Unit = {
+                  Column(Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (!state.supported) {
                         Text(state.message ?: "此平台暂不支持电脑配对。",
@@ -202,7 +232,7 @@ internal fun WallpaperPcSheet(
                                 Icon(Icons.Outlined.LinkOff, "断开电脑", Modifier.size(20.dp))
                             }
                         }
-                        Text("在电脑选择图片或视频壁纸，点击「发送到移动设备」。",
+                        if (!desktop) Text("在电脑选择图片或视频壁纸，点击「发送到移动设备」。",
                             style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                         state.transferName?.let { name ->
                             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -210,20 +240,23 @@ internal fun WallpaperPcSheet(
                                     overflow = TextOverflow.Ellipsis)
                                 val fraction = if (state.totalBytes > 0L)
                                     (state.receivedBytes.toDouble() / state.totalBytes).toFloat().coerceIn(0f, 1f) else 0f
-                                LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth().height(2.dp),
+                                if (state.totalBytes > 0L) LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth().height(2.dp),
+                                    color = colors.onSurface, trackColor = colors.onSurface.copy(alpha = .08f))
+                                else LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(2.dp),
                                     color = colors.onSurface, trackColor = colors.onSurface.copy(alpha = .08f))
                                 Text(if (state.totalBytes > 0L && state.receivedBytes >= state.totalBytes) "正在加入壁纸库…"
-                                    else "${pcByteLabel(state.receivedBytes)} / ${pcByteLabel(state.totalBytes)}",
+                                    else if (state.totalBytes > 0L) "${pcByteLabel(state.receivedBytes)} / ${pcByteLabel(state.totalBytes)}"
+                                    else "已接收 ${pcByteLabel(state.receivedBytes)}",
                                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                             }
                         }
                     } else {
-                        Text("同一局域网内，在电脑 Wallpaper Engine 打开「移动设备 → 连接新设备」。",
+                        if (!desktop) Text("同一局域网内，在电脑 Wallpaper Engine 打开「移动设备 → 连接新设备」。",
                             style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                         val selected = target
                         if (selected != null) {
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                MotionIconButton(onClick = { target = null; pin = ""; client.disconnect(); client.discover() },
+                                MotionIconButton(onClick = returnToDevices,
                                     enabled = !state.connecting, modifier = Modifier.size(40.dp)) {
                                     Icon(Icons.Outlined.ChevronLeft, "返回电脑列表", Modifier.size(20.dp))
                                 }
@@ -237,9 +270,18 @@ internal fun WallpaperPcSheet(
                                 Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                                     .background(colors.onSurface.copy(alpha = .045f)).padding(start = 14.dp),
                                     verticalAlignment = Alignment.CenterVertically) {
+                                    val codeFocus = remember { FocusRequester() }
+                                    LaunchedEffect(visible, selected.id, state.connecting) {
+                                        if (desktop && visible && !state.connecting) codeFocus.requestFocus()
+                                    }
                                     BasicTextField(pin, onValueChange = { value ->
                                         pin = value.filter { it in '0'..'9' }.take(4)
-                                    }, modifier = Modifier.weight(1f).padding(vertical = 14.dp)
+                                    }, modifier = Modifier.weight(1f).focusRequester(codeFocus)
+                                        .onPreviewKeyEvent { event ->
+                                            if (desktop && event.type == KeyEventType.KeyDown && event.key == Key.Enter) {
+                                                connect(); true
+                                            } else false
+                                        }.padding(vertical = 14.dp)
                                         .semantics { contentDescription = "电脑显示的四位配对码" },
                                         enabled = !state.connecting, singleLine = true,
                                         visualTransformation = PasswordVisualTransformation(),
@@ -302,28 +344,28 @@ internal fun WallpaperPcSheet(
                                     verticalAlignment = Alignment.CenterVertically) {
                                     Icon(Icons.Outlined.Link, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                                     Spacer(Modifier.width(8.dp))
+                                    val addressFocus = remember { FocusRequester() }
+                                    LaunchedEffect(visible) { if (desktop && visible) addressFocus.requestFocus() }
                                     BasicTextField(address, onValueChange = { value ->
                                         address = value.filter { it in '0'..'9' || it == '.' }.take(15)
-                                    }, singleLine = true, modifier = Modifier.weight(1f).padding(vertical = 14.dp)
+                                    }, singleLine = true, modifier = Modifier.weight(1f).focusRequester(addressFocus)
+                                        .onPreviewKeyEvent { event ->
+                                            if (desktop && event.type == KeyEventType.KeyDown && event.key == Key.Enter) {
+                                                useAddress(); true
+                                            } else false
+                                        }.padding(vertical = 14.dp)
                                         .semantics { contentDescription = "电脑的局域网 IPv4 地址" },
                                         textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
                                         cursorBrush = SolidColor(colors.onSurface),
                                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal, imeAction = ImeAction.Done),
-                                        keyboardActions = KeyboardActions(onDone = {
-                                            if (validPcAddress(address)) {
-                                                target = WallpaperPcDevice("manual:$address", address, address)
-                                                pin = ""; focus.clearFocus(force = true); keyboard?.hide()
-                                            }
-                                        }),
+                                        keyboardActions = KeyboardActions(onDone = { useAddress() }),
                                         decorationBox = { input -> Box {
                                             if (address.isEmpty()) Text("电脑 IP 地址", style = MaterialTheme.typography.bodyMedium,
                                                 color = colors.onSurfaceVariant)
                                             input()
                                         } })
-                                    MotionIconButton(enabled = validPcAddress(address), onClick = {
-                                        target = WallpaperPcDevice("manual:$address", address, address)
-                                        pin = ""; focus.clearFocus(force = true); keyboard?.hide()
-                                    }, modifier = Modifier.size(44.dp)) {
+                                    MotionIconButton(enabled = validPcAddress(address), onClick = useAddress,
+                                        modifier = Modifier.size(44.dp)) {
                                         Icon(Icons.Outlined.ChevronRight, "使用电脑地址", Modifier.size(20.dp))
                                     }
                                 }
@@ -332,8 +374,35 @@ internal fun WallpaperPcSheet(
                             }
                         }
                     }
+                  }
                 }
-                Column(Modifier.fillMaxWidth().height(64.dp * LocalMangaWindow.current.fontScale),
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    val scroll = rememberScrollState()
+                    Column(Modifier.fillMaxSize().then(if (desktop) Modifier.padding(end = 12.dp) else Modifier)
+                        .verticalScroll(scroll)) {
+                        if (desktop && state.supported) PreferenceWorkspace(splitWidth = 528.dp, preview = {
+                            Column(Modifier.fillMaxWidth().background(colors.surfaceContainerHigh, RoundedCornerShape(12.dp))
+                                .padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(when {
+                                    state.transferName != null -> "正在接收壁纸"
+                                    state.connectedName != null -> "已连接电脑"
+                                    state.connecting -> "正在连接"
+                                    target != null -> "电脑配对"
+                                    else -> "查找发送端"
+                                }, style = MaterialTheme.typography.titleMedium)
+                                Text(when {
+                                    state.connectedName != null -> "在发送端的 Wallpaper Engine 选择壁纸，点击「发送到移动设备」。"
+                                    target != null && target?.port != 0 -> "输入发送端显示的四位配对码。"
+                                    else -> "在同一局域网内，打开发送端 Wallpaper Engine 的「移动设备 → 连接新设备」。"
+                                }, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                            }
+                        }, controls = connectionControls)
+                        else connectionControls()
+                    }
+                    if (desktop) DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                }
+                Column(Modifier.fillMaxWidth().then(if (desktop) Modifier.heightIn(min = 34.dp)
+                    else Modifier.height(64.dp * LocalMangaWindow.current.fontScale)),
                     verticalArrangement = Arrangement.Center) {
                     val message = state.error ?: state.message?.takeIf { state.supported }
                         ?: if (state.importedCount > 0) "已接收并应用 " + state.importedCount + " 张"

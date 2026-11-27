@@ -35,6 +35,8 @@ import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -107,8 +109,10 @@ internal fun SiteRankingFiltersDialog(
                             Row(verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                                 ReviewSourceMark(preview.site.id, size = 14.dp)
-                                Text(preview.site.title, style = MaterialTheme.typography.labelSmall,
-                                    color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                val scope = if (desktop) listOf(preview.site.title, preview.scopeLabel, preview.kind.label)
+                                    .joinToString(" · ") else preview.site.title
+                                Text(scope, style = MaterialTheme.typography.labelSmall,
+                                    color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }
                         }
                         MotionIconButton(onClick = dismiss, enabled = open,
@@ -304,6 +308,11 @@ internal fun SiteRankingFiltersDialog(
                             }
                         }
                     })
+                    if (split && preview.activeFilterCount > 0) Text(preview.filterSummary,
+                        Modifier.fillMaxWidth().background(colors.onSurface.copy(alpha = .04f), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant, maxLines = 2,
+                        overflow = TextOverflow.Ellipsis)
                     HorizontalDivider(color = colors.onSurface.copy(alpha = .08f))
                     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -344,9 +353,14 @@ internal fun SiteRankingFiltersDialog(
 private fun RankingFilterColumns(split: Boolean, left: ScrollState, right: ScrollState, modifier: Modifier,
     basic: @Composable ColumnScope.() -> Unit, advanced: @Composable ColumnScope.() -> Unit) {
     if (!split) {
-        Column(modifier.verticalScroll(left).padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-            basic()
-            advanced()
+        val desktop = dev.mangaflow.platform.platformKind == dev.mangaflow.platform.PlatformKind.DESKTOP
+        Box(modifier) {
+            Column(Modifier.fillMaxSize().verticalScroll(left).padding(top = 12.dp, bottom = 12.dp,
+                end = if (desktop) 12.dp else 0.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                basic()
+                advanced()
+            }
+            if (desktop) DesktopVerticalScrollbar(left, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
         }
         return
     }
@@ -394,7 +408,8 @@ private fun RankingFilterChoice(label: String, chosen: Boolean, enabled: Boolean
     val colors = MaterialTheme.colorScheme
     MotionTextButton(onClick = onSelect, enabled = enabled,
         modifier = Modifier.heightIn(min = 44.dp).semantics {
-            if (!multiple) role = Role.RadioButton
+            role = if (multiple) Role.Checkbox else Role.RadioButton
+            if (multiple) toggleableState = if (chosen) ToggleableState.On else ToggleableState.Off
             selected = chosen
             stateDescription = if (chosen) "已选择" else "未选择"
         }, shape = RoundedCornerShape(13.dp),

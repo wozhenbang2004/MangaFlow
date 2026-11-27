@@ -31,6 +31,7 @@ import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.DesktopVerticalScrollbar
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.SettingsToggle
 import dev.mangaflow.ui.motion.*
@@ -74,12 +75,20 @@ internal fun EnhancementCenterPanel(
             scrolls[next] = ScrollState(0)
         navigation.open(next)
     }
-    EnhancementPanelHost(visible, backdrop, onDismiss, onClosed = {
-        onClosed?.invoke()
-        if (compareAfterClose) { compareAfterClose = false; onCompare?.invoke() }
-    }) {
+    val desktop = platformKind == PlatformKind.DESKTOP
+    EnhancementPanelHost(visible, backdrop, onDismiss, maximumWidth = if (desktop) 784.dp else 440.dp,
+        onWindowBack = { if (!desktop || !navigation.back()) onDismiss() },
+        onClosed = {
+            onClosed?.invoke()
+            if (compareAfterClose) { compareAfterClose = false; onCompare?.invoke() }
+        }) {
+        val window = LocalMangaWindow.current
+        val split = desktop && window.width >= 580.dp * window.fontScale && window.height >= 300.dp * window.fontScale
+        val railWidth = (146.dp * window.fontScale).coerceAtMost(204.dp)
+        val bounds = if (split) Modifier.fillMaxWidth().height(minOf(window.height, 696.dp))
+            else Modifier.fillMaxWidth().heightIn(max = minOf(window.panelHeight, 560.dp))
         MotionBackHandler(visible && navigation.parent != null, state = null, onBack = { navigation.back() })
-        Column(Modifier.fillMaxWidth().heightIn(max = minOf(LocalMangaWindow.current.panelHeight, 560.dp))) {
+        Column(bounds) {
             Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 10.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 navigation.parent?.let { parent ->
@@ -100,11 +109,15 @@ internal fun EnhancementCenterPanel(
                         Text(content.settingsLabel, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                if (split && canSwitchMedia)
+                    MotionTabs(mediaCategories.indexOf(content.settingsOwner), mediaCategories.map { it.settingsLabel },
+                        onSelect = { content = mediaCategories[it] }, modifier = Modifier.width(158.dp * window.fontScale),
+                        controlHeight = 38.dp, treatment = MotionTabTreatment.Soft)
                 MotionIconButton(onDismiss, Modifier.size(44.dp), tooltip = "关闭体验策略") {
                     Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                 }
             }
-            if (navigation.page.isPrimary) {
+            if (!split && navigation.page.isPrimary) {
                 if (canSwitchMedia) MotionTabs(mediaCategories.indexOf(content.settingsOwner), mediaCategories.map { it.settingsLabel },
                     onSelect = { content = mediaCategories[it] },
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
@@ -114,13 +127,31 @@ internal fun EnhancementCenterPanel(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
                     controlHeight = 44.dp, treatment = MotionTabTreatment.Underline)
             }
-            Column(Modifier.weight(1f, fill = false).verticalScroll(scroll)
-                .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp)) {
-                editorState.SaveableStateProvider(editorKey) {
-                    EnhancementSettingsContent(content, sessionKey, page = navigation.page, onPageChange = ::navigate,
-                        showContentRecords = !canSwitchMedia,
-                        readerState = readerState, onRetryTask = onRetryTask, onCancelTask = onCancelTask,
-                        onCompare = onCompare?.let { { compareAfterClose = true; onDismiss() } })
+            val destinations = remember(primaryPages, sessionKey != null) {
+                primaryPages.map { page ->
+                    val icon = when (page) {
+                        EnhancementPage.QUALITY -> Icons.Outlined.HighQuality
+                        EnhancementPage.FRAME -> Icons.Outlined.Speed
+                        EnhancementPage.PREPARATION -> Icons.Outlined.Layers
+                        else -> Icons.Outlined.QueryStats
+                    }
+                    MediaSettingsDestination(page, page.titleFor(sessionKey != null), icon)
+                }
+            }
+            MediaSettingsWorkspace(split, destinations, navigation.primary, ::navigate, railWidth,
+                Modifier.weight(1f, fill = split)) {
+                Box(Modifier.fillMaxWidth().weight(1f, fill = split)) {
+                    Column(Modifier.fillMaxWidth().mediaSettingsPage(content to navigation.page, desktop)
+                        .verticalScroll(scroll).padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp)) {
+                        editorState.SaveableStateProvider(editorKey) {
+                            EnhancementSettingsContent(content, sessionKey, page = navigation.page, onPageChange = ::navigate,
+                                showContentRecords = !canSwitchMedia,
+                                readerState = readerState, onRetryTask = onRetryTask, onCancelTask = onCancelTask,
+                                onCompare = onCompare?.let { { compareAfterClose = true; onDismiss() } })
+                        }
+                    }
+                    if (desktop) DesktopVerticalScrollbar(scroll,
+                        Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 4.dp))
                 }
             }
         }

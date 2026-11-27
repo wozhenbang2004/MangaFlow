@@ -24,9 +24,14 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -34,11 +39,12 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -75,6 +81,8 @@ import dev.mangaflow.reader.panels.PanelRuntimeState
 import dev.mangaflow.reader.panels.PanelRuntimeStore
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
@@ -219,7 +227,7 @@ internal fun SourceImportSheet(
         activeJob?.cancel()
         onDismiss()
         completedName?.let(onImported)
-    }, backdrop = backdrop, containerColor = colors.surface.copy(alpha = .97f)) { dismiss ->
+    }, backdrop = backdrop, containerColor = colors.surface.copy(alpha = .97f), desktopWidth = 920.dp) { dismiss ->
         LaunchedEffect(installOperation?.id, installOperation?.phase) {
             val operation = installOperation ?: return@LaunchedEffect
             if (operation.active) return@LaunchedEffect
@@ -240,206 +248,217 @@ internal fun SourceImportSheet(
                 else -> Unit
             }
         }
-        Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height * .84f)
+        BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height * .84f)
             .imePadding().navigationBarsPadding()) {
-            Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                PreferenceHeading(if (prepared == null) "导入第三方源" else "确认来源", Modifier.weight(1f))
-                if (prepared == null) DownloadRouteControl(DownloadCategory.SOURCE_PACKAGES, enabled = busy == null, backdrop = backdrop)
-                MotionIconButton(onClick = { activeJob?.cancel(); dismiss() }) {
-                    Icon(Icons.Outlined.Close, "关闭来源导入", Modifier.size(20.dp))
+            val desktop = platformKind == PlatformKind.DESKTOP
+            val font = LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
+            val split = desktop && maxWidth >= 710.dp * font && maxHeight >= 290.dp * font
+            val bodyHeight = minOf(maxHeight, 620.dp)
+            val scrollActions = !split && bodyHeight < 285.dp * font
+            val setupWidth = (maxWidth * .41f).coerceIn(278.dp, 384.dp)
+            val bundle = prepared
+            val setupList = rememberLazyListState()
+            val catalogueList = rememberLazyListState()
+            val compactList = rememberLazyListState()
+            val reviewList = key(bundle?.digest) { rememberLazyListState() }
+            LaunchedEffect(catalog, candidates) {
+                if (entries.isNotEmpty() && bundle == null) {
+                    if (split) catalogueList.scrollToItem(0)
+                    else {
+                        val repositoryRows = if (repositoryMode && repositories.isNotEmpty()) 1 + repositories.size else 0
+                        // Mode, input and help precede the catalogue on a single-column window.
+                        compactList.scrollToItem(3 + repositoryRows)
+                    }
                 }
             }
-            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false),
-                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 6.dp, bottom = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                installNotice?.let { message -> item(key = "install-notice") {
-                    Text(message, fontSize = 12.sp, color = colors.onSurfaceVariant)
-                } }
-                failure?.let { message -> item(key = "failure") {
-                    Text(message, fontSize = 12.sp, lineHeight = 17.sp, color = colors.error,
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                } }
-                if (busy != null) item(key = "busy") {
-                    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp),
+            val setup: LazyListScope.() -> Unit = {
+                item(key = "import-mode") {
+                    MotionTabs(if (repositoryMode) 0 else 1, listOf("源仓库", "文件或脚本"), onSelect = { index ->
+                        val next = index == 0
+                        if (busy == null && next != repositoryMode) {
+                            repositoryMode = next
+                            catalog = null
+                            candidates = emptyList()
+                            candidateQuery = ""
+                            failure = null
+                        }
+                    }, modifier = Modifier.fillMaxWidth().motionInputGate(busy == null),
+                        treatment = MotionTabTreatment.Soft, role = Role.RadioButton, fullWidthIndicator = true,
+                        controlHeight = 40.dp, track = colors.onSurface.copy(alpha = .05f), indicator = colors.surface)
+                }
+                item(key = "input") {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (!repositoryMode) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        MotionTextButton(enabled = busy == null, onClick = {
+                            focus.clearFocus(force = true); keyboard?.hide()
+                            filePicker.launch(arrayOf("*/*"))
+                        }) {
+                            Icon(Icons.Outlined.Description, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("选择文件", fontSize = 12.sp)
+                        }
+                        Text(".js / .json", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                    }
+                    }
+                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
+                        .background(colors.onSurface.copy(alpha = .045f)).padding(start = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
-                        Text(busy.orEmpty(), fontSize = 12.sp, color = colors.onSurfaceVariant,
-                            modifier = Modifier.weight(1f))
-                        if (previewBusy != null) MotionTextButton(onClick = { activeJob?.cancel() }) { Text("取消", fontSize = 11.sp) }
-                        else if (installOperation?.cancellable == true) MotionTextButton(
-                            onClick = { operations.cancel(installOperation.id) }) { Text("取消", fontSize = 11.sp) }
+                        Icon(Icons.Outlined.Link, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+                        BasicTextField(url, onValueChange = { url = it }, enabled = busy == null,
+                            modifier = Modifier.weight(1f).semantics { contentDescription = if (repositoryMode) "仓库 index.json 的 HTTPS 地址" else "HTTPS 源文件或脚本链接" },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodySmall.copy(color = colors.onSurface, fontSize = 12.sp),
+                            cursorBrush = SolidColor(colors.onSurface),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+                            keyboardActions = KeyboardActions(onGo = { loadUrl() }),
+                            decorationBox = { input -> Box {
+                                if (url.isBlank()) Text(if (repositoryMode) "仓库 index.json 的 HTTPS 地址" else "HTTPS 源文件或脚本链接",
+                                    color = colors.onSurfaceVariant, fontSize = 12.sp)
+                                input()
+                            } })
+                        MotionTextButton(enabled = busy == null && url.isNotBlank(), onClick = { loadUrl() }) {
+                            Text(if (repositoryMode) "添加" else "读取", fontSize = 12.sp)
+                        }
+                    }
+                    if (repositoryMode) {
+                        MotionTextButton(enabled = busy == null, onClick = { url = PUBLIC_JS_REPOSITORY }) {
+                            Text("填入 Venera 仓库示例", fontSize = 11.sp)
+                        }
+                        MotionTextButton(enabled = busy == null, onClick = {
+                            url = "https://raw.githubusercontent.com/entityJY/mangayomi-extensions-eJ/main/index.json"
+                        }) { Text("填入 Mangayomi 仓库示例", fontSize = 11.sp) }
+                    }
                     }
                 }
-                val bundle = prepared
-                if (bundle == null) {
-                    item(key = "formats") {
-                        Column {
-                            Text("JS 漫画源 · 支持源仓库或文件", fontSize = 11.sp, color = colors.onSurfaceVariant)
-                            MotionTextButton(onClick = { showFormats = !showFormats },
-                                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
-                                Text(if (showFormats) "收起导入说明" else "支持格式与导入说明", fontSize = 11.sp)
-                            }
-                            AnimatedVisibility(showFormats,
-                                enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
-                                    expandVertically(tween(if (motion) MangaMotion.Content else 0)),
-                                exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
-                                    shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
-                                Text("可添加公开仓库，挑选需要的漫画源；读取目录不会运行或安装脚本。支持 Venera ComicSource 和 Mangayomi JS 漫画源，APK、Dart 和阅读规则书源暂不支持。",
-                                    fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant)
-                            }
+                if (repositoryMode && repositories.isNotEmpty()) {
+                    item(key = "repositories-title") {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("已添加的仓库", style = MaterialTheme.typography.titleSmall)
+                            Text("移除仓库会保留已经安装的来源。", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                         }
                     }
-                    item(key = "import-mode") {
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            MotionTextButton(enabled = busy == null, onClick = {
-                                repositoryMode = true; catalog = null; candidates = emptyList(); candidateQuery = ""; failure = null
-                            }) { Text("源仓库", fontSize = 12.sp,
-                                fontWeight = if (repositoryMode) FontWeight.Medium else FontWeight.Normal,
-                                color = if (repositoryMode) colors.onSurface else colors.onSurfaceVariant) }
-                            MotionTextButton(enabled = busy == null, onClick = {
-                                repositoryMode = false; catalog = null; candidates = emptyList(); candidateQuery = ""; failure = null
-                            }) { Text("文件或脚本", fontSize = 12.sp,
-                                fontWeight = if (!repositoryMode) FontWeight.Medium else FontWeight.Normal,
-                                color = if (!repositoryMode) colors.onSurface else colors.onSurfaceVariant) }
-                        }
-                    }
-                    if (repositoryMode && repositories.isNotEmpty()) {
-                        item(key = "repositories-title") {
-                            Text("已添加的仓库", fontSize = 11.sp, color = colors.onSurfaceVariant)
-                        }
-                        itemsIndexed(repositories, key = { _, repository -> "repository:${repository.url}" }) { _, repository ->
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(repository.name, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text(repository.url, fontSize = 10.sp, color = colors.onSurfaceVariant,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                                MotionTextButton(enabled = busy == null, onClick = { loadRepository(repository.url) }) {
-                                    Text(if (catalog?.repository?.url == repository.url) "刷新" else "打开", fontSize = 11.sp)
-                                }
-                                MotionTextButton(enabled = busy == null, onClick = {
-                                    operate("正在移除仓库…") {
-                                        store.removeRepository(repository.url)
-                                        if (catalog?.repository?.url == repository.url) { catalog = null; candidateQuery = "" }
-                                    }
-                                }) { Text("移除", fontSize = 11.sp) }
-                            }
-                        }
-                    }
-                    item(key = "input") {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (!repositoryMode) {
+                    itemsIndexed(repositories, key = { _, repository -> "repository:${repository.url}" }) { _, repository ->
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            MotionTextButton(enabled = busy == null, onClick = {
-                                focus.clearFocus(force = true); keyboard?.hide()
-                                filePicker.launch(arrayOf("*/*"))
-                            }) {
-                                Icon(Icons.Outlined.Description, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("选择文件", fontSize = 12.sp)
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(repository.name, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(repository.url, fontSize = 10.sp, color = colors.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            Text(".js / .json", fontSize = 11.sp, color = colors.onSurfaceVariant)
-                        }
-                        }
-                        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
-                            .background(colors.onSurface.copy(alpha = .045f)).padding(start = 12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.Link, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
-                            BasicTextField(url, onValueChange = { url = it }, enabled = busy == null,
-                                modifier = Modifier.weight(1f).semantics { contentDescription = if (repositoryMode) "仓库 index.json 的 HTTPS 地址" else "HTTPS 源文件或脚本链接" },
-                                singleLine = true,
-                                textStyle = MaterialTheme.typography.bodySmall.copy(color = colors.onSurface, fontSize = 12.sp),
-                                cursorBrush = SolidColor(colors.onSurface),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
-                                keyboardActions = KeyboardActions(onGo = { loadUrl() }),
-                                decorationBox = { input -> Box {
-                                    if (url.isBlank()) Text(if (repositoryMode) "仓库 index.json 的 HTTPS 地址" else "HTTPS 源文件或脚本链接",
-                                        color = colors.onSurfaceVariant, fontSize = 12.sp)
-                                    input()
-                                } })
-                            MotionTextButton(enabled = busy == null && url.isNotBlank(), onClick = { loadUrl() }) {
-                                Text(if (repositoryMode) "添加" else "读取", fontSize = 12.sp)
-                            }
-                        }
-                        if (repositoryMode) {
-                            MotionTextButton(enabled = busy == null, onClick = { url = PUBLIC_JS_REPOSITORY }) {
-                                Text("填入 Venera 仓库示例", fontSize = 11.sp)
+                            MotionTextButton(enabled = busy == null, onClick = { loadRepository(repository.url) }) {
+                                Text(if (catalog?.repository?.url == repository.url) "刷新" else "打开", fontSize = 11.sp)
                             }
                             MotionTextButton(enabled = busy == null, onClick = {
-                                url = "https://raw.githubusercontent.com/entityJY/mangayomi-extensions-eJ/main/index.json"
-                            }) { Text("填入 Mangayomi 仓库示例", fontSize = 11.sp) }
-                            Text("只保存你选择的仓库地址；移除仓库不影响已安装的源。",
-                                fontSize = 10.sp, lineHeight = 15.sp, color = colors.onSurfaceVariant)
-                        }
-                        }
-                    }
-                    if (entries.isNotEmpty()) item(key = "candidate-count") {
-                        Text(if (catalog != null) "仓库 ${entries.size} 项 · ${entries.count { it.candidate != null }} 项 JS 漫画源可预览"
-                            else "选择要导入的来源 · ${entries.size}", fontSize = 11.sp,
-                            color = colors.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
-                    }
-                    if (entries.size > 12) item(key = "filter-candidates") {
-                        Row(Modifier.fillMaxWidth().heightIn(min = 40.dp).clip(RoundedCornerShape(10.dp))
-                            .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.Search, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-                            BasicTextField(candidateQuery, onValueChange = { candidateQuery = it }, enabled = busy == null,
-                                modifier = Modifier.weight(1f).semantics { contentDescription = "按名称、语言或站点筛选来源" },
-                                singleLine = true,
-                                textStyle = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, color = colors.onSurface),
-                                cursorBrush = SolidColor(colors.onSurface),
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                keyboardActions = KeyboardActions(onSearch = { focus.clearFocus(force = true); keyboard?.hide() }),
-                                decorationBox = { input -> Box {
-                                    if (candidateQuery.isBlank()) Text("查找名称、语言或站点", fontSize = 12.sp, color = colors.onSurfaceVariant)
-                                    input()
-                                } })
+                                operate("正在移除仓库…") {
+                                    store.removeRepository(repository.url)
+                                    if (catalog?.repository?.url == repository.url) { catalog = null; candidateQuery = "" }
+                                }
+                            }) { Text("移除", fontSize = 11.sp) }
                         }
                     }
-                    if (entries.isNotEmpty() && visibleEntries.isEmpty()) item(key = "no-candidate-match") {
-                        Text("没有匹配的来源", fontSize = 12.sp, color = colors.onSurfaceVariant)
+                }
+                item(key = "formats") {
+                    Column {
+                        MotionTextButton(onClick = { showFormats = !showFormats },
+                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                            Text(if (showFormats) "收起导入说明" else "支持格式与导入说明", fontSize = 11.sp)
+                        }
+                        AnimatedVisibility(showFormats,
+                            enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
+                                expandVertically(tween(if (motion) MangaMotion.Content else 0)),
+                            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
+                                shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
+                            Text("可添加公开仓库，挑选需要的漫画源；读取目录不会运行或安装脚本。支持 Venera ComicSource 和 Mangayomi JS 漫画源，APK、Dart 和阅读规则书源暂不支持。",
+                                fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant)
+                        }
                     }
-                    itemsIndexed(visibleEntries, key = { index, entry ->
-                        "$index:${entry.candidate?.codeUrl.orEmpty()}:${entry.name}:${entry.language}"
-                    }) { _, entry ->
-                        val candidate = entry.candidate
-                        val selectable = busy == null && candidate != null
-                        val interaction = remember(entry) { MutableInteractionSource() }
-                        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-                            .clickable(enabled = selectable, interactionSource = interaction, indication = null,
-                                role = Role.Button, onClickLabel = "添加${entry.name}", onClick = {
-                                    if (candidate != null) operate("正在准备所选来源…") { prepared = store.prepare(candidate) }
-                                }).motionPress(interaction, enabled = selectable, pressedScale = .99f)
-                            .padding(vertical = 10.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.Description, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-                            Column(Modifier.weight(1f).padding(start = 10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(entry.name.ifBlank { "未命名来源" }, fontSize = 13.sp,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(listOf(entry.language, entry.version,
-                                    displayImportOrigin(entry.siteUrl)).filter(String::isNotBlank).joinToString(" · "),
-                                    fontSize = 11.sp, color = colors.onSurfaceVariant,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(entry.unavailableReason ?: "JS 漫画源 · 尚未运行，导入时校验",
-                                    fontSize = 10.sp, lineHeight = 14.sp, color = colors.onSurfaceVariant,
-                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            val entriesList: LazyListScope.() -> Unit = {
+                if (entries.isNotEmpty()) item(key = "candidate-count") {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(catalog?.repository?.name?.takeIf(String::isNotBlank) ?: "选择来源",
+                            style = MaterialTheme.typography.titleMedium)
+                        Text("${entries.size} 项 · ${entries.count { it.candidate != null }} 项可预览",
+                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                    }
+                }
+                if (entries.size > 12) item(key = "filter-candidates") {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp).clip(RoundedCornerShape(10.dp))
+                        .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Search, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                        BasicTextField(candidateQuery, onValueChange = { candidateQuery = it }, enabled = busy == null,
+                            modifier = Modifier.weight(1f).semantics { contentDescription = "按名称、语言或站点筛选来源" },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, color = colors.onSurface),
+                            cursorBrush = SolidColor(colors.onSurface),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = { focus.clearFocus(force = true); keyboard?.hide() }),
+                            decorationBox = { input -> Box {
+                                if (candidateQuery.isBlank()) Text("查找名称、语言或站点", fontSize = 12.sp, color = colors.onSurfaceVariant)
+                                input()
+                            } })
+                    }
+                }
+                if (entries.isNotEmpty() && visibleEntries.isEmpty()) item(key = "no-candidate-match") {
+                    Text("没有匹配的来源", fontSize = 12.sp, color = colors.onSurfaceVariant)
+                }
+                itemsIndexed(visibleEntries, key = { index, entry ->
+                    "$index:${entry.candidate?.codeUrl.orEmpty()}:${entry.name}:${entry.language}"
+                }) { _, entry ->
+                    val candidate = entry.candidate
+                    val selectable = busy == null && candidate != null
+                    val interaction = remember(entry) { MutableInteractionSource() }
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                        .clickable(enabled = selectable, interactionSource = interaction, indication = null,
+                            role = Role.Button, onClickLabel = "预览${entry.name}", onClick = {
+                                if (candidate != null) operate("正在准备所选来源…") { prepared = store.prepare(candidate) }
+                            }).motionPress(interaction, enabled = selectable, pressedScale = .99f)
+                        .padding(vertical = 10.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Description, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
+                        Column(Modifier.weight(1f).padding(start = 10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(entry.name.ifBlank { "未命名来源" }, fontSize = 13.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(listOf(entry.language, entry.version,
+                                displayImportOrigin(entry.siteUrl)).filter(String::isNotBlank).joinToString(" · "),
+                                fontSize = 11.sp, color = colors.onSurfaceVariant,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            entry.unavailableReason?.let { reason ->
+                                Text(reason, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                             }
-                            Text(if (candidate != null) "添加" else "不兼容", fontSize = 11.sp, color = colors.onSurfaceVariant)
                         }
+                        if (candidate != null) Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp), tint = colors.primary)
+                        else Text("不兼容", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     }
-                } else {
+                }
+                if (entries.isEmpty() && (split || catalog != null)) item("awaiting-catalog") {
+                    Column(Modifier.fillMaxWidth().padding(vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Outlined.Description, null, Modifier.size(27.dp), tint = colors.onSurfaceVariant)
+                        Text(if (catalog != null) "仓库内没有来源" else "待选择来源", style = MaterialTheme.typography.titleMedium)
+                        Text(if (catalog != null) "可以刷新仓库，或打开其他仓库。"
+                            else if (repositoryMode) "打开已添加的仓库，或输入仓库地址以查看目录。" else "选择本地文件，或输入脚本地址以读取内容。",
+                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                    }
+                }
+            }
+            val review: LazyListScope.() -> Unit = {
+                if (bundle != null) {
                     item(key = "review") {
-                        Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                            Text(bundle.metadata.optString("name"), style = MaterialTheme.typography.titleMedium)
-                            ImportDetail("网站", bundle.metadata.optString("baseUrl"))
-                            ImportDetail("版本", listOf(bundle.metadata.optString("version"), bundle.metadata.optString("lang"))
-                                .filter(String::isNotBlank).joinToString(" · ").ifBlank { "未提供" })
-                            ImportDetail("来自", displayImportOrigin(bundle.origin))
-                            if (installed.any { it.sourceId == bundle.sourceId && it.digest == bundle.digest }) {
-                                Text("同一版本已安装，可重新启用；不会重复添加。", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (!split) SourceImportIdentity(bundle)
+                            Text("安装与启用", style = MaterialTheme.typography.titleMedium)
+                            val previous = installed.firstOrNull { it.sourceId == bundle.sourceId }
+                            Text(when {
+                                previous == null -> "导入后将添加到来源列表，并立即启用。"
+                                previous.digest == bundle.digest -> "本机已安装这一版本，可重新启用。"
+                                else -> "安装后会替换本机这个来源的现有版本。"
+                            }, style = MaterialTheme.typography.bodyMedium)
+                            Row(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(10.dp))
+                                .padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Icon(Icons.Outlined.Info, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+                                Text("脚本可以请求网络，请确认来源可信。", style = MaterialTheme.typography.bodySmall)
                             }
-                            Text("脚本可以请求网络，请确认来源可信。", color = colors.onSurfaceVariant,
-                                fontSize = 11.sp, lineHeight = 17.sp)
                             MotionTextButton(onClick = { showPackageDetails = !showPackageDetails },
                                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
                                 Text(if (showPackageDetails) "收起来源信息" else "兼容性与来源信息", fontSize = 11.sp)
@@ -470,20 +489,6 @@ internal fun SourceImportSheet(
                             ScriptEngineControl(runtimes, engine, busy == null, onFailure = { failure = it })
                         }
                     }
-                    item(key = "install") {
-                        MotionButton(enabled = busy == null && engineReady,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = colors.onSurface, contentColor = colors.surface),
-                            onClick = {
-                                val handle = operations.installSource(store, registry, bundle, markAdult)
-                                if (handle.accepted) {
-                                    failure = null
-                                    submittedInstallId = handle.id
-                                }
-                            }) { Text("导入并启用", fontSize = 13.sp) }
-                        MotionTextButton(enabled = busy == null, modifier = Modifier.fillMaxWidth(),
-                            onClick = { prepared = null; failure = null }) { Text("重新选择", fontSize = 12.sp) }
-                    }
                 }
                 if (platformKind == PlatformKind.ANDROID && (bundle == null || engineReady && (engineBundled || engine.error == null))) item(key = "engine-maintenance") {
                     Column {
@@ -509,7 +514,84 @@ internal fun SourceImportSheet(
                     }
                 }
             }
+            val installActions: @Composable () -> Unit = {
+                if (bundle != null) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
+                    MotionTextButton(onClick = { prepared = null; failure = null }, enabled = busy == null) { Text("重新选择") }
+                    MotionButton(onClick = {
+                        val handle = operations.installSource(store, registry, bundle, markAdult)
+                        if (handle.accepted) {
+                            failure = null
+                            submittedInstallId = handle.id
+                        }
+                    }, enabled = busy == null && engineReady) { Text(if (installOperation?.active == true) "正在安装" else "导入并启用") }
+                }
+            }
+            Column(Modifier.fillMaxWidth().then(if (split) Modifier.height(bodyHeight) else Modifier.heightIn(max = bodyHeight))) {
+                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    PreferenceHeading(if (prepared == null) "导入第三方源" else "确认来源", Modifier.weight(1f))
+                    if (prepared == null) DownloadRouteControl(DownloadCategory.SOURCE_PACKAGES, enabled = busy == null, backdrop = backdrop)
+                    MotionIconButton(onClick = { activeJob?.cancel(); dismiss() }, tooltip = "关闭来源导入") {
+                        Icon(Icons.Outlined.Close, "关闭来源导入", Modifier.size(20.dp))
+                    }
+                }
+                val status = busy ?: failure ?: installNotice
+                if (status != null) Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 3.dp)
+                    .background(if (busy == null && failure != null) colors.errorContainer else colors.surfaceContainerLow, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 10.dp, vertical = 5.dp).semantics { liveRegion = LiveRegionMode.Polite },
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (busy != null) MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                    Text(status, Modifier.weight(1f).heightIn(max = 60.dp).verticalScroll(rememberScrollState()),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (busy == null && failure != null) colors.onErrorContainer else colors.onSurfaceVariant)
+                    if (previewBusy != null) MotionTextButton(onClick = { activeJob?.cancel() }) { Text("取消") }
+                    else if (installOperation?.active == true && installOperation.cancellable) MotionTextButton(
+                        onClick = { operations.cancel(installOperation.id) }) { Text("取消") }
+                }
+                if (split) Row(Modifier.weight(1f).fillMaxWidth()) {
+                    Box(Modifier.width(setupWidth).fillMaxHeight().background(colors.surfaceContainerLow)) {
+                        if (bundle == null) SourceImportList(setupList, true, setup)
+                        else SourceImportList(key(bundle.digest) { rememberLazyListState() }, true) {
+                            item("identity") { SourceImportIdentity(bundle) }
+                        }
+                    }
+                    Box(Modifier.weight(1f).fillMaxHeight()) {
+                        if (bundle == null) SourceImportList(catalogueList, true, entriesList)
+                        else SourceImportList(reviewList, true, review)
+                    }
+                } else Box(Modifier.weight(1f, fill = false).fillMaxWidth()) {
+                    SourceImportList(if (bundle == null) compactList else reviewList, desktop) {
+                        if (bundle == null) { setup(); entriesList() }
+                        review()
+                        if (scrollActions && bundle != null) item("install-actions") { installActions() }
+                    }
+                }
+                if (!scrollActions) installActions()
+            }
         }
+    }
+}
+
+@Composable
+private fun SourceImportList(state: LazyListState, desktop: Boolean, content: LazyListScope.() -> Unit) {
+    Box(Modifier.fillMaxWidth()) {
+        LazyColumn(Modifier.fillMaxWidth().padding(end = if (desktop) 8.dp else 0.dp), state = state,
+            contentPadding = PaddingValues(start = 18.dp, end = 14.dp, top = 10.dp, bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+        if (desktop) DesktopVerticalScrollbar(state, Modifier.align(Alignment.CenterEnd))
+    }
+}
+
+@Composable
+private fun SourceImportIdentity(bundle: ScriptSourcePackage) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Icon(Icons.Outlined.Description, null, Modifier.size(25.dp), tint = MaterialTheme.colorScheme.primary)
+        Text(bundle.metadata.optString("name").ifBlank { bundle.sourceId }, style = MaterialTheme.typography.titleLarge)
+        ImportDetail("网站", bundle.metadata.optString("baseUrl"))
+        ImportDetail("版本", listOf(bundle.metadata.optString("version"), bundle.metadata.optString("lang"))
+            .filter(String::isNotBlank).joinToString(" · ").ifBlank { "未提供" })
+        ImportDetail("来自", displayImportOrigin(bundle.origin))
     }
 }
 

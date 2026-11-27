@@ -359,6 +359,7 @@ internal fun DiscoverySearchResults(
     recentCopyGroupTerms: List<String> = emptyList(),
     onCopyGroupTerm: ((String) -> Unit)? = null,
     onClearCopyGroupTerms: (() -> Unit)? = null,
+    onEditQuery: (() -> Unit)? = null,
 ) {
     val adultProfile = sourceControls != null
     var retainedSearch by remember { mutableStateOf(state) }
@@ -520,6 +521,10 @@ internal fun DiscoverySearchResults(
                 DesktopIndexLabels("正文来源", if (adultProfile) null else "热度与评分", modifier = Modifier.padding(end = 12.dp))
             when {
                 selectingTags || awaitingKeyword || !search.isSearch -> Unit
+                desktopMainContent && search.items.isEmpty() -> DesktopSearchFeedback(
+                    search, index, adultProfile, contentActive, onEditQuery,
+                    onRetry, onMore, onTarget, onTag,
+                    Modifier.weight(1f).fillMaxWidth())
                 search.loading && search.items.isEmpty() -> Box(
                     Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center,
                 ) { CircularProgressIndicator(Modifier.size(20.dp).semantics { contentDescription = "正在查找漫画" },
@@ -598,7 +603,11 @@ internal fun DiscoverySearchResults(
                             }
                         }
                         if (search.error != null) item(key = "search-error") {
-                            Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+                            if (desktopMainContent) CatalogueState("部分结果暂未载入", search.error, selectableDetail = true) {
+                                TextButton(onClick = onRetry, enabled = contentActive && !search.loadingMore) {
+                                    Text("重新载入")
+                                }
+                            } else Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(search.error, style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -617,6 +626,65 @@ internal fun DiscoverySearchResults(
         FederatedSearchChoices(matches, repository, backdrop, onDismiss = { sourceChoices = null },
             onOpen = { manga -> sourceChoices = null; onOpen(manga) })
     }
+    }
+}
+
+@Composable
+private fun DesktopSearchFeedback(search: BrowseState, index: Boolean, adult: Boolean, active: Boolean,
+    onEdit: (() -> Unit)?, onRetry: () -> Unit, onMore: () -> Unit, onTarget: (SearchTarget) -> Unit,
+    onTag: (MangaTag) -> Unit, modifier: Modifier = Modifier) {
+    val loading = search.loading || search.refreshing || search.loadingMore
+    val failures = search.searchSources.values.filter { it.error != null }
+    val allFailed = search.searchSources.isNotEmpty() && failures.size == search.searchSources.size
+    val scroll = rememberScrollState()
+    Box(modifier) {
+        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 10.dp)) {
+            if (loading) {
+                val waiting = search.searchSources.values.filter { it.loading }.joinToString("、") { it.sourceName }
+                Text(if (waiting.isBlank()) "正在查找作品…" else "正在查询 ${waiting}",
+                    Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
+                        .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                repeat(4) {
+                    if (index) DesktopBrowsePlaceholder(0.dp, !adult, null)
+                    else DiscoveryListPlaceholder(false, 0.dp, null)
+                }
+            } else {
+                val tag = search.selectedTags.lastOrNull().takeIf { search.searchTarget == SearchTarget.TAG }
+                val title = when {
+                    allFailed -> "搜索来源暂不可用"
+                    failures.isNotEmpty() -> "已返回的来源里没有匹配"
+                    search.error != null -> "搜索未完成"
+                    tag != null -> "没有符合这组标签的作品"
+                    search.searchTarget == SearchTarget.AUTHOR -> "没有找到这位作者的作品"
+                    search.searchTarget == SearchTarget.TRANSLATION_GROUP -> "没有找到这个汉化组的作品"
+                    else -> "没有找到匹配的作品"
+                }
+                val detail = search.error ?: when {
+                    failures.isNotEmpty() -> failures.joinToString("、") { it.sourceName } + " 暂未返回结果。"
+                    search.hasMore -> "当前页没有匹配项，还可以继续查找后续页。"
+                    tag != null -> "可以移除最近选中的标签「${tag.name}」，扩大查找范围。"
+                    else -> "试试缩短关键词，或使用作品的其他译名。"
+                }
+                CatalogueState(title, detail, selectableDetail = search.error != null) {
+                    if (search.error != null || failures.isNotEmpty()) TextButton(onClick = onRetry, enabled = active) {
+                        Text("重新查找")
+                    }
+                    if (search.hasMore && search.error == null) TextButton(onClick = onMore, enabled = active) {
+                        Text("继续查找")
+                    }
+                    if (tag != null) TextButton(onClick = { onTag(tag) }, enabled = active) {
+                        Text(if (search.selectedTags.size > 1) "移除最后一个标签" else "重选标签")
+                    } else {
+                        if (onEdit != null) TextButton(onClick = onEdit, enabled = active) { Text("修改关键词") }
+                        if (search.searchTarget == SearchTarget.AUTHOR && search.query.isNotBlank())
+                            TextButton(onClick = { onTarget(SearchTarget.TITLE) }, enabled = active) { Text("按作品名查找") }
+                    }
+                }
+            }
+        }
+        DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
     }
 }
 
@@ -1323,7 +1391,7 @@ private fun DiscoveryListPlaceholder(ranked: Boolean, rankGutter: Dp, loadingLab
 }
 
 @Composable
-private fun DiscoveryCoverPlaceholder(narrow: Boolean, showMetrics: Boolean, showSource: Boolean, showChapter: Boolean) {
+internal fun DiscoveryCoverPlaceholder(narrow: Boolean, showMetrics: Boolean, showSource: Boolean, showChapter: Boolean) {
     val ink = MaterialTheme.colorScheme.onSurface
     val detailInk = ink.copy(alpha = .045f)
     Column(Modifier.fillMaxWidth().clearAndSetSemantics {}) {
@@ -1972,7 +2040,7 @@ internal fun RecentReadingSheet(
             }
         }
         }
-        androidx.compose.material3.SnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp))
+        MangaSnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp))
     }
 }
 

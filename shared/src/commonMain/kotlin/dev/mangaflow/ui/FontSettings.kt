@@ -12,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,11 +25,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Restore
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -39,10 +43,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -58,6 +64,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.storage.FontStore
 import dev.mangaflow.storage.FontStoreState
@@ -83,6 +91,8 @@ internal fun FontSettings(modifier: Modifier = Modifier) {
     val store = remember(context) { FontStore.get(context) }
     val state by store.state.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val samples = rememberSaveableStateHolder()
     var sceneName by rememberSaveable { mutableStateOf(MangaFontScene.INTERFACE.name) }
     var managedId by rememberSaveable { mutableStateOf<String?>(null) }
     val scene = MangaFontScene.entries.firstOrNull { it.name == sceneName } ?: MangaFontScene.INTERFACE
@@ -100,7 +110,8 @@ internal fun FontSettings(modifier: Modifier = Modifier) {
         MotionTabContent(selected = scene, modifier = Modifier.fillMaxWidth(),
             contentKey = { it.name }, order = { it.ordinal }, fillContent = false, soft = true) { shown ->
             val currentId = state.selections[shown] ?: MangaFontCatalog.defaultId(shown)
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            val options: @Composable () -> Unit = {
+              Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(if (state.loading) "正在读取字库…" else shown.description,
                     color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp,
                     modifier = Modifier.padding(horizontal = 10.dp))
@@ -109,10 +120,16 @@ internal fun FontSettings(modifier: Modifier = Modifier) {
                     for (option in MangaFontCatalog.forScene(shown)) {
                         FontChoiceRow(shown, option, currentId == option.id, state, store,
                             managedId == option.id,
+                            compact = desktop,
                             onManage = { managedId = if (managedId == option.id) null else option.id })
                     }
                 }
+              }
             }
+            if (desktop) PreferenceWorkspace(preview = {
+                samples.SaveableStateProvider(shown.name) { FontSpecimen(shown, currentId, state, store) }
+            }, controls = options)
+            else options()
         }
         DownloadRouteControl(DownloadCategory.FONTS, enabled = state.transfers.values.none { it.active })
         if (background != null) {
@@ -133,9 +150,60 @@ internal fun FontSettings(modifier: Modifier = Modifier) {
                     trackColor = colors.onSurfaceVariant.copy(alpha = .14f))
                 Text(label, color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
             }
-        } else Text("场景独立设置 · 字库按需下载 · 长按管理",
+        } else Text(if (desktop) "各场景独立设置，下载完成后应用所选字体。" else "场景独立设置 · 字库按需下载 · 长按管理",
             color = colors.onSurfaceVariant.copy(alpha = .8f), fontSize = 12.sp, lineHeight = 18.sp,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp))
+    }
+}
+
+@Composable
+private fun FontSpecimen(scene: MangaFontScene, currentId: String, state: FontStoreState, store: FontStore) {
+    val colors = MaterialTheme.colorScheme
+    val sample = when (scene) {
+        MangaFontScene.INTERFACE -> "发现    书架    历史\n继续阅读  ·  第 128 话"
+        MangaFontScene.WORK_TITLE -> "月刊少女野崎君"
+        MangaFontScene.READING -> "翻开下一页，故事还在继续。\n夜色落在窗边，最后一格还留着光。"
+        MangaFontScene.NUMBERS -> "8.7 / 10\n128 / 235    42%"
+    }
+    var text by rememberSaveable { mutableStateOf(sample) }
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val effectiveId = if (currentId == "inherit")
+        state.selections[MangaFontScene.INTERFACE] ?: MangaFontCatalog.defaultId(MangaFontScene.INTERFACE) else currentId
+    val option = MangaFontCatalog.find(effectiveId)
+    val fallback = option != null && option.assets.isNotEmpty() &&
+        (effectiveId !in state.installed || store.family(effectiveId) == null)
+    val face = when {
+        state.loading -> "正在读取字库…"
+        fallback -> "暂用系统字体"
+        currentId == "inherit" -> "跟随界面 · " + (option?.name ?: "系统字体")
+        else -> option?.name ?: "系统字体"
+    }
+    Column(Modifier.fillMaxWidth().background(colors.surfaceContainerHigh, RoundedCornerShape(12.dp))
+        .padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("试写", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
+                color = if (focused) colors.primary else colors.onSurfaceVariant)
+            if (text != sample) MotionIconButton(onClick = { text = sample }, modifier = Modifier.size(32.dp),
+                tooltip = "还原样文") { Icon(Icons.Outlined.Restore, "还原样文", Modifier.size(16.dp)) }
+        }
+        val type = when (scene) {
+            MangaFontScene.INTERFACE -> MaterialTheme.typography.titleMedium
+            MangaFontScene.WORK_TITLE -> MaterialTheme.typography.headlineMedium
+            MangaFontScene.READING -> MaterialTheme.typography.bodyLarge
+            MangaFontScene.NUMBERS -> MaterialTheme.typography.headlineSmall
+        }.copy(fontFamily = mangaFontFamily(scene), color = colors.onSurface,
+            fontFeatureSettings = if (scene == MangaFontScene.NUMBERS) "tnum" else null)
+        BasicTextField(value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth()
+            .heightIn(min = 80.dp).semantics { contentDescription = "${scene.title}试写" },
+            maxLines = 4, textStyle = type, interactionSource = interaction, cursorBrush = SolidColor(colors.primary),
+            decorationBox = { input ->
+                Box {
+                    if (text.isEmpty()) Text("输入样文", style = type, color = colors.onSurfaceVariant)
+                    input()
+                }
+            })
+        Text(face, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
     }
 }
 
@@ -155,6 +223,7 @@ private fun FontChoiceRow(
     state: FontStoreState,
     store: FontStore,
     managementOpen: Boolean,
+    compact: Boolean,
     onManage: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -213,21 +282,23 @@ private fun FontChoiceRow(
                 onLongClick = onManage.takeIf { !builtIn })
             .semantics { contentDescription = selectionLabel; this.selected = selected }
             .motionPress(interaction, enabled = enabled, pressedScale = .99f)
-            .heightIn(min = 72.dp).padding(start = 12.dp, top = 8.dp, bottom = 8.dp),
+            .heightIn(min = if (compact) 52.dp else 72.dp).padding(start = 12.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(option.name, Modifier.weight(1f, fill = false),
-                        color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp,
+                        color = if (compact) colors.onSurface else colors.onSurfaceVariant,
+                        fontFamily = family.takeIf { compact && previewReady },
+                        fontSize = if (compact) 15.sp else 12.sp, lineHeight = if (compact) 21.sp else 18.sp,
                         fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
                     MotionSwap(selected, Modifier.size(16.dp)) { chosen ->
                         if (chosen) Icon(Icons.Outlined.Check, "已选择", Modifier.size(16.dp), tint = colors.primary)
                     }
                 }
                 if (previewReady) {
-                    Text(if (scene == MangaFontScene.NUMBERS) "8.7 / 10   12:34   299.4" else scene.sample,
+                    if (!compact) Text(if (scene == MangaFontScene.NUMBERS) "8.7 / 10   12:34   299.4" else scene.sample,
                         color = colors.onSurface, style = TextStyle(
                             fontFamily = family, fontSize = when (scene) {
                                 MangaFontScene.WORK_TITLE, MangaFontScene.NUMBERS -> 24.sp
@@ -254,6 +325,11 @@ private fun FontChoiceRow(
                 }
             }
             if (!builtIn) {
+                if (compact && !downloaded) MotionIconButton(onClick = onManage, enabled = enabled,
+                    modifier = Modifier.size(36.dp), tooltip = "字库详情") {
+                    Icon(Icons.Outlined.Info, "${option.name}详情与许可", Modifier.size(17.dp),
+                        tint = if (managementOpen) colors.primary else colors.onSurfaceVariant)
+                }
                 val downloadState = when {
                     downloading && transferReceived >= transferTotal -> CompactDownloadState.WAITING
                     downloading -> CompactDownloadState.DOWNLOADING
@@ -275,7 +351,7 @@ private fun FontChoiceRow(
                             else -> requestUse()
                         }
                     },
-                    enabled = enabled, modifier = Modifier.size(44.dp),
+                    enabled = enabled, modifier = Modifier.size(44.dp), tooltip = if (compact) actionLabel else null,
                 ) {
                     MotionSwap(downloaded && !justInstalled, Modifier.size(24.dp)) { showManage ->
                         if (showManage) Icon(Icons.Outlined.MoreHoriz, actionLabel,

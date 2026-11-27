@@ -31,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,7 +55,7 @@ internal fun AuthorWorksSheet(
     onRetry: () -> Unit,
     onOpen: (Manga) -> Unit,
 ) {
-    val grid = rememberLazyGridState()
+    val grid = key(state.manga.id, state.name) { rememberLazyGridState() }
     val nearEnd by remember(grid) {
         derivedStateOf {
             val layout = grid.layoutInfo
@@ -73,7 +74,8 @@ internal fun AuthorWorksSheet(
                 verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f).padding(vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(state.name, style = browseTitleStyle(23.sp, 30.sp), modifier = Modifier.semantics { heading() })
-                    if (state.items.isNotEmpty()) Text(mangaNumberText("已载入 ${state.items.size} 部作品"),
+                    if (state.items.isNotEmpty() || desktop && state.loading) Text(
+                        if (state.items.isEmpty()) "正在查找作者作品…" else mangaNumberText("已载入 ${state.items.size} 部作品"),
                         style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
                 }
                 MotionIconButton(onClick = dismiss) { Icon(Icons.Outlined.Close, "关闭作者作品", Modifier.size(20.dp)) }
@@ -83,11 +85,25 @@ internal fun AuthorWorksSheet(
                     state = grid, modifier = Modifier.fillMaxWidth().fillMaxHeight(),
                     contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 24.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    if (desktop && state.loading && state.items.isEmpty()) items(6,
+                        key = { "author-placeholder-$it" }, contentType = { "cover-placeholder" }) {
+                        DiscoveryCoverPlaceholder(narrow = false, showMetrics = false, showSource = true, showChapter = false)
+                    }
                     items(state.items, key = Manga::id) { manga -> CoverTile(manga, repository, dense = !desktop) { onOpen(manga) } }
                     item(key = "author-footer", span = { GridItemSpan(maxLineSpan) }) {
                         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                             when {
+                                desktop && state.loading && state.items.isEmpty() -> Unit
                                 state.loading || state.loadingMore -> CircularProgressIndicator(Modifier.padding(20.dp).size(20.dp), strokeWidth = 1.5.dp)
+                                desktop && state.error != null -> CatalogueState(
+                                    if (state.items.isEmpty()) "作者作品暂未载入" else "后续作品暂未载入",
+                                    state.error, selectableDetail = true) {
+                                    TextButton(onClick = onRetry) { Text(if (state.items.isEmpty()) "重新查找" else "重试这一页") }
+                                }
+                                desktop && state.items.isEmpty() -> CatalogueState("暂时没有这位作者的作品",
+                                    if (state.hasMore) "当前页没有作品，可以继续加载。" else "当前来源没有返回其他作品。") {
+                                    TextButton(onClick = dismiss) { Text("返回作品") }
+                                }
                                 state.error != null -> {
                                     Text(state.error, color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp,
                                         modifier = Modifier.padding(vertical = 12.dp))

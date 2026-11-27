@@ -75,8 +75,9 @@ internal fun CommentTranslationAction(text: String, color: Color, modifier: Modi
         fallbackVisible = true
     }
 
+    val desktop = platformKind == PlatformKind.DESKTOP
     val interaction = remember { MutableInteractionSource() }
-    Box(modifier.size(24.dp)
+    Box(modifier.size(if (desktop) 32.dp else 24.dp)
         .semantics { contentDescription = "用设备上的翻译应用翻译评论" }
         .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = {
             // Stay well below Binder's transaction limit; never silently translate a truncated review.
@@ -92,6 +93,7 @@ internal fun CommentTranslationAction(text: String, color: Color, modifier: Modi
             }
         }).motionPress(interaction, pressedScale = .94f), contentAlignment = Alignment.Center) {
         Icon(Icons.Outlined.Translate, null, tint = color, modifier = Modifier.size(14.dp))
+        if (desktop) DesktopIconTooltip("翻译评论", interaction, true)
     }
 
     MotionDialog(visible = fallbackVisible, onDismissRequest = { fallbackVisible = false }) {

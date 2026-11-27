@@ -108,7 +108,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
@@ -1191,6 +1190,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         LocalMangaMetrics provides displayedMetrics,
         LocalWallpaperActive provides (frame is Frame.Root && hasWallpaper && !(section == Section.ANIME && animeImmersive)),
     ) {
+    var settingsFindRequest by remember(section, frame.key) { mutableIntStateOf(0) }
     val desktopShortcutsActive = desktop && !drawerVisible && !rootHandoff && sourceManagement == null &&
         sourceResumeChoice == null && authorWorks == null && !recentReadingOpen && !tagSearchVisible &&
         !experienceOpen && !profileSourcesOpen && !sourceSettingsOpen && sourceDetailsId == null && !copySyncOpen &&
@@ -1284,7 +1284,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 if (event.type == KeyEventType.KeyDown) {
                     val findInBook = event.key == Key.F && (frame is Frame.Reader ||
                         frame is Frame.Detail && frame.state.rankedWork == null)
-                    if (findInBook) {
+                    if (event.key == Key.F && frame is Frame.Root && section == Section.SETTINGS) {
+                        settingsFindRequest++
+                    } else if (findInBook) {
                         desktopFindOwner = frame.key
                         desktopFindRequest++
                     } else openDesktopSearch()
@@ -1418,7 +1420,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             modifier = if (desktopNavigationVisible) Modifier else Modifier.mangaHazeSource(drawerBackdrop),
             containerColor = if (desktopRoot) Color.Transparent else MaterialTheme.colorScheme.background,
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
+            snackbarHost = { MangaSnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
         ) { innerPadding ->
             Box(Modifier.fillMaxSize().padding(innerPadding)) {
             SharedTransitionLayout {
@@ -1925,7 +1927,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                     recentCopyGroupTerms = if (copyGroupEnabled) copyGroupTerms else emptyList(),
                                                     onCopyGroupTerm = if (copyGroupEnabled) model::chooseRecentCopyGroupTerm else null,
                                                     onClearCopyGroupTerms = if (copyGroupEnabled) model::clearRecentCopyGroupTerms else null,
-                                                    desktopMainContent = true,
+                                                    desktopMainContent = true, onEditQuery = { desktopSearchRequest++ },
                                                     desktopActions = { manga -> listOf(
                                                         DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList, onClick = {
                                                             if (copyGroupEnabled) model.noteCopyGroupResultOpened(manga)
@@ -2103,6 +2105,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onRetrySync = model::retryAccountSync,
                                     )
                                     Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications,
+                                        desktopFindRequest = settingsFindRequest,
                                         openWebDavSettings = openWebDavSettings,
                                         onWebDavSettingsOpened = { openWebDavSettings = false },
                                         onWebDavSettingsClosed = {

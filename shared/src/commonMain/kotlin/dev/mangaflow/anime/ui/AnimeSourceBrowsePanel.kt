@@ -1,6 +1,9 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -16,6 +19,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -26,6 +32,8 @@ import dev.mangaflow.anime.*
 import dev.mangaflow.anime.sources.AnimeSourceBrowseState
 import dev.mangaflow.anime.sources.lanerc.LanercCategory
 import dev.mangaflow.anime.sources.lanerc.LanercFilter
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
@@ -165,6 +173,7 @@ private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?,
                 }
             }
         }
+        DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
     }
 }
 
@@ -173,50 +182,80 @@ private fun AnimeSourcePreview(title: AnimeSourceTitle, sourceName: String, vide
     state: AnimeSourceBrowseState, preferred: Int?, scrolls: AnimeDiscoveryScrolls,
     contentBottomPadding: Dp, onChooseTitle: (AnimeSourceTitle, Boolean) -> Unit,
     onOpen: (AnimeSourceTitle) -> Unit, onRetry: () -> Unit) {
+    val related = state.related.isNotEmpty() || state.relatedLoading || state.relatedError != null
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val columns = animeDiscoveryColumns(maxWidth, preferred)
-        LazyVerticalGrid(GridCells.Fixed(columns),
-            state = scrolls.grid("preview:${title.sourceId}:${title.sourceRevision}:${title.id}"), modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = contentBottomPadding),
-            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item(key = "subject", span = { GridItemSpan(maxLineSpan) }) {
-                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        AnimePoster(title.coverUrl, Modifier.size(88.dp, 132.dp), title.sourceId)
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                AnimeSourceMark(title.sourceId, sourceName, size = 18.dp)
-                                AnimeQuietLabel(sourceName)
-                            }
-                            Text(title.title, style = animeWorkTitleStyle(large = true),
-                                maxLines = 3, overflow = TextOverflow.Ellipsis)
-                            listOfNotNull(title.year?.toString(), title.updateText.takeIf(String::isNotBlank),
-                                title.ratingText.takeIf(String::isNotBlank)).joinToString(" · ").takeIf(String::isNotBlank)
-                                ?.let { AnimeQuietLabel(it) }
+        val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val wide = platformKind == PlatformKind.DESKTOP && related && maxWidth >= 858.dp * scale && maxHeight >= 318.dp * scale
+        val sideWidth = (maxWidth * .29f).coerceIn(224.dp, 332.dp)
+        val catalogueWidth = if (wide) maxWidth - sideWidth - 28.dp else maxWidth
+        val columns = animeDiscoveryColumns(catalogueWidth, preferred)
+        val scrollKey = "preview:${title.sourceId}:${title.sourceRevision}:${title.id}"
+        val grid = scrolls.grid(if (wide) "$scrollKey:related" else scrollKey)
+        val choose = { onChooseTitle(title, videoSource) }
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(if (wide) 12.dp else 0.dp)) {
+            if (wide) {
+                val sideScroll = rememberScrollState()
+                Box(Modifier.width(sideWidth).fillMaxHeight().padding(start = 12.dp, top = 8.dp, bottom = 12.dp)
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .032f), RoundedCornerShape(18.dp))) {
+                    Column(Modifier.fillMaxWidth().verticalScroll(sideScroll).padding(16.dp)) {
+                        AnimeSourcePreviewHeading(title, sourceName, videoSource, true, choose)
+                    }
+                    DesktopVerticalScrollbar(sideScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                }
+            }
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                LazyVerticalGrid(GridCells.Fixed(columns), state = grid, modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = if (wide) 2.dp else 12.dp, end = 12.dp,
+                        top = 8.dp, bottom = contentBottomPadding),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (!wide) item(key = "subject", span = { GridItemSpan(maxLineSpan) }) {
+                        AnimeSourcePreviewHeading(title, sourceName, videoSource, false, choose)
+                    }
+                    if (related) {
+                        item(key = "related-heading", span = { GridItemSpan(maxLineSpan) }) {
+                            AnimeDiscoverySectionHeading("相关番剧", "", refreshing = state.relatedLoading)
+                        }
+                        if (state.relatedError != null) item(key = "related-error", span = { GridItemSpan(maxLineSpan) }) {
+                            AnimeDiscoveryInlineStatus("暂时无法读取相关番剧", onRetry, detail = state.relatedError)
+                        }
+                        items(state.related, key = { "related:${it.sourceId}:${it.id}" }) { item ->
+                            AnimeSourceDiscoveryCard(item, list = columns == 1, onOpen = { onOpen(item) })
                         }
                     }
-                    MotionButton(onClick = { onChooseTitle(title, videoSource) },
-                        modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth().heightIn(min = 48.dp)) {
-                        Text(if (videoSource) "查看详情" else "匹配对应番剧")
-                        Spacer(Modifier.width(6.dp))
-                        Icon(if (videoSource) Icons.AutoMirrored.Outlined.ArrowForward else Icons.Outlined.Search,
-                            null, Modifier.size(18.dp))
-                    }
                 }
+                DesktopVerticalScrollbar(grid, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
             }
-            if (state.related.isNotEmpty() || state.relatedLoading || state.relatedError != null) {
-                item(key = "related-heading", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoverySectionHeading("相关番剧", "", refreshing = state.relatedLoading)
-                }
-                if (state.relatedError != null) item(key = "related-error", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoveryInlineStatus("暂时无法读取相关番剧", onRetry, detail = state.relatedError)
-                }
-                items(state.related, key = { "related:${it.sourceId}:${it.id}" }) { related ->
-                    AnimeSourceDiscoveryCard(related, list = columns == 1, onOpen = { onOpen(related) })
-                }
-            }
+        }
+    }
+}
+
+@Composable
+private fun AnimeSourcePreviewHeading(title: AnimeSourceTitle, sourceName: String, video: Boolean,
+    side: Boolean, onChoose: () -> Unit) {
+    val identity: @Composable () -> Unit = {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AnimeSourceMark(title.sourceId, sourceName, size = 18.dp)
+            AnimeQuietLabel(sourceName)
+        }
+        Text(title.title, Modifier.semantics { heading() }, style = animeWorkTitleStyle(large = true),
+            maxLines = if (side) 5 else 3, overflow = TextOverflow.Ellipsis)
+        listOfNotNull(title.year?.toString(), title.updateText.takeIf(String::isNotBlank),
+            title.ratingText.takeIf(String::isNotBlank)).joinToString(" · ").takeIf(String::isNotBlank)
+            ?.let { AnimeQuietLabel(it) }
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        if (side) {
+            AnimePoster(title.coverUrl, Modifier.size(112.dp, 160.dp), title.sourceId)
+            Column(verticalArrangement = Arrangement.spacedBy(7.dp)) { identity() }
+        } else Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            AnimePoster(title.coverUrl, Modifier.size(88.dp, 132.dp), title.sourceId)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) { identity() }
+        }
+        MotionButton(onClick = onChoose, modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth().heightIn(min = 48.dp)) {
+            Text(if (video) "查看详情" else "匹配对应番剧")
+            Spacer(Modifier.width(6.dp))
+            Icon(if (video) Icons.AutoMirrored.Outlined.ArrowForward else Icons.Outlined.Search, null, Modifier.size(18.dp))
         }
     }
 }
@@ -226,37 +265,71 @@ private fun AnimeSourceFilters(visible: Boolean, category: LanercCategory?, sele
     backdrop: HazeState, onDismiss: () -> Unit, onClosed: () -> Unit, onSelect: (String, String?) -> Unit) {
     var retained by remember { mutableStateOf<LanercCategory?>(null) }
     if (category != null && visible) SideEffect { retained = category }
-    MotionDialog(visible && category != null, onDismissRequest = onDismiss, maximumWidth = 480.dp,
+    MotionDialog(visible && category != null, onDismissRequest = onDismiss, maximumWidth = animePanelWidth(774.dp, 480.dp), properties = animePanelDialogProperties,
         onClosed = { retained = null; onClosed() }) {
         val shown = category ?: retained
         AnimePanelSurface(backdrop) {
-            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)
-                .verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                AnimeSectionTitle(shown?.title ?: "来源筛选", action = {
-                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭筛选") {
-                        Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
+            var currentKey by remember(shown?.key) { mutableStateOf<String?>(null) }
+            val filters = shown?.filters.orEmpty()
+            val current = filters.firstOrNull { it.key == currentKey } ?: filters.firstOrNull()
+            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
+                AnimeSectionTitle(shown?.title ?: "来源筛选", modifier = Modifier.padding(start = 20.dp, end = 8.dp, top = 4.dp),
+                    action = {
+                        MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭筛选") {
+                            Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
+                        }
+                    })
+                AnimePaneLayout(Modifier.weight(1f, fill = false), minimumWidth = 604.dp, sidebar = {
+                    AnimeScrollableList(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        items(filters, key = { it.key }) { filter ->
+                            val value = selected[filter.key]
+                            val selectedLabel = filter.options.firstOrNull { it.value == value }?.label
+                            AnimePaneChoice(filter.title, current?.key == filter.key, { currentKey = filter.key },
+                                detail = selectedLabel?.takeIf(String::isNotBlank))
+                        }
                     }
-                })
-                shown?.filters?.forEach { filter ->
-                    AnimeBrowseFilter(filter, selected[filter.key],
-                        onSelect = { onSelect(filter.key, it) })
+                }) { wide ->
+                    key(if (wide) current?.key else null) {
+                        AnimeScrollableList(Modifier.fillMaxWidth().weight(1f, fill = false),
+                            contentPadding = PaddingValues(start = if (wide) 4.dp else 20.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            items(if (wide) listOfNotNull(current) else filters, key = { it.key }) { filter ->
+                                AnimeBrowseFilter(filter, selected[filter.key], wide, onSelect = { onSelect(filter.key, it) })
+                            }
+                        }
+                    }
                 }
-                MotionButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回目录") }
+                MotionButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End).padding(horizontal = 16.dp, vertical = 8.dp)
+                    .widthIn(max = 280.dp).fillMaxWidth().heightIn(min = 44.dp)) { Text("返回目录") }
             }
         }
     }
 }
 
 @Composable
-private fun AnimeBrowseFilter(filter: LanercFilter, value: String?, onSelect: (String?) -> Unit) {
+private fun AnimeBrowseFilter(filter: LanercFilter, value: String?, wide: Boolean, onSelect: (String?) -> Unit) {
     val options = buildList<Pair<String?, String>> {
         add(null to "默认")
         addAll(filter.options.distinctBy { it.value }.map { it.value to it.label.ifBlank { "不限" } })
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        AnimeQuietLabel(filter.title)
-        AnimeChoiceStrip(options.map { it.second }, options.indexOfFirst { it.first == value },
-            onSelect = { onSelect(options[it].first) })
+        if (wide) {
+            Text(filter.title, Modifier.padding(start = 6.dp, bottom = 6.dp).semantics { heading() },
+                style = MaterialTheme.typography.titleMedium)
+            options.chunked(2).forEach { pair ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    pair.forEach { option ->
+                        Box(Modifier.weight(1f)) { AnimeSelection(option.second, selected = option.first == value,
+                            onClick = { onSelect(option.first) }) }
+                    }
+                    if (pair.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        } else {
+            AnimeQuietLabel(filter.title)
+            AnimeChoiceStrip(options.map { it.second }, options.indexOfFirst { it.first == value },
+                onSelect = { onSelect(options[it].first) })
+        }
         if (value != null && options.none { it.first == value }) AnimeQuietLabel("原筛选已不可用，请重新选择")
     }
 }

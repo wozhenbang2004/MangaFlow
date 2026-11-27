@@ -64,6 +64,8 @@ import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.CloudSync
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.CloudUpload
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Code
@@ -203,6 +205,7 @@ fun SettingsScreen(
     onOpenLanReadingSync: (() -> Unit)? = null,
     onOpenMangaTracking: (() -> Unit)? = null,
     lanReadingConflictCount: Int = 0,
+    desktopFindRequest: Int = 0,
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -232,6 +235,12 @@ fun SettingsScreen(
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
     val desktop = platformKind == PlatformKind.DESKTOP
+    val appearanceManga = if (desktop) remember(libraryStore) {
+        kotlinx.coroutines.flow.combine(libraryStore.history, libraryStore.favorites) { history, favorites ->
+            history.firstOrNull { it.manga.coverUrl.isNotBlank() }?.manga
+                ?: favorites.firstOrNull { it.coverUrl.isNotBlank() }
+        }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = null).value else null
     var settingsCategory by rememberSaveable { mutableStateOf(0) }
     val settingsFocus = androidx.compose.ui.platform.LocalFocusManager.current
     val settingsScroll = rememberLazyListState()
@@ -252,7 +261,7 @@ fun SettingsScreen(
         ApplicationOperationKind.WEBDAV_READ -> "webdav-download"
         else -> "webdav-save"
     } }
-    var backupNotice by remember { mutableStateOf<String?>(null) }
+    var backupNotice by remember { mutableStateOf<BackupNotice?>(null) }
     var pendingRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
     var pendingWebDavRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
     val webDavStore = remember(context.applicationContext) { WebDavBackupStore.get(context.applicationContext) }
@@ -308,20 +317,25 @@ fun SettingsScreen(
     }
 
     val backupWriter = rememberTextDocumentSaver { result ->
-        backupNotice = if (result.saved) "阅读备份已导出" else result.error
+        backupNotice = if (result.saved) BackupNotice("阅读备份已导出")
+            else result.error?.let { BackupNotice(it, failed = true) }
         exportSaving = false
     }
     fun exportBackup() {
         if (backupBusy != null) return
         backupNotice = null
-        operations.exportReadingBackup(libraryStore)
+        if (!operations.exportReadingBackup(libraryStore).accepted)
+            backupNotice = BackupNotice("已有备份操作，请稍后再导出。", failed = true)
     }
     val importBackup = rememberOpenDocumentPicker() { uri ->
         if (uri != null) {
             if (backupBusy == null) {
                 backupNotice = null
                 val handle = operations.inspectReadingBackup(context, libraryStore, uri)
-                if (!handle.accepted) releasePickedDocuments(listOf(uri))
+                if (!handle.accepted) {
+                    releasePickedDocuments(listOf(uri))
+                    backupNotice = BackupNotice("已有备份操作，请稍后再选择文件。", failed = true)
+                }
             } else releasePickedDocuments(listOf(uri))
         }
     }
@@ -335,7 +349,10 @@ fun SettingsScreen(
                 webDavNotice = operation.message?.let {
                     WebDavFeedback(it, failed = operation.phase != ApplicationOperationPhase.CANCELLED)
                 }
-            } else backupNotice = operation.message
+            } else backupNotice = operation.message?.let {
+                BackupNotice(it, failed = operation.phase == ApplicationOperationPhase.FAILED ||
+                    operation.phase == ApplicationOperationPhase.INTERRUPTED)
+            }
             operations.consumeResult(operation.id)
             return@LaunchedEffect
         }
@@ -354,7 +371,7 @@ fun SettingsScreen(
             }
             ApplicationOperationKind.BACKUP_RESTORE -> operations.result<LibraryBackupInfo>(operation.id)?.let { result ->
                 val restored = result.await()
-                backupNotice = "已恢复 ${restored.favorites} 本收藏、${restored.history} 条阅读记录"
+                backupNotice = BackupNotice("已恢复 ${restored.favorites} 本收藏、${restored.history} 条阅读记录")
                 operations.consumeResult(operation.id)
             }
             ApplicationOperationKind.WEBDAV_READ -> operations.result<InspectedReadingBackup?>(operation.id)?.let { result ->
@@ -448,7 +465,8 @@ fun SettingsScreen(
                         ReaderTheme.SEPIA -> "暖纸"
                         ReaderTheme.INK -> "墨黑"
                     }, Icons.Outlined.Palette, expandedSetting == "paper", { toggleSetting("paper") }, headerModifier = searchTarget("paper")) {
-                        PaperThemePicker(preferences.theme) { theme ->
+                        PaperThemePicker(preferences.theme, desktopPreview = desktop, manga = appearanceManga,
+                            repository = sourceRepository) { theme ->
                             libraryStore.updatePreferences(preferences.copy(theme = theme))
                         }
                     }
@@ -464,7 +482,8 @@ fun SettingsScreen(
                 }
                 RetainedSettingsCategory(1, selected) {
                 SettingsSection("外观", sourceBackdrop) {
-                    DetailAppearanceSettings(searchTarget("cover-tone"), if (foundSetting == "cover-tone") findRequest else 0)
+                    DetailAppearanceSettings(searchTarget("cover-tone"), if (foundSetting == "cover-tone") findRequest else 0,
+                        manga = appearanceManga, repository = sourceRepository)
                     SettingsDisclosure("字体", "", Icons.Outlined.TextFields,
                         expandedSetting == "fonts", { toggleSetting("fonts") }, headerModifier = searchTarget("fonts")) {
                         FontSettings()
@@ -508,7 +527,9 @@ fun SettingsScreen(
                         }
                     }
                     SettingsDisclosure("备份与同步", when {
-                        backupBusy != null -> "正在处理…"
+                        backupBusy == "export-saving" -> "等待选择保存位置"
+                        backupBusy != null -> backupOperation?.message ?: "正在处理…"
+                        desktop && backupNotice != null -> backupNotice?.message.orEmpty()
                         !desktop && lanReadingConflictCount > 0 -> "$lanReadingConflictCount 处阅读差异待确认"
                         desktop -> "漫画账号 · 阅读备份"
                         else -> "设备 · 漫画账号 · 阅读备份"
@@ -520,28 +541,37 @@ fun SettingsScreen(
                                 SettingsLinkRow("漫画账号同步", "Bangumi · AniList", Icons.Outlined.CloudSync, onClick = open)
                             }
                             SettingsLinkRow("导出阅读备份",
-                                if (backupBusy == "export") "正在导出…" else "书架、进度、画面收藏与阅读统计",
-                                Icons.Outlined.UploadFile) {
-                                if (backupBusy == null) exportBackup()
+                                when (backupBusy) {
+                                    "export" -> "正在准备备份…"
+                                    "export-saving" -> "等待选择保存位置"
+                                    else -> "书架、进度、画面收藏与阅读统计"
+                                }, Icons.Outlined.UploadFile, enabled = backupBusy == null) {
+                                exportBackup()
                             }
                             SettingsLinkRow("恢复阅读备份",
                                 if (backupBusy == "inspect" || backupBusy == "restore") "正在处理…" else "从备份文件恢复本机阅读数据",
-                                Icons.Outlined.Restore) {
-                                if (backupBusy == null) importBackup.launch(arrayOf("application/json", "text/plain"))
+                                Icons.Outlined.Restore, enabled = backupBusy == null) {
+                                importBackup.launch(arrayOf("application/json", "text/plain"))
                             }
-                            SettingsLinkRow("WebDAV 阅读备份", webDavStatusDetail(webDavConfig, backupBusy), Icons.Outlined.CloudSync) {
-                                if (backupBusy == null || backupBusy.startsWith("webdav-")) { webDavNotice = null; showWebDav = true }
+                            SettingsLinkRow("WebDAV 阅读备份", webDavStatusDetail(webDavConfig, backupBusy), Icons.Outlined.CloudSync,
+                                enabled = backupBusy == null || backupBusy.startsWith("webdav-")) {
+                                webDavNotice = null; showWebDav = true
                             }
                         }
                         SettingsOperationStatus(backupOperation) { operations.cancel(it) }
+                        if (desktop) {
+                            backupNotice?.let { SettingsBackupReceipt(it.message, it.failed) }
+                            webDavNotice?.let { SettingsBackupReceipt(it.message, it.failed) }
+                        }
                         Text("备份不包含账号、密码、缓存与漫画文件；恢复前会再次确认。",
                             style = MaterialTheme.typography.bodySmall, color = secondary)
                     }
                     SettingsLinkRow("存储管理", "阅读缓存、离线下载与模型", Icons.Outlined.Storage,
                         inlineDetail = true) { showStorage = true }
-                    backupNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
+                    if (!desktop) backupNotice?.let { Text(it.message, style = MaterialTheme.typography.bodySmall,
+                        color = if (it.failed) colors.error else secondary,
                         modifier = Modifier.padding(vertical = 6.dp)) }
-                    webDavNotice?.let { Text(it.message, style = MaterialTheme.typography.bodySmall,
+                    if (!desktop) webDavNotice?.let { Text(it.message, style = MaterialTheme.typography.bodySmall,
                         color = if (it.failed) colors.error else secondary,
                         modifier = Modifier.padding(vertical = 6.dp)) }
                 }
@@ -585,10 +615,8 @@ fun SettingsScreen(
                                                 showPlatformMessage(context, "上次检查 $timestamp")
                                             }))
                                 }
-                                MotionIconButton(
-                                    modifier = Modifier.size(44.dp).semantics { contentDescription = updateAction },
-                                    enabled = update.phase !in setOf(UpdatePhase.CHECKING, UpdatePhase.VERIFYING),
-                                    onClick = {
+                                val updateEnabled = update.phase !in setOf(UpdatePhase.CHECKING, UpdatePhase.VERIFYING)
+                                val runUpdate: () -> Unit = {
                                         when (update.phase) {
                                             UpdatePhase.AVAILABLE -> updateManager.download()
                                             UpdatePhase.DOWNLOADING -> updateManager.cancelDownload()
@@ -596,8 +624,8 @@ fun SettingsScreen(
                                             UpdatePhase.IDLE, UpdatePhase.CURRENT, UpdatePhase.ERROR -> updateManager.check()
                                             else -> Unit
                                         }
-                                    },
-                                ) {
+                                }
+                                val updateGlyph: @Composable () -> Unit = {
                                     MotionSwap(update.phase, Modifier.size(20.dp)) { phase ->
                                         when (phase) {
                                             UpdatePhase.CHECKING, UpdatePhase.VERIFYING ->
@@ -605,10 +633,21 @@ fun SettingsScreen(
                                             UpdatePhase.AVAILABLE -> Icon(Icons.Outlined.ArrowDownward, null, Modifier.size(20.dp), tint = colors.primary)
                                             UpdatePhase.DOWNLOADING -> Icon(Icons.Outlined.Pause, null, Modifier.size(20.dp), tint = foreground)
                                             UpdatePhase.READY -> Icon(Icons.Outlined.SystemUpdate, null, Modifier.size(20.dp), tint = colors.primary)
+                                            UpdatePhase.CURRENT -> Icon(if (desktop) Icons.Outlined.CheckCircle else Icons.Outlined.Refresh,
+                                                null, Modifier.size(20.dp), tint = foreground)
                                             else -> Icon(Icons.Outlined.Refresh, null, Modifier.size(20.dp), tint = foreground)
                                         }
                                     }
                                 }
+                                if (desktop) TextButton(onClick = runUpdate, enabled = updateEnabled,
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = ButtonDefaults.textButtonColors(containerColor = colors.secondaryContainer,
+                                        contentColor = colors.onSecondaryContainer),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)) {
+                                    updateGlyph()
+                                    Text(updateAction, Modifier.padding(start = 6.dp), style = MaterialTheme.typography.labelLarge)
+                                } else MotionIconButton(onClick = runUpdate, enabled = updateEnabled,
+                                    modifier = Modifier.size(44.dp).semantics { contentDescription = updateAction }) { updateGlyph() }
                             }
                             val status = when (update.phase) {
                                 UpdatePhase.IDLE -> null
@@ -623,7 +662,12 @@ fun SettingsScreen(
                             }
                             update.release?.let { release ->
                                 if (release.notes.isNotBlank()) {
-                                    Text(release.notes,
+                                    if (desktop) SettingsDisclosure("更新说明", release.versionName, Icons.Outlined.Info,
+                                        expandedNotes, { expandedNotes = !expandedNotes }, compact = true) {
+                                        androidx.compose.foundation.text.selection.SelectionContainer {
+                                            Text(release.notes, style = MaterialTheme.typography.bodyMedium, color = foreground)
+                                        }
+                                    } else Text(release.notes,
                                         modifier = Modifier.padding(start = 32.dp).clickable(role = Role.Button,
                                             onClickLabel = if (expandedNotes) "收起更新说明" else "展开更新说明") { expandedNotes = !expandedNotes },
                                         style = MaterialTheme.typography.bodySmall, color = secondary,
@@ -637,10 +681,13 @@ fun SettingsScreen(
                             if (update.phase == UpdatePhase.DOWNLOADING) {
                                 Row(Modifier.fillMaxWidth().padding(start = 32.dp), verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    LinearProgressIndicator(progress = { update.progress },
+                                    if (update.total > 0L) LinearProgressIndicator(progress = { update.progress },
                                         modifier = Modifier.weight(1f).height(2.dp).clip(CircleShape),
                                         color = colors.primary.copy(alpha = .8f), trackColor = colors.primary.copy(alpha = .10f))
-                                    Text("${settingsBytes(update.downloaded)} / ${settingsBytes(update.total)}",
+                                    else LinearProgressIndicator(modifier = Modifier.weight(1f).height(2.dp).clip(CircleShape),
+                                        color = colors.primary.copy(alpha = .8f), trackColor = colors.primary.copy(alpha = .10f))
+                                    Text(if (update.total > 0L) "${settingsBytes(update.downloaded)} / ${settingsBytes(update.total)}"
+                                        else "已下载 ${settingsBytes(update.downloaded)}",
                                         style = MaterialTheme.typography.bodySmall, color = secondary)
                                 }
                             }
@@ -701,7 +748,7 @@ fun SettingsScreen(
             add(DesktopSettingsLink(3, "自动检查与更新提醒", "通知 提醒 开关") { openSetting("update-options") })
             add(DesktopSettingsLink(3, "项目主页", "GitHub 仓库 源代码") { openSetting("project") })
         }
-        DesktopSettingsLayout(settingsCategory, { settingsCategory = it }, contentTopPadding, links, settingsContent)
+        DesktopSettingsLayout(settingsCategory, { settingsCategory = it }, contentTopPadding, links, desktopFindRequest, settingsContent)
     } else settingsContent(contentTopPadding)
 
     if (showBodySources && sourceRegistry != null) {
@@ -740,7 +787,7 @@ fun SettingsScreen(
         pending = pendingRestore.takeIf { screenActive },
         backdrop = sourceBackdrop,
         busy = backupBusy == "restore",
-        error = backupNotice?.takeIf { pendingRestore != null },
+        error = backupNotice?.takeIf { it.failed && pendingRestore != null }?.message,
         onDismiss = { pendingRestore = null },
         onConfirm = {
             val pending = pendingRestore ?: return@BackupRestoreDialog
@@ -749,7 +796,7 @@ fun SettingsScreen(
             if (handle.accepted) {
                 backupNotice = null
                 pendingRestore = null
-            }
+            } else backupNotice = BackupNotice("已有备份操作，请稍后再恢复。", failed = true)
         },
     )
     WebDavBackupDialog(
@@ -788,6 +835,23 @@ private data class PendingLibraryRestore(
     val payload: String,
     val info: LibraryBackupInfo,
 )
+
+private data class BackupNotice(val message: String, val failed: Boolean = false)
+
+@Composable
+private fun SettingsBackupReceipt(message: String, failed: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth().background(
+        if (failed) colors.errorContainer.copy(alpha = .52f) else colors.surfaceContainerHigh,
+        RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 8.dp)
+        .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Icon(if (failed) Icons.Outlined.ErrorOutline else Icons.Outlined.Info, null, Modifier.size(16.dp),
+            tint = if (failed) colors.error else colors.onSurfaceVariant)
+        Text(message, style = MaterialTheme.typography.bodySmall,
+            color = if (failed) colors.onErrorContainer else colors.onSurface)
+    }
+}
 
 private data class WebDavBackupDraft(
     val endpoint: String,
@@ -1040,10 +1104,11 @@ private fun BackupRestoreDialog(
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
     var retained by remember { mutableStateOf(pending) }
     androidx.compose.runtime.SideEffect { if (pending != null) retained = pending }
     MotionDialog(visible = pending != null, onDismissRequest = onDismiss,
-        onClosed = { if (pending == null) retained = null }, maximumWidth = 520.dp) {
+        onClosed = { if (pending == null) retained = null }, maximumWidth = if (desktop) 592.dp else 520.dp) {
         (pending ?: retained)?.let { restore ->
             val colors = MaterialTheme.colorScheme
             ReadingBackupPanel(backdrop, Modifier.padding(horizontal = 12.dp).fillMaxWidth()) {
@@ -1055,8 +1120,32 @@ private fun BackupRestoreDialog(
                         val date = restore.info.createdAt.takeIf { it > 0 }?.let {
                             formatInstantMillis(it, "yyyy-MM-dd HH:mm")
                         } ?: "未知时间"
-                        Text(date, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                        Text(
+                        Text(if (desktop) "备份时间 · $date" else date, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        if (desktop) {
+                            val info = restore.info
+                            val totals = listOf("书架收藏" to "${info.favorites} 本", "阅读记录" to "${info.history} 条",
+                                "画面收藏" to "${info.bookmarks} 项")
+                            BoxWithConstraints(Modifier.fillMaxWidth().background(colors.surfaceContainerHigh,
+                                RoundedCornerShape(10.dp)).padding(12.dp)) {
+                                val full = maxWidth >= 320.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+                                if (full) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    totals.forEach { (label, value) ->
+                                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Text(label, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                                            Text(value, style = MaterialTheme.typography.titleLarge)
+                                        }
+                                    }
+                                } else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    totals.forEach { (label, value) -> Row(Modifier.fillMaxWidth()) {
+                                        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                                        Text(value, style = MaterialTheme.typography.bodyMedium)
+                                    } }
+                                }
+                            }
+                            Text(listOfNotNull(info.animeEntries?.let { "追番记录 $it 部" } ?: "当前追番记录将保留",
+                                info.animeSources?.let { "动漫源 $it 个" }).joinToString(" · "),
+                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        } else Text(
                             "${restore.info.favorites} 本收藏 · ${restore.info.history} 条阅读记录 · ${restore.info.bookmarks} 项画面收藏" +
                                 (restore.info.animeEntries?.let { " · $it 部追番记录" } ?: " · 现有追番记录保留") +
                                 (restore.info.animeSources?.let { " · $it 个动漫源" } ?: ""),

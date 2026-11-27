@@ -226,6 +226,14 @@ private fun DownloadConnectionSettings(
         stableSize = true) { editing ->
         val interactive = active && editing == proxyEditing
         if (!editing) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            overviewNotice?.let { notice ->
+                Row(Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
+                    horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val tint = if (notice.failed) colors.error else mangaStatusColors().success
+                    Icon(if (notice.failed) Icons.Outlined.Info else Icons.Outlined.Check, null, Modifier.size(15.dp), tint = tint)
+                    Text(notice.message, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = tint)
+                }
+            }
             if (relayLinkAvailable) {
                 Text("代理方式", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
                 MotionTabs(if (settings.proxyProvider == DownloadProxyProvider.RELAY) 0 else 1,
@@ -233,7 +241,7 @@ private fun DownloadConnectionSettings(
                         val next = if (index == 0) DownloadProxyProvider.RELAY else DownloadProxyProvider.CUSTOM
                         if (interactive && next != settings.proxyProvider) try {
                             store.setProxyProvider(next)
-                            overviewNotice = null
+                            overviewNotice = ConnectionNotice(if (next == DownloadProxyProvider.RELAY) "代理方式已保存 · Relay" else "代理方式已保存 · 自定义地址")
                         } catch (_: Exception) { overviewNotice = ConnectionNotice("切换未保存，请重试", failed = true) }
                     }, modifier = Modifier.fillMaxWidth(), role = Role.RadioButton,
                     treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 44.dp,
@@ -273,7 +281,10 @@ private fun DownloadConnectionSettings(
                 onSelect = { chosen ->
                     if (interactive) {
                         overviewNotice = null
-                        try { store.setDefault(chosen) }
+                        try {
+                            store.setDefault(chosen)
+                            overviewNotice = ConnectionNotice("默认线路已保存 · ${downloadRouteLabel(chosen)}")
+                        }
                         catch (_: DownloadRouteException) {
                             if (settings.proxyProvider == DownloadProxyProvider.CUSTOM) startEditing(chosen == DownloadRouteMode.PROXY)
                             else overviewNotice = ConnectionNotice(
@@ -338,14 +349,6 @@ private fun DownloadConnectionSettings(
                 expanded = expandedConnection == "environment", compact = true,
                 onToggle = { if (interactive) expandedConnection = if (expandedConnection == "environment") null else "environment" }) {
                 connectionSummary()
-            }
-            overviewNotice?.let { notice ->
-                Row(Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
-                    horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    val tint = if (notice.failed) colors.error else colors.onSurfaceVariant
-                    Icon(if (notice.failed) Icons.Outlined.Info else Icons.Outlined.Check, null, Modifier.size(15.dp), tint = tint)
-                    Text(notice.message, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = tint)
-                }
             }
         } else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -459,6 +462,7 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
     var type by remember(sourceId, saved) { mutableStateOf(editableProxy?.type ?: DownloadProxyType.SOCKS) }
     var useManualProxy by remember(sourceId, saved) { mutableStateOf(saved?.proxy != null) }
     var notice by remember(sourceId) { mutableStateOf<String?>(null) }
+    var lastSave by remember(sourceId) { mutableStateOf<DownloadRoutingSettings?>(null) }
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     fun resetDraft() {
@@ -480,9 +484,15 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
         RouteDisclosure(title, if (saved == null) "使用默认" else "单独设置", expanded) {
             if (expanded) { resetDraft(); close() } else { resetDraft(); expanded = true }
         }
-        Text(if (inheritsDifferentRoutes) "当前：阅读 $currentLabel · 下载 $downloadLabel" else "当前：$currentLabel",
-            modifier = Modifier.padding(start = 12.dp, bottom = 4.dp),
-            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        val savedHere = lastSave === settings && !expanded
+        val routeSummary = if (inheritsDifferentRoutes) "阅读 $currentLabel · 下载 $downloadLabel" else currentLabel
+        Row(Modifier.padding(start = 12.dp, bottom = 4.dp)
+            .semantics { if (savedHere) liveRegion = LiveRegionMode.Polite },
+            horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (savedHere) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp), tint = mangaStatusColors().success)
+            Text((if (savedHere) "已保存 · " else "当前 · ") + routeSummary, style = MaterialTheme.typography.labelSmall,
+                color = if (savedHere) mangaStatusColors().success else colors.onSurfaceVariant)
+        }
         // This lazy source-details row owns its single retained editor expansion.
         CopyShelfReveal(expanded) {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -556,6 +566,7 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
                                 store.setSource(sourceId, SourceNetworkSettings(selectedMode, endpoint))
                             }
                             notice = null
+                            lastSave = store.state.value
                             close()
                         } catch (failure: DownloadRouteException) { notice = failure.message ?: "连接配置未能保存" }
                         catch (_: Exception) { notice = "连接配置未能保存，请重试" }

@@ -154,17 +154,11 @@ fun AccountScreen(
     )
     CopyShelfArrival(profile?.username, active) {
     if (profile == null) {
-        BoxWithConstraints(Modifier.fillMaxSize().mangaHazeSource(backdrop).imePadding()) {
-        val accountHeight = maxHeight
-        val loginScroll = rememberScrollState()
-        Column(
-            modifier = Modifier.widthIn(max = if (desktop) 480.dp else Dp.Infinity).fillMaxWidth()
-                .align(Alignment.TopCenter).heightIn(max = accountHeight)
-                .verticalScroll(loginScroll)
-                .padding(start = 24.dp, end = 24.dp, top = contentTopPadding + 18.dp, bottom = 16.dp + bottomInset),
-            verticalArrangement = Arrangement.spacedBy(0.dp),
-        ) {
-            AccountIdentity("匿名阅读已启用", "连接账号可导入拷贝收藏。阅读进度可在漫画详情中选择采用。")
+        AccountWorkspace(Modifier.fillMaxSize().mangaHazeSource(backdrop).imePadding(), mobileWidth = Dp.Infinity,
+            top = contentTopPadding + 18.dp, bottom = 16.dp + bottomInset, sideInset = 24.dp,
+            overview = { wide ->
+                AccountIdentity("匿名阅读已启用", "连接账号可导入拷贝收藏。阅读进度可在漫画详情中选择采用。", wide)
+            }) {
             if (state.savedCredentialPresent) {
                 Text(if (state.autoRestorePending)
                     "账号凭据已安全保留，客户端会自动重试恢复连接，无需重复登录。"
@@ -228,27 +222,23 @@ fun AccountScreen(
                 }
             }
             CopyShelfValue(state.error) { message ->
-                Box(Modifier.fillMaxWidth().padding(bottom = 12.dp).heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
+                Box(Modifier.fillMaxWidth().padding(bottom = 12.dp).then(if (desktop) Modifier.accountReviewRow()
+                    else Modifier.heightIn(max = 160.dp).verticalScroll(rememberScrollState()))) {
                     AccountError(message, state.busy, onRetry = if (state.canRetryConnection && !state.savedCredentialPresent) onRefresh else null)
                 }
             }
 
         }
-        if (desktop) Box(Modifier.widthIn(max = 480.dp).fillMaxSize().align(Alignment.TopCenter)) {
-            DesktopVerticalScrollbar(loginScroll,
-                Modifier.align(Alignment.CenterEnd).padding(top = contentTopPadding, bottom = bottomInset))
-        }
-        }
     } else {
         key(profile.username) {
-            Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).padding(top = contentTopPadding),
-                contentAlignment = Alignment.TopCenter) {
-                Column(Modifier.widthIn(max = 480.dp).fillMaxWidth()
-                    .verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, top = 18.dp, bottom = 16.dp + bottomInset),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            AccountWorkspace(Modifier.fillMaxSize().mangaHazeSource(backdrop), mobileWidth = 480.dp,
+                top = contentTopPadding + 18.dp, bottom = 16.dp + bottomInset, sideInset = 24.dp,
+                overview = { wide ->
                     AccountIdentity(if (profile.locallyRestored) "本地会话已恢复" else "拷贝已连接",
                         if (profile.locallyRestored) "尚未联网确认有效性，收藏和历史请求会显示各自实际结果。"
-                        else "本机与拷贝收藏已汇入同一个书架。云端独有作品可直接查看，删除、同步与阅读进度仍分别管理。")
+                        else "本机与拷贝收藏已汇入同一个书架。云端独有作品可直接查看，删除、同步与阅读进度仍分别管理。", wide)
+                }) {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = onGoShelf, enabled = active,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         shape = RoundedCornerShape(16.dp)) { Text("打开统一书架") }
@@ -288,7 +278,15 @@ private fun SecretVisibility(visible: Boolean, enabled: Boolean, onClick: () -> 
 }
 
 @Composable
-private fun AccountIdentity(title: String, detail: String) {
+private fun AccountIdentity(title: String, detail: String, wide: Boolean) {
+    if (wide) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChapterSourceLogo("copy", "拷贝", Modifier.size(44.dp))
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
     Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 18.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.Top) {
         ChapterSourceLogo("copy", "拷贝", Modifier.size(44.dp))

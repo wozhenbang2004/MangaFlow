@@ -49,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -90,6 +91,7 @@ internal fun CloudAccountHeader(
     modifier: Modifier = Modifier,
     onOpenSync: (() -> Unit)? = null,
 ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
     val profile = state.profile
     val colors = MaterialTheme.colorScheme
     var info by remember(profile?.username) { mutableStateOf(false) }
@@ -115,7 +117,17 @@ internal fun CloudAccountHeader(
                     }
                 }
             }
-            Box {
+            if (desktop) MotionTextButton(onClick = { pendingAction = null; info = true }, enabled = active,
+                modifier = Modifier.heightIn(min = 40.dp), contentPadding = PaddingValues(horizontal = 10.dp)) {
+                Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.PersonOutline, "账号与同步", Modifier.size(20.dp))
+                    if (state.canRetrySync) Box(Modifier.align(Alignment.TopEnd).size(6.dp)
+                        .background(colors.error, CircleShape).semantics { contentDescription = "有待同步内容" })
+                }
+                Text(accountName, Modifier.widthIn(max = 164.dp).padding(horizontal = 6.dp),
+                    style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(14.dp))
+            } else Box {
                 MotionIconButton(onClick = { pendingAction = null; info = true }, enabled = active, modifier = Modifier.size(44.dp),
                     tooltip = "$accountName · 账号与同步") {
                     Box {
@@ -130,11 +142,9 @@ internal fun CloudAccountHeader(
             }
         }
     }
-    if (platformKind == PlatformKind.DESKTOP) {
-        DesktopManagementToolbar(title, modifier, navigation, minimumToolsWidth = 480.dp) {
-            Text(accountName,
-                Modifier.weight(1f).widthIn(max = 240.dp), style = MaterialTheme.typography.bodyMedium,
-                color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    if (desktop) {
+        DesktopManagementToolbar(title, modifier, navigation, minimumToolsWidth = if (profile == null) 270.dp else 500.dp) {
+            Spacer(Modifier.weight(1f))
             if (onSearch != null) MotionIconButton(onClick = onSearch, enabled = active,
                 modifier = Modifier.size(44.dp), tooltip = "搜索 · Ctrl+K") {
                 Icon(Icons.Outlined.Search, "搜索", Modifier.size(20.dp))
@@ -158,67 +168,72 @@ internal fun CloudAccountHeader(
         }) {
         LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 24.dp,
             role = GlassSurfaceRole.PANEL, softCard = true) {
-            Column(Modifier.heightIn(max = LocalMangaWindow.current.height * .8f)
-                .verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(accountName, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        profile?.username?.takeIf { it != accountName }?.let {
-                            Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val scroll = rememberScrollState()
+            Box(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height * .8f)) {
+                Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                    Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(accountName, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            profile?.username?.takeIf { it != accountName }?.let {
+                                Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        MotionIconButton(onClick = { pendingAction = null; info = false },
+                            modifier = Modifier.size(44.dp), tooltip = "关闭账号") {
+                            Icon(Icons.Outlined.Close, "关闭账号", Modifier.size(19.dp))
                         }
                     }
-                    MotionIconButton(onClick = { pendingAction = null; info = false },
-                        modifier = Modifier.size(44.dp), tooltip = "关闭账号") {
-                        Icon(Icons.Outlined.Close, "关闭账号", Modifier.size(19.dp))
+                    CopyShelfValue(refreshError) { message ->
+                        Column(Modifier.padding(bottom = 12.dp)) { Text("当前列表", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            AccountError(message, state.busy || refreshing, onRefresh) }
                     }
-                }
-                CopyShelfValue(refreshError) { message ->
-                    Column(Modifier.padding(bottom = 12.dp)) { Text("当前列表", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                        AccountError(message, state.busy || refreshing, onRefresh) }
-                }
-                CopyShelfValue(state.syncMessage?.takeIf(String::isNotBlank)) {
-                    Text(it, Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodySmall,
-                        color = if (state.canRetrySync) colors.error else colors.onSurfaceVariant)
-                }
-                if (onOpenSync != null) MotionTextButton(onClick = {
-                    profile?.username?.let { pendingAction = PendingCopyAccountAction(CopyAccountAction.SYNC, it) }
-                    info = false
-                }, enabled = active, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)) {
-                    Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(18.dp))
-                    Text("查看同步差异", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodyMedium)
-                    Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(16.dp).graphicsLayer { rotationZ = -90f })
-                }
-                CopyShelfReveal(state.canRetrySync) {
-                    MotionTextButton(onClick = onRetrySync, enabled = active && state.canRetrySync && !state.busy,
+                    CopyShelfValue(state.syncMessage?.takeIf(String::isNotBlank)) {
+                        Text(it, Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodySmall,
+                            color = if (state.canRetrySync) colors.error else colors.onSurfaceVariant)
+                    }
+                    if (onOpenSync != null) MotionTextButton(onClick = {
+                        profile?.username?.let { pendingAction = PendingCopyAccountAction(CopyAccountAction.SYNC, it) }
+                        info = false
+                    }, enabled = active, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)) {
+                        Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(18.dp))
+                        Text("查看同步差异", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodyMedium)
+                        Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(16.dp).graphicsLayer { rotationZ = -90f })
+                    }
+                    CopyShelfReveal(state.canRetrySync) {
+                        MotionTextButton(onClick = onRetrySync, enabled = active && state.canRetrySync && !state.busy,
+                            modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
+                            Icon(Icons.Outlined.Refresh, null, Modifier.size(17.dp))
+                            Text("重试未完成项", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    MotionTextButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
                         modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
-                        Icon(Icons.Outlined.Refresh, null, Modifier.size(17.dp))
-                        Text("重试未完成项", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodySmall)
+                        Icon(Icons.Outlined.Info, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+                        Text("同步范围", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant)
+                        MotionSwap(scopeOpen, Modifier.size(16.dp)) { expanded ->
+                            Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(16.dp).graphicsLayer { rotationZ = if (expanded) 180f else 0f })
+                        }
+                    }
+                    CopyShelfReveal(scopeOpen) {
+                        Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                            Text("此页展示拷贝的收藏和阅读章节。收藏逐项合并；进度只选择本机从哪章继续，实际阅读后才向拷贝报告。",
+                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            Text("本机页内位置、其他来源进度与下载单独保留。",
+                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        }
+                    }
+                    MotionTextButton(onClick = requestLogout, enabled = active,
+                        modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)) {
+                        Icon(Icons.Outlined.Logout, null, Modifier.size(17.dp), tint = colors.error)
+                        Text("退出账号", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodySmall, color = colors.error)
                     }
                 }
-                MotionTextButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
-                    modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
-                    Icon(Icons.Outlined.Info, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
-                    Text("同步范围", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant)
-                    MotionSwap(scopeOpen, Modifier.size(16.dp)) { expanded ->
-                        Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(16.dp).graphicsLayer { rotationZ = if (expanded) 180f else 0f })
-                    }
-                }
-                CopyShelfReveal(scopeOpen) {
-                    Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Text("此页展示拷贝的收藏和阅读章节。收藏逐项合并；进度只选择本机从哪章继续，实际阅读后才向拷贝报告。",
-                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                        Text("本机页内位置、其他来源进度与下载单独保留。",
-                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                    }
-                }
-                MotionTextButton(onClick = requestLogout, enabled = active,
-                    modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)) {
-                    Icon(Icons.Outlined.Logout, null, Modifier.size(17.dp), tint = colors.error)
-                    Text("退出账号", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodySmall, color = colors.error)
+                if (desktop) Box(Modifier.matchParentSize()) {
+                    DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 8.dp))
                 }
             }
         }
@@ -226,7 +241,8 @@ internal fun CloudAccountHeader(
     MotionDialog(confirmLogout, onDismissRequest = { confirmLogout = false }, maximumWidth = 400.dp) {
         LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 24.dp,
             role = GlassSurfaceRole.POPOVER, softCard = true) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.then(if (desktop) Modifier.heightIn(max = LocalMangaWindow.current.height * .9f)
+                .verticalScroll(rememberScrollState()) else Modifier).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("仍有内容待同步", style = MaterialTheme.typography.titleMedium)
                 Text("现在退出会停止本次同步。本机书架、下载和阅读进度会保留。",
                     style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)

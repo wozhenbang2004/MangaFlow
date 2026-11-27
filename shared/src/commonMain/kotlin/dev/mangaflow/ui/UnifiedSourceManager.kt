@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -617,11 +616,11 @@ private fun SourceWorkNavigation(work: Manga, associated: List<Manga>, overview:
                 }
             }
             item(key = "all") {
-                SourceNavigationItem("全部来源", page == null && expandedSource == null, enabled, onOverview,
+                ManagementNavigationItem("全部来源", page == null && expandedSource == null, enabled, onOverview,
                     detail = overview.size.toString()) { Icon(Icons.Outlined.Layers, null, Modifier.size(17.dp)) }
             }
             item(key = "checks") {
-                SourceNavigationItem("来源检查", page == "@checks", enabled, onChecks) {
+                ManagementNavigationItem("来源检查", page == "@checks", enabled, onChecks) {
                     Icon(Icons.Outlined.Tune, null, Modifier.size(17.dp))
                 }
             }
@@ -632,31 +631,13 @@ private fun SourceWorkNavigation(work: Manga, associated: List<Manga>, overview:
             items(groups, key = { "edition:${it.key}" }) { (id, editions) ->
                 val name = overview.firstOrNull { it.id == id }?.name ?: sourceDisplayName(id)
                 val selected = if (page == null) expandedSource == id else page == id || alignmentSource == id
-                SourceNavigationItem(name, selected, enabled, { onEdition(id) },
+                ManagementNavigationItem(name, selected, enabled, { onEdition(id) },
                     detail = if (id == work.sourceId) "主来源" else if (editions.size > 1) "${editions.size} 个版本" else null) {
                     ChapterSourceLogo(id, name, Modifier.size(18.dp))
                 }
             }
         }
         DesktopVerticalScrollbar(list, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
-    }
-}
-
-@Composable
-private fun SourceNavigationItem(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit,
-    detail: String? = null, leading: @Composable () -> Unit) {
-    val interaction = remember { MutableInteractionSource() }
-    val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp))
-        .then(if (selected) Modifier.background(colors.primary.copy(alpha = .095f)) else Modifier)
-        .selectable(selected = selected, enabled = enabled, interactionSource = interaction, indication = null,
-            role = Role.Tab, onClick = onClick).motionPress(interaction, enabled)
-        .heightIn(min = 39.dp).padding(horizontal = 10.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-        leading()
-        Text(label, Modifier.weight(1f), color = if (selected) colors.primary else colors.onSurface,
-            style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        detail?.let { Text(it, color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall) }
     }
 }
 

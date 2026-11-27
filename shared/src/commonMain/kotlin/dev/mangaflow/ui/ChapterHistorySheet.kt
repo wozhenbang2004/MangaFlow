@@ -11,6 +11,7 @@ import dev.mangaflow.ui.motion.motionPress
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -205,35 +206,59 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
             records?.let { Text(it.size.toString(), color = secondary, style = mangaMetricValueStyle(),
                 modifier = Modifier.padding(start = 8.dp)) }
         }
-        val list = rememberLazyListState()
-        Box(Modifier.fillMaxWidth()) {
+        val list = androidx.compose.runtime.key(manga.id) { rememberLazyListState() }
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val table = fitsDesktopIndex(maxWidth, 530.dp)
         LazyColumn(Modifier.fillMaxWidth().then(if (embedded) Modifier else Modifier.heightIn(max = 480.dp).navigationBarsPadding()),
             state = list, contentPadding = PaddingValues(start = if (embedded) 0.dp else 16.dp, end = 16.dp, bottom = 16.dp)) {
             if (failed) item(key = "retry") {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                if (platformKind == PlatformKind.DESKTOP) CatalogueState("章节记录暂未读取",
+                    if (records.isNullOrEmpty()) "可以重新读取本机保存的章节位置。" else "仍可打开下面已经载入的章节。") {
+                    TextButton(onClick = { retry++ }) { Text("重新读取") }
+                } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("章节记录暂未读取", fontSize = 13.sp, color = secondary, modifier = Modifier.weight(1f))
                     TextButton(onClick = { retry++ }) { Text("重试") }
                 }
             } else if (records == null) item(key = "loading") {
                 CircularProgressIndicator(Modifier.padding(vertical = 16.dp).size(20.dp), strokeWidth = 1.5.dp)
             } else if (records.orEmpty().isEmpty()) item(key = "empty") {
-                Text("还没有章节记录", Modifier.padding(vertical = 24.dp), color = secondary, fontSize = 13.sp)
+                if (platformKind == PlatformKind.DESKTOP) CatalogueState("还没有章节记录",
+                    "阅读本作后，这里会保留各章上次看到的页码。")
+                else Text("还没有章节记录", Modifier.padding(vertical = 24.dp), color = secondary, fontSize = 13.sp)
+            }
+            if (table && !records.isNullOrEmpty()) item(key = "history-columns") {
+                ChapterRecordColumns(Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    chapter = { DesktopIndexNote("章节与来源") }, pages = { DesktopIndexNote("阅读位置") },
+                    date = { DesktopIndexNote("上次阅读") })
             }
             items(records.orEmpty(), key = { it.progress.chapterId }) { row ->
                 val progress = row.progress
                 val interaction = remember(progress.chapterId) { MutableInteractionSource() }
-                Row(Modifier.fillMaxWidth().clickable(role = Role.Button,
+                val pageLabel = if (progress.pageCount > 0) "${progress.pageIndex + 1}/${progress.pageCount} 页"
+                    else "第 ${progress.pageIndex + 1} 页"
+                val click = Modifier.fillMaxWidth().clickable(role = Role.Button,
                     interactionSource = interaction, indication = null,
                     onClickLabel = "从保存的位置继续阅读", onClick = { onContinue(progress) })
-                    .motionPress(interaction, pressedScale = .985f)
-                    .padding(vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                    .motionPress(interaction, pressedScale = if (table) .997f else .985f)
+                    .padding(vertical = 11.dp)
+                if (table) ChapterRecordColumns(click, chapter = {
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        ChapterReadMark(progress, size = 18.dp)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(progress.chapterTitle.ifBlank { "已保存的章节" }, style = MaterialTheme.typography.titleSmall,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            DesktopIndexNote(row.sourceName)
+                        }
+                    }
+                }, pages = { Text(mangaNumberText(pageLabel), style = mangaMetricValueStyle()) },
+                    date = { DesktopIndexNote(mangaNumberText(historyTime(progress.updatedAt))) })
+                else Row(click, verticalAlignment = Alignment.CenterVertically) {
                     ChapterReadMark(progress, size = 18.dp)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(progress.chapterTitle.ifBlank { "已保存的章节" }, fontSize = 16.sp, lineHeight = 21.sp,
                             fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        val pageLabel = if (progress.pageCount > 0) "${progress.pageIndex + 1}/${progress.pageCount} 页"
-                            else "第 ${progress.pageIndex + 1} 页"
                         val sourceLabel = if (progress.chapterTitle in repeatedTitles) row.sourceName + " · " else ""
                         Text(mangaNumberText("$sourceLabel$pageLabel · ${historyTime(progress.updatedAt)}"),
                             fontSize = 12.sp, lineHeight = 16.sp, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -245,6 +270,17 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
         }
         if (platformKind == PlatformKind.DESKTOP) DesktopVerticalScrollbar(list, Modifier.align(Alignment.CenterEnd))
         }
+    }
+}
+
+@Composable
+private fun ChapterRecordColumns(modifier: Modifier, chapter: @Composable () -> Unit,
+    pages: @Composable () -> Unit, date: @Composable () -> Unit) {
+    Row(modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(Modifier.weight(.50f)) { chapter() }
+        Box(Modifier.weight(.21f)) { pages() }
+        Box(Modifier.weight(.29f)) { date() }
     }
 }
 

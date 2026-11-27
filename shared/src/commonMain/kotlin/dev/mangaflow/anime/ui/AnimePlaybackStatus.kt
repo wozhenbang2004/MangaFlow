@@ -1,6 +1,8 @@
 package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -25,6 +27,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -55,6 +58,8 @@ import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.DesktopIconTooltip
+import dev.mangaflow.ui.DesktopVerticalScrollbar
 import dev.mangaflow.ui.motion.MotionIconButton
 
 private fun videoDimensions(width: Int?, height: Int?): String? =
@@ -212,6 +217,7 @@ internal fun AnimePlaybackStatus(
     val detailScroll = rememberScrollState()
     val canExpand = maximumHeight >= 76.dp
     val expanded = details && canExpand && !quiet
+    val desktop = platformKind == PlatformKind.DESKTOP
     val holdControls by rememberUpdatedState(onHoldControls)
     DisposableEffect(interactive, expanded, focused, summaryScroll.isScrollInProgress, detailScroll.isScrollInProgress) {
         holdControls(interactive && (expanded || focused || summaryScroll.isScrollInProgress || detailScroll.isScrollInProgress))
@@ -224,7 +230,9 @@ internal fun AnimePlaybackStatus(
             Row(rowWidth.heightIn(min = if (quiet) 26.dp else 44.dp).padding(start = 9.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                 Icon(Icons.Outlined.QueryStats, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(readouts.joinToString("  ·  ") { it.value },
+                if (expanded && desktop) Text("播放读数 · ${readouts.size} 项", Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelMedium)
+                else Text(readouts.joinToString("  ·  ") { it.value },
                     Modifier.weight(1f, fill = !quiet).horizontalScroll(summaryScroll, enabled = interactive)
                         .padding(end = 8.dp, top = 3.dp, bottom = 3.dp)
                         .semantics { contentDescription = readouts.joinToString("；") { it.description } },
@@ -238,9 +246,43 @@ internal fun AnimePlaybackStatus(
                         tint = MaterialTheme.colorScheme.onSurface)
                 }
             }
-            if (expanded) EnhancementReadouts(readouts, quiet = false,
-                modifier = Modifier.fillMaxWidth().heightIn(max = (maximumHeight - 44.dp).coerceAtLeast(1.dp))
-                    .verticalScroll(detailScroll, enabled = interactive).padding(start = 8.dp, end = 8.dp, bottom = 6.dp))
+            if (expanded) {
+                val bounds = Modifier.fillMaxWidth().heightIn(max = (maximumHeight - 44.dp).coerceAtLeast(1.dp))
+                if (desktop) Box(bounds) {
+                    DesktopPlaybackReadings(readouts, Modifier.fillMaxWidth().verticalScroll(detailScroll, enabled = interactive)
+                        .padding(start = 10.dp, end = 15.dp, bottom = 8.dp), interactive)
+                    DesktopVerticalScrollbar(detailScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 3.dp))
+                } else EnhancementReadouts(readouts, quiet = false,
+                    modifier = bounds.verticalScroll(detailScroll, enabled = interactive)
+                        .padding(start = 8.dp, end = 8.dp, bottom = 6.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun DesktopPlaybackReadings(readouts: List<EnhancementReadout>, modifier: Modifier, interactive: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    BoxWithConstraints(modifier) {
+        val inline = maxWidth >= 300.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+        Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            readouts.forEach { reading ->
+                val interaction = remember(reading.metric) { MutableInteractionSource() }
+                Box(Modifier.fillMaxWidth().hoverable(interaction, enabled = interactive)
+                    .semantics(mergeDescendants = true) { contentDescription = reading.description }) {
+                    val label = reading.metric.label(EnhancementContent.ANIME)
+                    val digits = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum")
+                    if (inline) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(label, Modifier.weight(.92f).alignByBaseline(),
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        Text(reading.value, Modifier.weight(1.4f).alignByBaseline(), textAlign = TextAlign.End, style = digits)
+                    } else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        Text(label, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        Text(reading.value, style = digits)
+                    }
+                    DesktopIconTooltip(reading.description.takeIf { it != reading.value }, interaction, enabled = interactive)
+                }
+            }
         }
     }
 }

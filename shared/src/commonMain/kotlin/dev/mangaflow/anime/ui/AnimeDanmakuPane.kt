@@ -2,7 +2,6 @@ package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -11,6 +10,10 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -20,6 +23,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.danmaku.*
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -57,140 +62,175 @@ internal fun AnimeDanmakuPane(section: AnimePlayerPanel, controller: AnimeContro
             offsetDraft = state.settings.offsetMs.toString(); wordsDraft = state.settings.blockedWords.joinToString("，")
         }
     }
-    LazyColumn(modifier.fillMaxWidth(), state = scroll, contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        when (section) {
-            AnimePlayerPanel.DANMAKU -> {
-                item { SettingsToggle("显示弹幕", state.settings.enabled, Icons.Outlined.Subtitles,
-                    onCheckedChange = { control.updateSettings(state.settings.copy(enabled = it)) }) }
-                item {
-                    val matched = state.selectionLabel
-                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(17.dp))
-                        .background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = 14.dp, vertical = 11.dp),
-                        verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text(if (state.loading) "正在加载本集弹幕" else matched ?: "本集还没有弹幕",
-                                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
-                                maxLines = 3, overflow = TextOverflow.Ellipsis)
-                            val caption = if (state.loading) matched else current?.let(::animeEpisodeLabel)?.takeUnless { it == matched }
-                            if (!caption.isNullOrBlank()) AnimeQuietLabel(caption)
-                        }
-                        if (!state.loading && matched != null) Row(verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(mangaNumberText(state.totalCount.toString()), style = MaterialTheme.typography.titleLarge)
-                            Text("条弹幕", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
-                        }
-                        if (screen.sourceDanmakuAvailable) MotionTextButton(onClick = controller::loadCurrentSourceDanmaku,
-                            enabled = !state.loading, modifier = Modifier.heightIn(min = 44.dp)) {
-                            Text("使用当前线路的弹幕")
-                        }
+    val canSearch = query.isNotBlank() && !state.searching && state.ownerKey != null
+    val submitSearch: () -> Unit = { if (canSearch) control.search(query.trim(), episodeQuery.trim()) }
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val desktop = platformKind == PlatformKind.DESKTOP
+        val paired = desktop && maxWidth >= 422.dp * scale
+        val pinnedSearch = desktop && maxHeight >= 356.dp * scale && section == AnimePlayerPanel.DANMAKU_SEARCH && state.configured
+        val searchForm: @Composable () -> Unit = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                DanmakuFieldPair(paired, first = {
+                    AnimeTextField(query, { query = it }, "番剧名称或别名", onSubmit = submitSearch)
+                }, second = {
+                    AnimeTextField(episodeQuery, { episodeQuery = it }, "集号或集名，可留空", onSubmit = submitSearch)
+                })
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    MotionButton(onClick = submitSearch, enabled = canSearch,
+                        modifier = Modifier.weight(1f).heightIn(min = 44.dp)) {
+                        Text(if (state.searching) "正在搜索" else "搜索弹幕")
                     }
-                }
-                item { CompactMenuAction(Icons.Outlined.Search, if (state.selectionLabel == null) "匹配本集弹幕" else "更换弹幕来源",
-                    enabled = state.ownerKey != null, onClick = { onSection(AnimePlayerPanel.DANMAKU_SEARCH) }) }
-                item { CompactMenuAction(Icons.Outlined.Tune, "显示、偏移与屏蔽词",
-                    onClick = { onSection(AnimePlayerPanel.DANMAKU_DISPLAY) }) }
-                item { CompactMenuAction(Icons.Outlined.Key, if (state.configured) "弹幕服务 · 已配置" else "配置弹幕服务",
-                    onClick = { onSection(AnimePlayerPanel.DANMAKU_ACCESS) }) }
-                if (state.selectionLabel != null || state.loading) item {
-                    CompactMenuAction(Icons.Outlined.LinkOff, "取消本集弹幕匹配", onClick = control::clearSelection)
+                    if (state.searching) MotionTextButton(onClick = control::cancelSearch,
+                        modifier = Modifier.heightIn(min = 44.dp)) { Text("取消") }
                 }
             }
-            AnimePlayerPanel.DANMAKU_SEARCH -> {
-                item { AnimeQuietLabel("请选择和当前视频一致的季度及集数。") }
-                if (!state.configured) item {
-                    AnimeMessage("先配置弹幕服务", "填写你自己的弹弹play应用凭据后，可通过官方服务搜索剧集。",
-                        action = "配置服务", onAction = { onSection(AnimePlayerPanel.DANMAKU_ACCESS) })
-                } else {
-                    item { AnimeTextField(query, { query = it }, "番剧名称或别名",
-                        onSubmit = { control.search(query.trim(), episodeQuery.trim()) }) }
-                    item { AnimeTextField(episodeQuery, { episodeQuery = it }, "集号或集名，可留空",
-                        onSubmit = { control.search(query.trim(), episodeQuery.trim()) }) }
-                    item {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            MotionButton(onClick = { control.search(query.trim(), episodeQuery.trim()) },
-                                enabled = query.isNotBlank() && !state.searching && state.ownerKey != null,
-                                modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
-                                Text(if (state.searching) "正在搜索" else "搜索弹幕")
-                            }
-                            if (state.searching) MotionTextButton(onClick = control::cancelSearch,
-                                modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") }
-                        }
-                    }
-                    state.candidates.distinctBy { it.episodeId }.groupBy { it.animeId to it.animeTitle }.forEach { (anime, episodes) ->
-                        item(key = "anime:" + anime.first) { AnimeSectionTitle(anime.second) }
-                        items(episodes, key = { it.episodeId }) { candidate ->
-                            AnimeSelection(candidate.episodeTitle, selected = state.selected?.episodeId == candidate.episodeId,
-                                onClick = { control.select(candidate); onSection(AnimePlayerPanel.DANMAKU) })
-                        }
-                    }
-                    if (!state.searching && state.query.isNotBlank() && state.candidates.isEmpty() && state.error == null) item {
-                        AnimeMessage("没有找到对应弹幕", "试试别名，或清空集号后查看候选。")
-                    }
-                }
-            }
-            AnimePlayerPanel.DANMAKU_DISPLAY -> {
-                item {
-                    AnimeSectionTitle("透明度", (state.settings.opacity * 100).toInt().toString() + "%")
-                    MotionSlider(state.settings.opacity, onValueChange = {
-                        control.updateSettings(control.state.value.settings.copy(opacity = it))
-                    }, valueRange = 0f..1f, formatValue = { (it * 100).toInt().toString() + "%" },
-                        modifier = Modifier.fillMaxWidth())
-                }
-                item { SettingsToggle("显示彩色弹幕", state.settings.showColored, Icons.Outlined.Palette,
-                    onCheckedChange = { control.updateSettings(state.settings.copy(showColored = it)) }) }
-                item { SettingsToggle("合并重复内容", state.settings.deduplicate, Icons.Outlined.FilterList,
-                    onCheckedChange = { control.updateSettings(state.settings.copy(deduplicate = it)) }) }
-                item { AnimeTextField(fontDraft, { fontDraft = it; inputError = null }, "字号倍率，大于 0") }
-                item { AnimeTextField(densityDraft, { densityDraft = it; inputError = null }, "同时显示条数，大于 0") }
-                item { AnimeTextField(offsetDraft, { offsetDraft = it; inputError = null }, "时间偏移（毫秒，可为负）") }
-                item { AnimeQuietLabel("正数让弹幕延后，负数提前；1000 毫秒等于 1 秒。字号与密度按当前画面空间显示，输入值会保留。") }
-                item { AnimeTextField(wordsDraft, { wordsDraft = it; inputError = null }, "屏蔽词，用逗号分隔") }
-                item {
-                    MotionButton(onClick = {
-                        val font = fontDraft.trim().toFloatOrNull()
-                        val density = densityDraft.trim().toIntOrNull()
-                        val offset = offsetDraft.trim().toLongOrNull()
-                        if (font == null || !font.isFinite() || font <= 0f) inputError = "字号倍率必须是大于零的数字。"
-                        else if (density == null || density <= 0) inputError = "同时显示条数必须是大于零的整数。"
-                        else if (offset == null) inputError = "时间偏移需要整数毫秒，数值不能超出可保存范围。"
-                        else {
-                            control.updateSettings(state.settings.copy(fontScale = font, density = density, offsetMs = offset,
-                                blockedWords = wordsDraft.split(',', '，', '\n').map(String::trim).filter(String::isNotBlank).distinct()))
-                            inputError = null
-                        }
-                    }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用显示设置") }
-                }
-            }
-            AnimePlayerPanel.DANMAKU_ACCESS -> {
-                item { AnimeQuietLabel("使用你自己的弹弹play应用凭据。凭据保存在本机的秘密存储中，不放入追番备份。") }
-                if (state.configured) item { AnimeQuietLabel("已配置；这里不会回显已保存的密钥。") }
-                item { AnimeTextField(appId, { appId = it; inputError = null }, "App ID") }
-                item { AnimeTextField(appSecret, { appSecret = it; inputError = null }, "App Secret", secret = true) }
-                item { MotionButton(onClick = {
-                    control.configure(appId, appSecret)
-                    appId = ""; appSecret = ""
-                }, enabled = appId.isNotBlank() && appSecret.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("保存服务配置") } }
-                if (state.configured) item {
-                    if (!removingConfiguration) CompactMenuAction(Icons.Outlined.DeleteOutline, "移除服务凭据", destructive = true,
-                        onClick = { removingConfiguration = true })
-                    else {
-                        Text("移除后需要重新配置才能通过官方服务搜索弹幕。", style = MaterialTheme.typography.bodySmall)
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            MotionTextButton(onClick = { removingConfiguration = false }, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") }
-                            MotionButton(onClick = { control.clearConfiguration(); removingConfiguration = false },
-                                modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("确认移除凭据") }
-                        }
-                    }
-                }
-            }
-            else -> Unit
         }
-        if (inputError != null) item { Text(inputError.orEmpty(), style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error) }
-        if (state.error != null) item { Text(state.error.orEmpty(), style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error) }
-        if (state.notice != null) item { AnimeQuietLabel(state.notice.orEmpty()) }
+        Column(Modifier.fillMaxWidth()) {
+            if (pinnedSearch) Box(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp)) { searchForm() }
+            AnimeScrollableList(Modifier.weight(1f, fill = false).fillMaxWidth(), state = scroll,
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = if (pinnedSearch) 2.dp else 16.dp, bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when (section) {
+                    AnimePlayerPanel.DANMAKU -> {
+                        item { SettingsToggle("显示弹幕", state.settings.enabled, Icons.Outlined.Subtitles,
+                            onCheckedChange = { control.updateSettings(state.settings.copy(enabled = it)) }) }
+                        item {
+                            val matched = state.selectionLabel
+                            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(17.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = 14.dp, vertical = 11.dp),
+                                verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text(if (state.loading) "正在加载本集弹幕" else matched ?: "本集还没有弹幕",
+                                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                                        maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                    val caption = if (state.loading) matched else current?.let(::animeEpisodeLabel)?.takeUnless { it == matched }
+                                    if (!caption.isNullOrBlank()) AnimeQuietLabel(caption)
+                                }
+                                if (!state.loading && matched != null) Row(verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(mangaNumberText(state.totalCount.toString()), style = MaterialTheme.typography.titleLarge)
+                                    Text("条弹幕", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+                                }
+                                if (screen.sourceDanmakuAvailable) MotionTextButton(onClick = controller::loadCurrentSourceDanmaku,
+                                    enabled = !state.loading, modifier = Modifier.heightIn(min = 44.dp)) {
+                                    Text("使用当前线路的弹幕")
+                                }
+                            }
+                        }
+                        item { CompactMenuAction(Icons.Outlined.Search, if (state.selectionLabel == null) "匹配本集弹幕" else "更换弹幕来源",
+                            enabled = state.ownerKey != null, onClick = { onSection(AnimePlayerPanel.DANMAKU_SEARCH) }) }
+                        item { CompactMenuAction(Icons.Outlined.Tune, "显示、偏移与屏蔽词",
+                            onClick = { onSection(AnimePlayerPanel.DANMAKU_DISPLAY) }) }
+                        item { CompactMenuAction(Icons.Outlined.Key, if (state.configured) "弹幕服务 · 已配置" else "配置弹幕服务",
+                            onClick = { onSection(AnimePlayerPanel.DANMAKU_ACCESS) }) }
+                        if (state.selectionLabel != null || state.loading) item {
+                            CompactMenuAction(Icons.Outlined.LinkOff, "取消本集弹幕匹配", onClick = control::clearSelection)
+                        }
+                    }
+                    AnimePlayerPanel.DANMAKU_SEARCH -> {
+                        if (state.candidates.isNotEmpty()) item {
+                            AnimeQuietLabel("找到 ${state.candidates.distinctBy { it.episodeId }.size} 集 · 核对季度与集号")
+                        }
+                        if (!state.configured) item {
+                            AnimeMessage("先配置弹幕服务", "填写你自己的弹弹play应用凭据后，可通过官方服务搜索剧集。",
+                                action = "配置服务", onAction = { onSection(AnimePlayerPanel.DANMAKU_ACCESS) })
+                        } else {
+                            if (!pinnedSearch) item(key = "search-form") { searchForm() }
+                            state.candidates.distinctBy { it.episodeId }.groupBy { it.animeId to it.animeTitle }.forEach { (anime, episodes) ->
+                                item(key = "anime:${anime.first}:${anime.second}") { AnimeSectionTitle(anime.second) }
+                                items(episodes, key = { it.episodeId }) { candidate ->
+                                    AnimeSelection(candidate.episodeTitle, selected = state.selected?.episodeId == candidate.episodeId,
+                                        onClick = { control.select(candidate); onSection(AnimePlayerPanel.DANMAKU) })
+                                }
+                            }
+                            if (!state.searching && state.query.isNotBlank() && state.candidates.isEmpty() && state.error == null) item {
+                                AnimeMessage("没有找到对应弹幕", "试试别名，或清空集号后查看候选。")
+                            }
+                        }
+                    }
+                    AnimePlayerPanel.DANMAKU_DISPLAY -> {
+                        item {
+                            AnimeSectionTitle("透明度", (state.settings.opacity * 100).toInt().toString() + "%")
+                            MotionSlider(state.settings.opacity, onValueChange = {
+                                control.updateSettings(control.state.value.settings.copy(opacity = it))
+                            }, valueRange = 0f..1f, formatValue = { (it * 100).toInt().toString() + "%" },
+                                modifier = Modifier.fillMaxWidth())
+                        }
+                        item { SettingsToggle("显示彩色弹幕", state.settings.showColored, Icons.Outlined.Palette,
+                            onCheckedChange = { control.updateSettings(state.settings.copy(showColored = it)) }) }
+                        item { SettingsToggle("合并重复内容", state.settings.deduplicate, Icons.Outlined.FilterList,
+                            onCheckedChange = { control.updateSettings(state.settings.copy(deduplicate = it)) }) }
+                        item {
+                            DanmakuFieldPair(paired, first = {
+                                AnimeTextField(fontDraft, { fontDraft = it; inputError = null }, "字号倍率")
+                            }, second = {
+                                AnimeTextField(densityDraft, { densityDraft = it; inputError = null }, "同时显示条数")
+                            })
+                        }
+                        item { AnimeTextField(offsetDraft, { offsetDraft = it; inputError = null }, "时间偏移（毫秒，可为负）") }
+                        item { AnimeQuietLabel("正数延后，负数提前。1000 毫秒为 1 秒。") }
+                        item { AnimeTextField(wordsDraft, { wordsDraft = it; inputError = null }, "屏蔽词，用逗号分隔") }
+                        item {
+                            MotionButton(onClick = {
+                                val font = fontDraft.trim().toFloatOrNull()
+                                val density = densityDraft.trim().toIntOrNull()
+                                val offset = offsetDraft.trim().toLongOrNull()
+                                if (font == null || !font.isFinite() || font <= 0f) inputError = "字号倍率必须是大于零的数字。"
+                                else if (density == null || density <= 0) inputError = "同时显示条数必须是大于零的整数。"
+                                else if (offset == null) inputError = "时间偏移需要整数毫秒，数值不能超出可保存范围。"
+                                else {
+                                    control.updateSettings(state.settings.copy(fontScale = font, density = density, offsetMs = offset,
+                                        blockedWords = wordsDraft.split(',', '，', '\n').map(String::trim).filter(String::isNotBlank).distinct()))
+                                    inputError = null
+                                }
+                            }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用显示设置") }
+                        }
+                    }
+                    AnimePlayerPanel.DANMAKU_ACCESS -> {
+                        item { AnimeQuietLabel("使用你自己的弹弹play应用凭据。凭据保存在本机的秘密存储中，不放入追番备份。") }
+                        if (state.configured) item { AnimeQuietLabel("已保存服务凭据，可在下方替换。") }
+                        item { AnimeTextField(appId, { appId = it; inputError = null }, "App ID") }
+                        item { AnimeTextField(appSecret, { appSecret = it; inputError = null }, "App Secret", secret = true) }
+                        item { MotionButton(onClick = {
+                            control.configure(appId, appSecret)
+                            appId = ""; appSecret = ""
+                        }, enabled = appId.isNotBlank() && appSecret.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("保存服务配置") } }
+                        if (state.configured) item {
+                            if (!removingConfiguration) CompactMenuAction(Icons.Outlined.DeleteOutline, "移除服务凭据", destructive = true,
+                                onClick = { removingConfiguration = true })
+                            else {
+                                Text("移除后需要重新配置才能通过官方服务搜索弹幕。", style = MaterialTheme.typography.bodySmall)
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    MotionTextButton(onClick = { removingConfiguration = false }, modifier = Modifier.heightIn(min = 48.dp)) { Text("取消") }
+                                    MotionButton(onClick = { control.clearConfiguration(); removingConfiguration = false },
+                                        modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("确认移除凭据") }
+                                }
+                            }
+                        }
+                    }
+                    else -> Unit
+                }
+                if (inputError != null) item { Text(inputError.orEmpty(), Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                state.error?.let { failure -> item {
+                    AnimeDiscoveryInlineStatus(failure, retry = submitSearch.takeIf { section == AnimePlayerPanel.DANMAKU_SEARCH &&
+                        state.configured && canSearch }, showIssue = true)
+                } }
+                if (state.notice != null) item { AnimeQuietLabel(state.notice.orEmpty(), Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DanmakuFieldPair(paired: Boolean, first: @Composable () -> Unit, second: @Composable () -> Unit) {
+    if (paired) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Box(Modifier.weight(1f)) { first() }
+        Box(Modifier.weight(1f)) { second() }
+    } else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        first()
+        second()
     }
 }

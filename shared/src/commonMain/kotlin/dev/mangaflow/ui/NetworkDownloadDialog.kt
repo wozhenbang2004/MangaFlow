@@ -4,6 +4,7 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -165,7 +167,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
         if (scene == NetworkDownloadScene.CONNECTION && proxyEditing) proxyEditing = false
         else if (scene == NetworkDownloadScene.CHECK) { resolvingOpen = false; scene = NetworkDownloadScene.CONNECTION }
         else onDismiss()
-    }, properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp,
+    }, properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = if (platformKind == PlatformKind.DESKTOP) 920.dp else 520.dp,
         onClosed = {
             proxyEditing = false
             autoInfoRow = null
@@ -182,62 +184,107 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
         }
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
             // MotionDialog already provides the safe, IME-adjusted viewport. Use it once.
-            val maximumHeight = minOf(maxHeight, 640.dp)
+            val desktop = platformKind == PlatformKind.DESKTOP
+            val font = LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
+            val split = desktop && maxWidth >= 704.dp * font && maxHeight >= 280.dp * font
+            val maximumHeight = minOf(maxHeight, if (split) 680.dp else 640.dp)
+            val railWidth = (maxWidth * .245f).coerceIn(166.dp, 226.dp)
             val panel: @Composable () -> Unit = {
-                Column(Modifier.fillMaxWidth().heightIn(max = maximumHeight)
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (scene == NetworkDownloadScene.CHECK) MotionIconButton(onClick = {
-                            resolvingOpen = false
-                            scene = NetworkDownloadScene.CONNECTION
-                        }, enabled = active, modifier = Modifier.size(44.dp), tooltip = "返回网络设置") {
-                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回网络设置", Modifier.size(18.dp))
-                        }
-                        val title = if (scene == NetworkDownloadScene.CHECK)
-                            if (autoState.historyOnly) "上次检测" else if (autoState.complete || autoState.applied) "检测结果"
-                            else "网络检测" else "网络与代理"
-                        MotionSwap(title, Modifier.weight(1f), scaleContent = false) { heading ->
-                            PreferenceHeading(heading)
-                        }
-                        MotionIconButton(onClick = { autoInfoRow = null; showInfo = !showInfo }, enabled = active,
-                            modifier = Modifier.size(44.dp), tooltip = "连接与识别说明") {
-                            Icon(Icons.Outlined.Info, "连接与识别说明", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
-                        }
-                        MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭网络与代理") {
-                            Icon(Icons.Outlined.Close, "关闭网络与代理", Modifier.size(20.dp))
+                Row(Modifier.fillMaxWidth().then(if (split) Modifier.height(maximumHeight) else Modifier.heightIn(max = maximumHeight))) {
+                    if (split) {
+                        val railScroll = rememberScrollState()
+                        val routeStore = remember(context) { DownloadRoutingStore.get(context) }
+                        val routing by routeStore.state.collectAsStateWithLifecycle()
+                        val overrides = routing.categoryOverrides.size + routing.sourceOverrides.size
+                        Box(Modifier.width(railWidth).fillMaxHeight().background(colors.surfaceContainerLow)) {
+                            Column(Modifier.fillMaxWidth().verticalScroll(railScroll).padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("网络与代理", Modifier.padding(start = 9.dp, top = 8.dp, bottom = 13.dp),
+                                    style = MaterialTheme.typography.titleMedium)
+                                NetworkDownloadScene.entries.forEach { item ->
+                                    ManagementNavigationItem(item.label, item == scene, active, {
+                                        resolvingOpen = false
+                                        scene = item
+                                    }, detail = when (item) {
+                                        NetworkDownloadScene.CONNECTION -> downloadRouteLabel(routing.defaultMode)
+                                        NetworkDownloadScene.CATEGORIES -> overrides.takeIf { it > 0 }?.let { "${it} 项自定" }
+                                        NetworkDownloadScene.CHECK -> if (autoState.running) "${autoState.completed}/${autoState.total}" else null
+                                    }) {
+                                        Icon(when (item) {
+                                            NetworkDownloadScene.CONNECTION -> Icons.Outlined.Language
+                                            NetworkDownloadScene.CATEGORIES -> Icons.Outlined.Tune
+                                            NetworkDownloadScene.CHECK -> Icons.Outlined.CheckCircle
+                                        }, null, Modifier.size(17.dp), tint = if (item == scene) colors.primary else colors.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                            DesktopVerticalScrollbar(railScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                         }
                     }
-                    if (scene != NetworkDownloadScene.CHECK) {
-                        val settingsScenes = listOf(NetworkDownloadScene.CONNECTION, NetworkDownloadScene.CATEGORIES)
-                        MotionTabs(settingsScenes.indexOf(scene), settingsScenes.map { it.label },
-                            onSelect = { resolvingOpen = false; scene = settingsScenes[it] }, modifier = Modifier.fillMaxWidth(),
-                            treatment = MotionTabTreatment.Underline, controlHeight = 44.dp,
-                            foreground = colors.primary, indicator = colors.primary)
-                    }
-                    NetworkSceneContent(scene, NetworkDownloadScene.entries,
-                        Modifier.weight(1f, fill = false).fillMaxWidth()) { shown ->
-                        val contentModifier = if (shown == NetworkDownloadScene.CHECK) Modifier.fillMaxWidth()
-                            else Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-                        Column(contentModifier.padding(top = 4.dp, bottom = 4.dp)) {
-                            NetworkDownloadSettings(shown, backdrop, active = active && shown == scene,
-                                environment = environment, suggestedProxy = suggestedProxy,
-                                suggestionRevision = suggestionRevision,
-                                onSuggestionConsumed = { suggestedProxy = null },
-                                autoCheck = autoCheck, onStartCheck = ::startCheck,
-                                onCheckHistory = { resolvingOpen = false; proxyEditing = false; scene = NetworkDownloadScene.CHECK },
-                                onCheckEvidence = { autoInfoRow = it; showInfo = true },
-                                onCheckSettings = { resolvingOpen = false; scene = NetworkDownloadScene.CONNECTION },
-                                onCheckReceipt = { autoReceipt = it.takeIf(String::isNotBlank) },
-                                proxyEditing = proxyEditing, onProxyEditing = { if (it) resolvingOpen = false; proxyEditing = it },
-                                connectionSummary = {
-                                    NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
-                                        enabled = active && shown == scene, compact = true,
-                                        onRefresh = { environmentRevision++ }, onUse = ::useReportedProxy)
-                                }, repository = repository, registry = registry, relaySummary = {
-                                    RelayLinkSummary(relayState, relay, enabled = active && shown == scene,
-                                        onDetails = { showInfo = true })
-                                })
+                    Column(Modifier.weight(1f).padding(horizontal = if (split) 22.dp else 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (!split && scene == NetworkDownloadScene.CHECK) MotionIconButton(onClick = {
+                                resolvingOpen = false
+                                scene = NetworkDownloadScene.CONNECTION
+                            }, enabled = active, modifier = Modifier.size(44.dp), tooltip = "返回网络设置") {
+                                Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回网络设置", Modifier.size(18.dp))
+                            }
+                            val title = when {
+                                scene == NetworkDownloadScene.CHECK && autoState.historyOnly -> "上次检测"
+                                scene == NetworkDownloadScene.CHECK && (autoState.complete || autoState.applied) -> "检测结果"
+                                scene == NetworkDownloadScene.CHECK -> "网络检测"
+                                !split -> "网络与代理"
+                                scene == NetworkDownloadScene.CATEGORIES -> "线路使用范围"
+                                else -> "连接设置"
+                            }
+                            MotionSwap(title, Modifier.weight(1f), scaleContent = false) { heading ->
+                                PreferenceHeading(heading)
+                            }
+                            MotionIconButton(onClick = { autoInfoRow = null; showInfo = !showInfo }, enabled = active,
+                                modifier = Modifier.size(44.dp), tooltip = "连接与识别说明") {
+                                Icon(Icons.Outlined.Info, "连接与识别说明", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+                            }
+                            MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭网络与代理") {
+                                Icon(Icons.Outlined.Close, "关闭网络与代理", Modifier.size(20.dp))
+                            }
+                        }
+                        if (!split && scene != NetworkDownloadScene.CHECK) {
+                            val settingsScenes = listOf(NetworkDownloadScene.CONNECTION, NetworkDownloadScene.CATEGORIES)
+                            MotionTabs(settingsScenes.indexOf(scene), settingsScenes.map { it.label },
+                                onSelect = { resolvingOpen = false; scene = settingsScenes[it] }, modifier = Modifier.fillMaxWidth(),
+                                treatment = MotionTabTreatment.Underline, controlHeight = 44.dp,
+                                foreground = colors.primary, indicator = colors.primary)
+                        }
+                        NetworkSceneContent(scene, NetworkDownloadScene.entries,
+                            Modifier.weight(1f, fill = false).fillMaxWidth()) { shown ->
+                            val scroll = rememberScrollState()
+                            val scrollable = shown != NetworkDownloadScene.CHECK
+                            Box(Modifier.fillMaxWidth()) {
+                                val contentModifier = if (scrollable) Modifier
+                                    .padding(end = if (desktop) 12.dp else 0.dp).verticalScroll(scroll) else Modifier
+                                Column(Modifier.fillMaxWidth().then(contentModifier).padding(vertical = 4.dp)) {
+                                    NetworkDownloadSettings(shown, backdrop, active = active && shown == scene,
+                                        environment = environment, suggestedProxy = suggestedProxy,
+                                        suggestionRevision = suggestionRevision,
+                                        onSuggestionConsumed = { suggestedProxy = null },
+                                        autoCheck = autoCheck, onStartCheck = ::startCheck,
+                                        onCheckHistory = { resolvingOpen = false; proxyEditing = false; scene = NetworkDownloadScene.CHECK },
+                                        onCheckEvidence = { autoInfoRow = it; showInfo = true },
+                                        onCheckSettings = { resolvingOpen = false; scene = NetworkDownloadScene.CONNECTION },
+                                        onCheckReceipt = { autoReceipt = it.takeIf(String::isNotBlank) },
+                                        proxyEditing = proxyEditing, onProxyEditing = { if (it) resolvingOpen = false; proxyEditing = it },
+                                        connectionSummary = {
+                                            NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
+                                                enabled = active && shown == scene, compact = true,
+                                                onRefresh = { environmentRevision++ }, onUse = ::useReportedProxy)
+                                        }, repository = repository, registry = registry, relaySummary = {
+                                            RelayLinkSummary(relayState, relay, enabled = active && shown == scene,
+                                                onDetails = { showInfo = true })
+                                        })
+                                }
+                                if (desktop && scrollable) DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                            }
                         }
                     }
                 }

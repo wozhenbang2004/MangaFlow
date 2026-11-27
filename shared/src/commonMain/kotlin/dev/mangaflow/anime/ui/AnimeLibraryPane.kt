@@ -25,7 +25,7 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.SnackbarHost
+import dev.mangaflow.ui.MangaSnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
@@ -411,7 +411,7 @@ internal fun AnimeLibrary(
                     .fillMaxHeight().padding(end = 18.dp))
         }
         }
-        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp)
+        MangaSnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp)
             .padding(bottom = contentBottomPadding))
     }
 

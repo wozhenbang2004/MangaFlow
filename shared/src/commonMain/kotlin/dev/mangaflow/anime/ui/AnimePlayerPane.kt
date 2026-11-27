@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -1127,8 +1128,15 @@ private fun AnimeVideoStatus(
         failure != null -> Column(Modifier.widthIn(max = 500.dp).verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            PlayerStageMessage("本集暂时无法播放", failure, maxLines = if (compact) 3 else 5,
+            val desktop = platformKind == PlatformKind.DESKTOP
+            PlayerStageMessage("本集暂时无法播放", failure.takeUnless { desktop }, maxLines = if (compact) 3 else 5,
                 incident = incident)
+            var expanded by remember(playback.sessionGeneration, failure) { mutableStateOf(false) }
+            var clipped by remember(playback.sessionGeneration, failure) { mutableStateOf(false) }
+            if (desktop && !expanded) Text(failure, Modifier.widthIn(max = 440.dp),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+                onTextLayout = { clipped = it.hasVisualOverflow })
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 if (canRetry) {
@@ -1147,6 +1155,16 @@ private fun AnimeVideoStatus(
                     onClick = if (canKeepPlayback) onKeepPlayback else onRestorePlayback,
                     modifier = Modifier.heightIn(min = 44.dp),
                 ) { Text(if (canKeepPlayback) "继续原线路" else "返回上次播放") }
+            }
+            if (desktop && (clipped || expanded)) {
+                MotionTextButton({ expanded = !expanded }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
+                    Text(if (expanded) "收起故障详情" else "完整故障详情", style = MaterialTheme.typography.labelMedium)
+                }
+                if (expanded) SelectionContainer {
+                    Text(failure, Modifier.widthIn(max = 440.dp).padding(bottom = 8.dp),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
+                }
             }
         }
         playback.phase == AnimePlayerPhase.IDLE || playback.phase == AnimePlayerPhase.OPENING ||

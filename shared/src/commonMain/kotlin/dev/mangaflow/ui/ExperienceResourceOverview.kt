@@ -17,6 +17,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.experience.*
+import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionBusyIndicator
@@ -34,21 +35,21 @@ internal fun ExperienceResourceOverview(usage: ExperienceUsage, appliedBudget: E
     }
     val colors = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        ResourceMetricRow(Icons.Outlined.Memory, "实测",
-            resourceBytes(forecast.currentProcessBytes),
+        ResourceMetricRow(Icons.Outlined.Memory, "应用内存",
+            forecast.currentProcessBytes?.let(::resourceBytes) ?: "暂无采样",
             processMemoryLabel(forecast.processMemoryKind), enabled,
-            "当前应用占用 ${resourceBytes(forecast.currentProcessBytes)}，本次同口径观测峰值 ${resourceBytes(forecast.observedProcessPeakBytes)}") { onOpen("resources") }
-        if (draft && showDraftImpact) MotionTextButton(onClick = { onOpen("resources") }, enabled = enabled,
+            "当前应用占用 ${resourceBytes(forecast.currentProcessBytes)}，本次同口径观测峰值 ${resourceBytes(forecast.observedProcessPeakBytes)}") { onOpen("device") }
+        if (draft && showDraftImpact) MotionTextButton(onClick = { onOpen("forecast") }, enabled = enabled,
             contentPadding = PaddingValues(0.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
             Box(Modifier.weight(1f)) { ExperienceDraftImpact(usage, appliedBudget, previewBudget, editing) }
-        } else if (!draft) ResourceMetricRow(Icons.Outlined.Calculate, "≈",
+        } else if (!draft) ResourceMetricRow(Icons.Outlined.Calculate, "预计峰值",
             resourceRange(forecast.estimatedProcessPeakLowBytes, forecast.estimatedProcessPeakHighBytes),
-            if (forecast.estimatedProcessPeakHighBytes != null) "峰值" else if (forecast.decodeSampleCount == 0) "待样本" else "未知",
+            if (forecast.estimatedProcessPeakHighBytes != null) "估算" else if (forecast.decodeSampleCount == 0) "待样本" else "观测不足",
             enabled, "配置情景估算 ${resourceRange(forecast.estimatedProcessPeakLowBytes, forecast.estimatedProcessPeakHighBytes)}，不是应用内存的硬上限",
-            accent = colors.primary) { onOpen("resources") }
+            accent = colors.primary) { onOpen("forecast") }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             ResourceAllocation(Icons.Outlined.Image, "图片内存", usage.memoryBytes,
-                target.imageMemoryBudgetBytes, Modifier.weight(1f), enabled, draft) { onOpen("cache") }
+                target.imageMemoryBudgetBytes, Modifier.weight(1f), enabled, draft) { onOpen("forecast") }
             ResourceAllocation(Icons.Outlined.Storage, "缓存磁盘", forecast.diskCurrentBytes,
                 target.diskBudgetBytes, Modifier.weight(1f), enabled, draft,
                 resizePending = usage.diskResizePending) { onOpen("cache") }
@@ -97,6 +98,7 @@ internal fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, b
                 else if (budget == 0L) { if (draft) "，草稿将关闭此项缓存预算" else "，此项缓存预算已关闭" } else ""
         }) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(title, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Icon(icon, null, Modifier.size(20.dp), tint = accent)
                 Text(resourceBytes(used), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
@@ -118,6 +120,36 @@ internal fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, b
                 if (fraction != null) Box(Modifier.fillMaxHeight().fillMaxWidth(fraction)
                     .background(accent.copy(alpha = .75f), CircleShape))
             }
+        }
+    }
+}
+
+@Composable
+internal fun ExperienceResourceReport(section: String, usage: ExperienceUsage, applied: ExperienceBudget,
+    preview: ExperienceBudget, draft: Boolean, enabled: Boolean, onConfigure: (String) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val title = when (section) {
+        "forecast" -> "内存与磁盘预算"
+        "cache" -> "缓存分类"
+        else -> "设备与系统"
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                if (section == "device") Text(usage.resources.sampledAtMillis?.let {
+                    "采样于 " + formatInstantMillis(it, "HH:mm:ss")
+                } ?: "暂无设备采样", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            }
+            MotionTextButton(onClick = { onConfigure(if (section == "device") "resources" else "cache") }, enabled = enabled) {
+                Text(if (section == "device") "设备保护设置" else "缓存设置")
+            }
+        }
+        when (section) {
+            "forecast" -> ExperienceForecastDetails(usage, applied, preview, draft)
+            "cache" -> ExperienceCacheBreakdown(usage)
+            else -> ExperienceDeviceDetails(usage)
         }
     }
 }

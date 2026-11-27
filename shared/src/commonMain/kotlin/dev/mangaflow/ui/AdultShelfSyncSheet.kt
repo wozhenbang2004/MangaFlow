@@ -1,7 +1,6 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
@@ -23,6 +22,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.account.AdultFavoriteChoice
 import dev.mangaflow.account.AdultShelfSyncState
 import dev.mangaflow.ui.motion.MotionBottomSheet
@@ -57,12 +58,12 @@ internal fun AdultShelfSyncSheet(
         chosen = if (chosen[id] == choice) chosen - id else chosen + (id to choice)
         confirmRemoval = false
     }
-    MotionBottomSheet(backdrop = backdrop, onDismissRequest = {
+    MotionBottomSheet(backdrop = backdrop, desktopWidth = 736.dp, onDismissRequest = {
         onDismiss()
         if (openAccountAfterExit) onOpenAccount()
     }) { dismiss ->
-        Column(Modifier.fillMaxWidth().heightIn(max = (LocalMangaWindow.current.height - 64.dp).coerceAtLeast(160.dp))
-            .padding(horizontal = 20.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        val hasDifferences = state.checked && state.differences.isNotEmpty()
+        AccountDifferencePanel(header = {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.Sync, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
                 Text("${sourceName}收藏差异", Modifier.weight(1f).padding(start = 7.dp),
@@ -77,6 +78,7 @@ internal fun AdultShelfSyncSheet(
                     Icon(Icons.Outlined.Close, "关闭", Modifier.size(18.dp))
                 }
             }
+        }, summary = {
             state.owner?.let { owner -> Text("成人书架 · $owner", fontSize = 11.sp, color = colors.onSurfaceVariant) }
             if (state.checked) {
                 Text("本机 ${state.localCount}  ·  $sourceName ${state.remoteCount}  ·  差异 ${state.differences.size}",
@@ -96,33 +98,27 @@ internal fun AdultShelfSyncSheet(
                 Text("本机书架中的${sourceName}作品已与站点收藏对齐。",
                     fontSize = 12.sp, color = colors.onSurfaceVariant)
             }
-            if (state.checked && state.differences.isNotEmpty()) {
+            if (hasDifferences) {
                 Text("只操作已选中的项目；不自动删除本地或云端记录。",
                     fontSize = 11.sp, color = colors.onSurfaceVariant)
-                LazyColumn(Modifier.weight(1f, fill = false).heightIn(max = 440.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(state.differences, key = { it.key }) { diff ->
-                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(diff.manga.title, Modifier.weight(1f), fontSize = 13.sp,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(if (diff.inLocal) "仅本机" else "仅$sourceName", fontSize = 10.sp,
-                                    color = colors.onSurfaceVariant)
-                            }
-                            val primary = if (diff.inLocal) AdultFavoriteChoice.UPLOAD_REMOTE
-                                else AdultFavoriteChoice.IMPORT_LOCAL
-                            val removal = if (diff.inLocal) AdultFavoriteChoice.REMOVE_LOCAL
-                                else AdultFavoriteChoice.REMOVE_REMOTE
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                                AdultShelfChoice(if (diff.inLocal) "同步到$sourceName" else "导入本机",
-                                    diff.manga.title, chosen[diff.key] == primary, live) { select(diff.key, primary) }
-                                AdultShelfChoice(if (diff.inLocal) "移出本机" else "从${sourceName}移除",
-                                    diff.manga.title, chosen[diff.key] == removal, live, destructive = true) {
-                                    select(diff.key, removal)
-                                }
-                            }
-                        }
+            }
+            if (platformKind == PlatformKind.DESKTOP && !state.checked && !state.busy && !state.loginRequired &&
+                state.completed == null && state.error == null) {
+                MotionButton(onClick = onCheck) { Text("比较收藏", fontSize = 12.sp) }
+            }
+        }, hasDifferences = hasDifferences, mobileListMax = 440.dp, footer = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                if (platformKind == PlatformKind.DESKTOP && actions.isNotEmpty()) {
+                    val counts = listOf(
+                        AdultFavoriteChoice.IMPORT_LOCAL to "导入本机",
+                        AdultFavoriteChoice.UPLOAD_REMOTE to "同步到$sourceName",
+                        AdultFavoriteChoice.REMOVE_LOCAL to "移出本机",
+                        AdultFavoriteChoice.REMOVE_REMOTE to "从${sourceName}移除",
+                    ).mapNotNull { (choice, label) ->
+                        actions.values.count { it == choice }.takeIf { it > 0 }?.let { "$label $it" }
                     }
+                    Text(counts.joinToString(" · "), style = MaterialTheme.typography.labelMedium,
+                        color = colors.onSurfaceVariant)
                 }
                 if (confirmRemoval && deletions > 0) {
                     Text("确认删除已选的 $deletions 项收藏（本机或$sourceName）。",
@@ -141,6 +137,29 @@ internal fun AdultShelfSyncSheet(
                     }, enabled = live && actions.isNotEmpty()) {
                         Text(if (confirmRemoval && deletions > 0) "确认删除并应用"
                             else "应用 ${actions.size} 项", fontSize = 12.sp)
+                    }
+                }
+            }
+        }) {
+            items(state.differences, key = { it.key }) { diff ->
+                Column(Modifier.fillMaxWidth().accountReviewRow(chosen[diff.key] != null), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(diff.manga.title, Modifier.weight(1f), fontSize = 13.sp,
+                            maxLines = if (platformKind == PlatformKind.DESKTOP) 2 else 1, overflow = TextOverflow.Ellipsis)
+                        Text(if (diff.inLocal) "仅本机" else "仅$sourceName", fontSize = 10.sp,
+                            color = colors.onSurfaceVariant)
+                    }
+                    val primary = if (diff.inLocal) AdultFavoriteChoice.UPLOAD_REMOTE
+                        else AdultFavoriteChoice.IMPORT_LOCAL
+                    val removal = if (diff.inLocal) AdultFavoriteChoice.REMOVE_LOCAL
+                        else AdultFavoriteChoice.REMOVE_REMOTE
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        AdultShelfChoice(if (diff.inLocal) "同步到$sourceName" else "导入本机",
+                            diff.manga.title, chosen[diff.key] == primary, live) { select(diff.key, primary) }
+                        AdultShelfChoice(if (diff.inLocal) "移出本机" else "从${sourceName}移除",
+                            diff.manga.title, chosen[diff.key] == removal, live, destructive = true) {
+                            select(diff.key, removal)
+                        }
                     }
                 }
             }

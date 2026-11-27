@@ -32,6 +32,15 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -79,8 +88,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-private enum class ExperienceWorkspace { OVERVIEW, TUNING }
+private enum class ExperienceWorkspace { OVERVIEW, TUNING, RESOURCES }
 private enum class ExperienceSaveIndicator { QUIET, SAVING, SAVED }
+private const val INVALID_EXPERIENCE_VALUE = "请修正当前数值，或取消该项编辑"
 
 /** One retained workspace saves each accepted edit, with a single serialized latest-value writer. */
 @Composable
@@ -100,11 +110,13 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     var hostAlive by remember { mutableStateOf(true) }
     DisposableEffect(Unit) { onDispose { hostAlive = false } }
     val active = visible && lifecycle.isAtLeast(Lifecycle.State.RESUMED)
+    val desktop = platformKind == PlatformKind.DESKTOP
     var baseline by remember(store) { mutableStateOf(store.overrides.value) }
     var baselineMode by remember(store) { mutableStateOf(store.state.value.mode) }
     var draft by remember(store) { mutableStateOf(store.overrides.value) }
     var draftMode by remember(store) { mutableStateOf(store.state.value.mode) }
     var workspace by rememberSaveable { mutableStateOf(ExperienceWorkspace.OVERVIEW) }
+    var report by rememberSaveable { mutableStateOf("device") }
     var expanded by rememberSaveable { mutableStateOf("reading") }
     var showLegend by rememberSaveable { mutableStateOf(false) }
     var pendingExit by remember { mutableStateOf<String?>(null) }
@@ -131,7 +143,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     }
     fun settleEditor(): Boolean {
         if (editor.pending && editor.accept?.invoke() != true) {
-            notice = "请修正当前数值，或点 × 取消该项编辑"
+            notice = INVALID_EXPERIENCE_VALUE
             return false
         }
         editor.clear()
@@ -201,6 +213,12 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
         focus.clearFocus(force = true)
         workspace = next
     }
+    fun openReport(section: String) {
+        if (!active || pendingExit != null || !settleEditor()) return
+        focus.clearFocus(force = true)
+        report = section
+        workspace = ExperienceWorkspace.RESOURCES
+    }
     fun selectCategory(category: String) {
         if (!active || pendingExit != null || !settleEditor()) return
         focus.clearFocus(force = true)
@@ -222,7 +240,8 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     LaunchedEffect(savedCustom, savedBudget.mode) {
         if (visible && !applying && !dirty && editor.field == null) reload()
     }
-    LaunchedEffect(workspace, expanded) { detailScroll.scrollTo(0) }
+    LaunchedEffect(workspace, expanded, report) { detailScroll.scrollTo(0) }
+    LaunchedEffect(editor.field) { if (editor.field == null && notice == INVALID_EXPERIENCE_VALUE) notice = null }
     LaunchedEffect(savedAt, visible) {
         showSaveReceipt = false
         if (!visible) savedAt = null
@@ -257,6 +276,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
             val shownCategory = when (workspace) {
                 ExperienceWorkspace.OVERVIEW -> "overview"
                 ExperienceWorkspace.TUNING -> expanded
+                ExperienceWorkspace.RESOURCES -> "report-$report"
             }
             val interactive = active && pendingExit == null
             val motion = LocalMotionEnabled.current
@@ -286,6 +306,15 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                     .padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                         PreferenceHeading("体验策略", Modifier.weight(1f))
+                        if (desktop && wide && (applying || editor.pending || savedAt != null)) {
+                            val stateLabel = when {
+                                conflict || notice != null -> "有修改待确认"
+                                applying -> "正在保存"
+                                editor.pending -> "输入待确认"
+                                else -> "修改已保存"
+                            }
+                            Text(stateLabel, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                        }
                         // A stable header slot replaces the permanently empty bottom action row.
                         MotionSwap(saveIndicator, Modifier.size(24.dp)) { indicator ->
                             when (indicator) {
@@ -311,26 +340,52 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                             Icon(Icons.Outlined.Close, "关闭体验与资源", Modifier.size(20.dp))
                         }
                     }
-                    ExperienceIconChoices(listOf(
+                    val destinations = listOf(
                         Triple(ExperienceWorkspace.OVERVIEW, "概览", Icons.Outlined.Dashboard),
-                        Triple(ExperienceWorkspace.TUNING, "配置", Icons.Outlined.Tune)),
+                        Triple(ExperienceWorkspace.TUNING, "配置", Icons.Outlined.Tune)) +
+                        if (desktop) listOf(Triple(ExperienceWorkspace.RESOURCES, "资源", Icons.Outlined.Memory)) else emptyList()
+                    ExperienceIconChoices(destinations,
                         workspace, enabled = interactive, selectedLabel = true, navigation = true, onSelected = ::selectWorkspace)
                     Spacer(Modifier.height(8.dp))
                     if (!wide && workspace == ExperienceWorkspace.TUNING)
                         ExperienceCategoryNavigation(expanded, draft, interactive) { selectCategory(it) }
+                    if (workspace == ExperienceWorkspace.RESOURCES) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.weight(1f)) {
+                                ExperienceIconChoices(listOf(Triple("device", "设备", Icons.Outlined.Devices),
+                                    Triple("forecast", "预算", Icons.Outlined.Calculate),
+                                    Triple("cache", "缓存", Icons.Outlined.Storage)),
+                                    report, enabled = interactive, selectedLabel = true, onSelected = ::openReport)
+                            }
+                            MotionIconButton(onClick = store::refreshResources, enabled = interactive, tooltip = "刷新资源采样",
+                                modifier = Modifier.size(44.dp)) { Icon(Icons.Outlined.Refresh, "刷新资源采样", Modifier.size(18.dp)) }
+                        }
+                    }
                     Row(Modifier.weight(1f).fillMaxWidth().padding(top = 6.dp, bottom = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(if (wide) 24.dp else 0.dp)) {
                         if (wide && workspace == ExperienceWorkspace.TUNING) Column(
                             Modifier.width(176.dp * window.fontScale).fillMaxHeight().verticalScroll(navigationScroll)) {
                             ExperienceCategoryNavigation(expanded, draft, interactive, vertical = true) { selectCategory(it) }
                         }
-                        Column(Modifier.weight(1f).fillMaxHeight().graphicsLayer {
+                        Box(Modifier.weight(1f).fillMaxHeight()) {
+                        Column(Modifier.fillMaxSize().then(if (desktop) Modifier.padding(end = 12.dp) else Modifier).graphicsLayer {
                             alpha = .76f + .24f * arrival.value
                             translationY = 7.dp.toPx() * (1f - arrival.value)
                         }.verticalScroll(detailScroll)) {
                             ExperienceReveal(showLegend) { ExperienceNavigationLegend() }
+                            val resources: @Composable () -> Unit = {
+                                val usage by store.usage.collectAsStateWithLifecycle()
+                                Column(Modifier.fillMaxWidth().background(colors.surfaceContainerHigh, RoundedCornerShape(12.dp))
+                                    .padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("资源占用", style = MaterialTheme.typography.titleSmall)
+                                    ExperienceResourceOverview(usage, savedBudget, preview,
+                                        draft != baseline || draftMode != baselineMode, interactive, editor.pending,
+                                        onOpen = ::openReport)
+                                }
+                            }
                             if (workspace == ExperienceWorkspace.OVERVIEW) {
                                 ExperienceOverview(preview, draft, draftMode, interactive,
+                                    resourceSummary = if (desktop) resources else null,
                                     onMode = { mode ->
                                         if (interactive && settleEditor()) {
                                             changeMode(mode)
@@ -338,7 +393,13 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                                         }
                                     }, onCategory = { selectCategory(it) })
                             }
-                            when (shownCategory) {
+                            if (workspace == ExperienceWorkspace.RESOURCES) {
+                                val usage by store.usage.collectAsStateWithLifecycle()
+                                val draftBudget = draft != baseline || draftMode != baselineMode
+                                LaunchedEffect(active) { if (active) store.refreshResources() }
+                                ExperienceResourceReport(report, usage, savedBudget, preview, draftBudget, interactive,
+                                    onConfigure = ::selectCategory)
+                            } else if (workspace == ExperienceWorkspace.TUNING || !desktop) when (shownCategory) {
                                 "manga-enhancement", "anime-enhancement" -> ExperienceEnhancementSettings(
                                     if (shownCategory == "anime-enhancement") EnhancementContent.ANIME else EnhancementContent.MANGA,
                                     interactive)
@@ -351,23 +412,33 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                                     onOpenSourceChecks = onOpenSourceChecks?.let { { requestExit("source-checks") } })
                             }
                         }
+                        if (desktop) DesktopVerticalScrollbar(detailScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                        }
                     }
                     // Successful saves do not resize the body. Only actionable failures get a footer.
                     if (notice != null || conflict) {
                         Text(notice ?: "设置已在其他入口改变，请重新载入",
-                            Modifier.fillMaxWidth().padding(vertical = 4.dp), style = MaterialTheme.typography.labelSmall,
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
+                            style = MaterialTheme.typography.labelSmall,
                             color = if (conflict) statusColors.waiting else statusColors.error)
                         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.End) {
                             if (!applying) {
+                                if (desktop && notice == INVALID_EXPERIENCE_VALUE) {
+                                    MotionTextButton(onClick = {
+                                        editor.clear()
+                                        focus.clearFocus(force = true)
+                                        notice = null
+                                    }) { Text("取消本项输入") }
+                                }
                                 if (pendingExit != null) MotionTextButton(onClick = {
                                     val destination = pendingExit
                                     reload()
                                     finishExit(destination)
                                 }) { Text("放弃未保存修改") }
                                 MotionTextButton(onClick = {
-                                    if (conflict) reload() else saveChanges()
-                                }) { Text(if (conflict) "重新载入" else "重试") }
+                                    if (conflict) reload() else if (settleEditor()) saveChanges()
+                                }) { Text(if (conflict) "重新载入" else if (notice == INVALID_EXPERIENCE_VALUE) "确认数值" else "重试保存") }
                             }
                         }
                     }
@@ -386,9 +457,10 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
 /** Overview of the chosen strategy and its configuration categories. */
 @Composable
 private fun ExperienceOverview(budget: ExperienceBudget, custom: ExperienceOverrides, mode: ExperienceMode,
-    enabled: Boolean, onMode: (ExperienceMode) -> Unit, onCategory: (String) -> Unit) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        ExperienceModeChoices(mode, enabled, onMode)
+    enabled: Boolean, resourceSummary: (@Composable () -> Unit)?,
+    onMode: (ExperienceMode) -> Unit, onCategory: (String) -> Unit) {
+    val categories: @Composable () -> Unit = {
+      Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         ExperienceOverviewLink(Icons.Outlined.AutoAwesome, "漫画增强",
             "画质 · 提前增强 · 阅读时显示", enabled) { onCategory("manga-enhancement") }
         ExperienceOverviewLink(Icons.Outlined.SlowMotionVideo, "番剧增强与补帧",
@@ -407,6 +479,18 @@ private fun ExperienceOverview(budget: ExperienceBudget, custom: ExperienceOverr
             "原图与解码缓存的保留规则", enabled) { onCategory("cache") }
         ExperienceOverviewLink(Icons.Outlined.Shield, "设备保护",
             "流量 · 电量 · 刷新率", enabled) { onCategory("resources") }
+      }
+    }
+    if (resourceSummary != null) PreferenceWorkspace(preview = {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("当前策略", style = MaterialTheme.typography.titleSmall)
+            ExperienceModeChoices(mode, enabled, onMode)
+            resourceSummary()
+        }
+    }, controls = categories)
+    else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        ExperienceModeChoices(mode, enabled, onMode)
+        categories()
     }
 }
 
@@ -1266,6 +1350,15 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
     val displayed = if (value == null) automaticDisplay ?: selected?.toString() else value.toString()
     val current = (selected ?: range.first).coerceAtLeast(range.first)
     val editing = active && editor.field == title
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val fieldFocus = remember { FocusRequester() }
+    val valueFocus = remember { FocusRequester() }
+    LaunchedEffect(desktop, editing) {
+        if (desktop && editing) {
+            withFrameNanos { }
+            fieldFocus.requestFocus()
+        }
+    }
     // Freeze the shortcut scale for this edit: saving a step must not move the thumb's
     // coordinate system, especially after a manually entered value exceeds the shortcut.
     val sliderMaximum = if (editing) maxOf(range.last, editor.sliderMaximum) else maxOf(range.last, current)
@@ -1295,7 +1388,8 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
     SideEffect { if (editing) editor.accept = { commit() } }
     Column(Modifier.fillMaxWidth()) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val stacked = maxWidth < 300.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f)
+            val availableWidth = maxWidth
+            val stacked = availableWidth < 300.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f)
             val valueControl: @Composable () -> Unit = {
                 MotionTextButton(onClick = {
                     if (active && (editing || !editor.pending || editor.accept?.invoke() == true)) {
@@ -1310,7 +1404,8 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                         }
                     }
                 }, enabled = active, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-                    modifier = Modifier.widthIn(max = maxWidth).heightIn(min = 44.dp).semantics(mergeDescendants = true) {
+                    modifier = Modifier.widthIn(max = availableWidth).heightIn(min = 44.dp).focusRequester(valueFocus)
+                        .semantics(mergeDescendants = true) {
                         contentDescription = title + "，" + (displayed?.plus(" " + unit) ?: "自动值尚未知") +
                             (if (value == null) "，跟随" + automaticLabel else "，手动值") +
                             (if (editing) "，点击收起编辑" else "，点击编辑")
@@ -1350,7 +1445,14 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                     cursorBrush = SolidColor(colors.primary),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { commit() }),
-                    modifier = Modifier.weight(1f).heightIn(min = 44.dp).clip(RoundedCornerShape(10.dp))
+                    modifier = Modifier.weight(1f).heightIn(min = 44.dp).focusRequester(fieldFocus)
+                        .onPreviewKeyEvent { event ->
+                            if (!desktop || !editing || event.type != KeyEventType.KeyDown) false else when (event.key) {
+                                Key.Enter -> { if (commit()) valueFocus.requestFocus(); true }
+                                Key.Escape -> { editor.clear(); valueFocus.requestFocus(); true }
+                                else -> false
+                            }
+                        }.clip(RoundedCornerShape(10.dp))
                         .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 10.dp, vertical = 12.dp)
                         .semantics { contentDescription = title + "数值，单位" + unit },
                     decorationBox = { input ->
@@ -1380,7 +1482,8 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
             if (semanticMaximum != null) Text(range.first.toString() + "–" + semanticMaximum + " " + unit,
                 style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             if (invalid) Text(if (semanticMaximum != null) "请输入 " + range.first + "–" + semanticMaximum + " 的整数"
-                else "请输入不小于 " + range.first + " 的有效整数", style = MaterialTheme.typography.labelSmall, color = colors.error)
+                else "请输入不小于 " + range.first + " 的有效整数", style = MaterialTheme.typography.labelSmall,
+                color = colors.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             MotionSlider(sliding, onValueChange = {
                 if (acceptsInput()) {
                     val accepted = it.roundToInt().coerceAtLeast(range.first)

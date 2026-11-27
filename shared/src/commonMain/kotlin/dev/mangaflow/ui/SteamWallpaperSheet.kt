@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -67,6 +68,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.autofill.ContentType
@@ -114,6 +120,8 @@ import dev.mangaflow.storage.SteamWallpaperLibrary
 import dev.mangaflow.storage.SteamWallpaperTransferPhase
 import dev.mangaflow.storage.SteamWallpaperState
 import dev.mangaflow.MangaApplicationServices
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -439,6 +447,20 @@ internal fun SteamWallpaperSheet(
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp).imePadding()) {
             val panelHeight = minOf(maxHeight, LocalMangaWindow.current.height * .90f, 720.dp)
             val footerHeight = minOf(132.dp * LocalMangaWindow.current.fontScale, panelHeight * .30f)
+            val desktop = platformKind == PlatformKind.DESKTOP
+            val widePreview = desktop && maxWidth >= 616.dp * LocalMangaWindow.current.fontScale && panelHeight >= 344.dp
+            val importActions: @Composable (SteamWallpaperItem) -> Unit = { item ->
+                TaskDownloadRouteControl(DownloadCategory.STEAM_WALLPAPERS,
+                    selected = nextTransferRoute, onSelect = { nextTransferRoute = it },
+                    enabled = display.transferId == null && !display.preparing, backdrop = backdrop)
+                MotionTextButton(onClick = { download(item) }, enabled = display.transferId == null && !display.preparing,
+                    modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Outlined.Download, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text(if (display.transferId != null) "已有下载进行中"
+                        else if (display.account == null) "登录后下载" else "下载并应用")
+                }
+            }
             val panel: @Composable () -> Unit = {
                 Column(Modifier.fillMaxWidth().height(panelHeight)
                     .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -616,23 +638,31 @@ internal fun SteamWallpaperSheet(
                                 }
                             }
                             WorkshopPane.PREVIEW -> preview?.let { item ->
-                                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                                        .background(colors.onSurface.copy(alpha = .045f)), contentAlignment = Alignment.Center) {
-                                        AsyncImage(model = item.previewUrl, contentDescription = item.title + "，创意工坊预览",
-                                            contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
-                                    }
+                                val details: @Composable () -> Unit = {
                                     Text(item.title, style = MaterialTheme.typography.bodyMedium, maxLines = 2,
                                         overflow = TextOverflow.Ellipsis)
                                     Text((if (item.kind == SteamWallpaperKind.IMAGE) "图片" else "视频") +
                                         (item.sizeBytes?.takeIf { it > 0L }?.let { " · " + steamWallpaperByteLabel(it) } ?: ""),
                                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                                 }
+                                if (widePreview) Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                                    SteamPreviewImage(item, Modifier.weight(1.7f).fillMaxHeight())
+                                    Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        details()
+                                        importActions(item)
+                                    }
+                                } else Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    SteamPreviewImage(item, Modifier.weight(1f).fillMaxWidth())
+                                    details()
+                                }
                             }
                         }
                     }
-                    // Reserve the same task viewport before and after live status arrives.
-                    Column(Modifier.fillMaxWidth().height(footerHeight).verticalScroll(rememberScrollState()),
+                    // Compact sheets reserve the task viewport; desktop gives unused space back to the images.
+                    Column(Modifier.fillMaxWidth()
+                        .then(if (desktop) Modifier.heightIn(max = footerHeight) else Modifier.height(footerHeight))
+                        .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (display.transferId != null || display.transferError != null) {
                             SteamTransferTask(display, onCancel = client::cancelTransfer,
@@ -704,21 +734,7 @@ internal fun SteamWallpaperSheet(
                                 style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                             MotionTextButton(onClick = ::cancelAuthentication) { Text("取消验证") }
                         }
-                        if (pane == WorkshopPane.PREVIEW && preview != null) {
-                            val item = preview
-                            TaskDownloadRouteControl(DownloadCategory.STEAM_WALLPAPERS,
-                                selected = nextTransferRoute, onSelect = { nextTransferRoute = it },
-                                enabled = display.transferId == null && !display.preparing,
-                                backdrop = backdrop)
-                            MotionTextButton(onClick = { item?.let(::download) },
-                                enabled = display.transferId == null && !display.preparing,
-                                modifier = Modifier.fillMaxWidth()) {
-                                Icon(Icons.Outlined.Download, null, Modifier.size(18.dp))
-                                Spacer(Modifier.width(5.dp))
-                                Text(if (display.transferId != null) "已有下载进行中"
-                                    else if (display.account == null) "登录后下载" else "下载并应用")
-                            }
-                        }
+                        if (pane == WorkshopPane.PREVIEW && !widePreview) preview?.let { importActions(it) }
                     }
                 }
             }
@@ -727,6 +743,22 @@ internal fun SteamWallpaperSheet(
             else Surface(shape = RoundedCornerShape(22.dp), color = colors.surfaceContainerLow,
                 tonalElevation = 0.dp) { panel() }
         }
+    }
+}
+
+@Composable
+private fun SteamPreviewImage(item: SteamWallpaperItem, modifier: Modifier) {
+    val colors = MaterialTheme.colorScheme
+    var failed by remember(item.id, item.previewUrl) { mutableStateOf(false) }
+    Box(modifier.clip(RoundedCornerShape(12.dp)).background(colors.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+        if (item.previewUrl.isNullOrBlank() || failed) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(if (failed) "预览图未能载入" else "此壁纸暂无预览图", style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant)
+                if (failed) MotionTextButton(onClick = { failed = false }) { Text("重新载入") }
+            }
+        } else AsyncImage(model = item.previewUrl, contentDescription = item.title + "，创意工坊预览",
+            contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize(), onError = { failed = true })
     }
 }
 
@@ -914,17 +946,27 @@ private fun SteamWallpaperBrowser(
     onPreview: (SteamWallpaperItem) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val scale = LocalMangaWindow.current.fontScale
     val tileWidth = (if (LocalMangaWindow.current.width < 420.dp) 124.dp else 150.dp) *
         LocalMangaWindow.current.fontScale
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+          val showKinds = desktop && maxWidth >= 440.dp * scale
+          Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             MotionTabs(selected = library.ordinal, labels = listOf("浏览", "收藏", "订阅"),
                 onSelect = { SteamWallpaperLibrary.entries.getOrNull(it)?.let(onLibrary) },
                 modifier = Modifier.weight(1f), treatment = MotionTabTreatment.Soft,
                 fullWidthIndicator = true, controlHeight = 40.dp,
                 track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
-            MotionIconButton(onClick = {
+            if (showKinds) MotionTabs(selected = if (kind == SteamWallpaperKind.IMAGE) 0 else 1,
+                labels = listOf("图片", "视频"),
+                onSelect = { index -> onKind(if (index == 0) SteamWallpaperKind.IMAGE else SteamWallpaperKind.VIDEO) },
+                modifier = Modifier.width(140.dp * scale), role = Role.RadioButton,
+                treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 40.dp,
+                track = colors.surfaceContainerHigh, indicator = colors.surface)
+            else MotionIconButton(onClick = {
                 onKind(if (kind == SteamWallpaperKind.IMAGE) SteamWallpaperKind.VIDEO else SteamWallpaperKind.IMAGE)
             }, modifier = Modifier.size(44.dp),
                 tooltip = if (kind == SteamWallpaperKind.IMAGE) "当前图片，切换为视频" else "当前视频，切换为图片") {
@@ -932,12 +974,19 @@ private fun SteamWallpaperBrowser(
                     if (kind == SteamWallpaperKind.IMAGE) "当前图片，切换为视频" else "当前视频，切换为图片",
                     Modifier.size(21.dp))
             }
+          }
         }
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
             .background(colors.onSurface.copy(alpha = .045f)).padding(start = 12.dp),
             verticalAlignment = Alignment.CenterVertically) {
             BasicTextField(query, onValueChange = onQuery, singleLine = true,
-                modifier = Modifier.weight(1f).padding(vertical = 12.dp)
+                modifier = Modifier.weight(1f).padding(vertical = 12.dp).onPreviewKeyEvent { event ->
+                    if (!desktop || event.type != KeyEventType.KeyDown) false else when (event.key) {
+                        Key.Enter -> { onSearch(); true }
+                        Key.Escape -> if (query.isNotEmpty()) { onQuery(""); true } else false
+                        else -> false
+                    }
+                }
                     .semantics { contentDescription = "搜索创意工坊壁纸" },
                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
                 cursorBrush = SolidColor(colors.onSurface),
@@ -971,8 +1020,9 @@ private fun SteamWallpaperBrowser(
             Text("原图片 · 动态视频，场景工程暂不支持。",
                 style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             if (!requested && !state.loading) MotionTextButton(onClick = onSearch) { Text("浏览壁纸") }
-        } else LazyVerticalGrid(columns = GridCells.Adaptive(tileWidth), state = grid,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
+        } else Box(Modifier.weight(1f).fillMaxWidth()) {
+          LazyVerticalGrid(columns = GridCells.Adaptive(tileWidth), state = grid,
+            modifier = Modifier.fillMaxSize().then(if (desktop) Modifier.padding(end = 12.dp) else Modifier),
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             items(state.items, key = { it.id }) { item ->
@@ -994,6 +1044,8 @@ private fun SteamWallpaperBrowser(
                     }
                 }
             }
+          }
+          if (desktop) DesktopVerticalScrollbar(grid, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
         }
     }
 }

@@ -2,14 +2,18 @@ package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -23,6 +27,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.sync.LanReadingSyncController
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionButton
@@ -33,6 +39,16 @@ import dev.mangaflow.ui.motion.MotionTextButton
 internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss: () -> Unit) {
     val state by controller.state.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
+    val desktop = platformKind == PlatformKind.DESKTOP
+    var showScope by remember { mutableStateOf(false) }
+    var showConflicts by remember { mutableStateOf(false) }
+    val pairing = state.pairing
+    val reviewing = desktop && showConflicts && state.conflicts.isNotEmpty() && pairing == null
+    val list = rememberLazyListState()
+    LaunchedEffect(pairing?.session, state.conflicts.isEmpty()) {
+        if (pairing != null || state.conflicts.isEmpty()) showConflicts = false
+        if (desktop && pairing != null) list.scrollToItem(0)
+    }
     var removing by remember { mutableStateOf<String?>(null) }
     var expanded by remember { mutableStateOf<String?>(null) }
     val paired = state.devices.filter { it.trusted }
@@ -40,9 +56,10 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
 
     // Leaving the sheet closes first-contact admission, while established sync remains enabled.
     DisposableEffect(controller) { onDispose { controller.closePairing() } }
-    MotionBottomSheet(onDismissRequest = onDismiss) { dismiss ->
+    MotionBottomSheet(onDismissRequest = onDismiss, desktopWidth = 720.dp) { dismiss ->
+        val height = LocalMangaWindow.current.height
         Column(Modifier.fillMaxWidth()
-            .heightIn(max = (LocalMangaWindow.current.height - 64.dp).coerceAtLeast(200.dp))
+            .heightIn(max = if (desktop) height.coerceAtMost(720.dp) else (height - 64.dp).coerceAtLeast(200.dp))
             .padding(horizontal = 20.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 PreferenceHeading("局域网阅读同步", Modifier.weight(1f))
@@ -50,16 +67,84 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                     Icon(Icons.Outlined.Close, "关闭", Modifier.size(18.dp))
                 }
             }
-            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false),
+            AccountReviewList(Modifier.fillMaxWidth().weight(1f, fill = false), state = list,
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                item(key = "scope") {
+                val pairingCard: LazyListScope.() -> Unit = {
+                    if (pairing != null) item(key = "pairing:${pairing.session}") {
+                        Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(16.dp))
+                            .padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("与 ${pairing.name} 配对", style = MaterialTheme.typography.titleMedium)
+                            Text("请面对面核对两端校验码完全相同。双方确认后，才开始交换阅读数据。",
+                                fontSize = 12.sp, color = colors.onSurfaceVariant)
+                            Text(pairing.code.split(' ').chunked(4).joinToString("\n") { it.joinToString(" ") },
+                                fontFamily = FontFamily.Monospace, fontSize = 18.sp, lineHeight = 28.sp,
+                                modifier = Modifier.padding(vertical = 4.dp), color = colors.onSurface)
+                            if (pairing.confirmedHere) Text("本机已确认，等待另一台设备确认。", fontSize = 12.sp,
+                                color = colors.onSurfaceVariant)
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+                                verticalAlignment = Alignment.CenterVertically) {
+                                MotionTextButton(onClick = { controller.rejectPairing(pairing.session) }) {
+                                    Text("取消", fontSize = 12.sp)
+                                }
+                                MotionButton(onClick = { controller.confirmPairing(pairing.session) }, enabled = !pairing.confirmedHere) {
+                                    Text("两端校验码相同", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+                val addDevices: LazyListScope.() -> Unit = {
+                    if (state.active && pairing == null) item(key = "add") {
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (state.pairingOpen) MotionTextButton(onClick = controller::closePairing) {
+                                    Text("停止添加", fontSize = 12.sp)
+                                } else MotionButton(onClick = controller::beginPairing) {
+                                    Text("添加设备", fontSize = 12.sp)
+                                }
+                                if (paired.isNotEmpty()) MotionTextButton(onClick = controller::syncNow, enabled = !state.busy) {
+                                    Text("立即同步", fontSize = 12.sp)
+                                }
+                            }
+                            if (state.pairingOpen) Text("请在另一台设备也打开「添加设备」，然后任选一端发起配对。添加窗口 2 分钟后自动关闭。",
+                                fontSize = 12.sp, color = colors.onSurfaceVariant)
+                            if (state.pairingOpen && nearby.isEmpty()) Text("正在寻找附近的漫流设备…", fontSize = 12.sp,
+                                color = colors.onSurfaceVariant)
+                        }
+                    }
+                    if (state.pairingOpen && pairing == null) items(nearby, key = { "nearby:${it.id}" }) { device ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(device.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            MotionTextButton(onClick = { controller.pair(device.id) }, enabled = !state.busy) {
+                                Text("配对", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+                if (desktop) pairingCard()
+                if (desktop && pairing == null && state.conflicts.isNotEmpty()) item(key = "device-tabs") {
+                    DesktopSectionTabs(if (reviewing) 1 else 0,
+                        listOf("设备", "待确认 ${state.conflicts.size}"), onSelect = {
+                            showConflicts = it == 1
+                        }, modifier = Modifier.widthIn(max = 340.dp).fillMaxWidth())
+                }
+                if (!reviewing) item(key = "scope") {
                     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         SettingsToggle("自动同步阅读数据", state.enabled, Icons.Outlined.Link,
                             enabled = state.supported, onCheckedChange = controller::setEnabled)
-                        Text("同步在线普通漫画的收藏、阅读位置、页码书签和图片收藏位置。两端需打开漫流，并连接同一 Wi-Fi 或有线局域网。",
-                            fontSize = 12.sp, color = colors.onSurfaceVariant)
-                        Text("本地导入的漫画和 PDF 不在本次同步范围；图片与文件不会复制，阅读布局仍由每台设备自己设置。",
-                            fontSize = 11.sp, color = colors.onSurfaceVariant)
+                        if (desktop && state.enabled) MotionTextButton(onClick = { showScope = !showScope },
+                            modifier = Modifier.semantics { selected = showScope }) {
+                            Text("同步范围", style = MaterialTheme.typography.labelMedium)
+                            Icon(if (showScope) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                null, Modifier.size(16.dp))
+                        }
+                        if (!desktop || !state.enabled || showScope) {
+                            Text("同步在线普通漫画的收藏、阅读位置、页码书签和图片收藏位置。两端需打开漫流，并连接同一 Wi-Fi 或有线局域网。",
+                                fontSize = 12.sp, color = colors.onSurfaceVariant)
+                            Text("本地导入的漫画和 PDF 不在本次同步范围；图片与文件不会复制，阅读布局仍由每台设备自己设置。",
+                                fontSize = 11.sp, color = colors.onSurfaceVariant)
+                        }
                         Text(when {
                             !state.supported -> "当前支持 Android 与 Windows 之间同步。"
                             !state.enabled -> "开启后，配对设备在同一局域网中会自动重连。"
@@ -83,34 +168,14 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                         }
                     }
                 } }
-                val pairing = state.pairing
-                if (pairing != null) item(key = "pairing:${pairing.session}") {
-                    Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(16.dp))
-                        .padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("与 ${pairing.name} 配对", style = MaterialTheme.typography.titleMedium)
-                        Text("请面对面核对两端校验码完全相同。双方确认后，才开始交换阅读数据。",
-                            fontSize = 12.sp, color = colors.onSurfaceVariant)
-                        Text(pairing.code.split(' ').chunked(4).joinToString("\n") { it.joinToString(" ") },
-                            fontFamily = FontFamily.Monospace, fontSize = 18.sp, lineHeight = 28.sp,
-                            modifier = Modifier.padding(vertical = 4.dp), color = colors.onSurface)
-                        if (pairing.confirmedHere) Text("本机已确认，等待另一台设备确认。", fontSize = 12.sp,
-                            color = colors.onSurfaceVariant)
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
-                            verticalAlignment = Alignment.CenterVertically) {
-                            MotionTextButton(onClick = { controller.rejectPairing(pairing.session) }) {
-                                Text("取消", fontSize = 12.sp)
-                            }
-                            MotionButton(onClick = { controller.confirmPairing(pairing.session) }, enabled = !pairing.confirmedHere) {
-                                Text("两端校验码相同", fontSize = 12.sp)
-                            }
-                        }
-                    }
-                }
-                if (paired.isNotEmpty()) item(key = "paired-title") {
+                if (!desktop) pairingCard()
+                if (desktop && !reviewing) addDevices()
+                if (!reviewing && paired.isNotEmpty()) item(key = "paired-title") {
                     Text("已配对设备", style = MaterialTheme.typography.titleMedium)
                 }
-                items(paired, key = { "paired:${it.id}" }) { device ->
-                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                if (!reviewing) items(paired, key = { "paired:${it.id}" }) { device ->
+                    Column(Modifier.fillMaxWidth().accountReviewRow(removing == device.id),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text(device.name, style = MaterialTheme.typography.bodyMedium,
@@ -134,34 +199,8 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                         }
                     }
                 }
-                if (state.active && pairing == null) item(key = "add") {
-                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            if (state.pairingOpen) MotionTextButton(onClick = controller::closePairing) {
-                                Text("停止添加", fontSize = 12.sp)
-                            } else MotionButton(onClick = controller::beginPairing) {
-                                Text("添加设备", fontSize = 12.sp)
-                            }
-                            if (paired.isNotEmpty()) MotionTextButton(onClick = controller::syncNow, enabled = !state.busy) {
-                                Text("立即同步", fontSize = 12.sp)
-                            }
-                        }
-                        if (state.pairingOpen) Text("请在另一台设备也打开「添加设备」，然后任选一端发起配对。添加窗口 2 分钟后自动关闭。",
-                            fontSize = 12.sp, color = colors.onSurfaceVariant)
-                        if (state.pairingOpen && nearby.isEmpty()) Text("正在寻找附近的漫流设备…", fontSize = 12.sp,
-                            color = colors.onSurfaceVariant)
-                    }
-                }
-                if (state.pairingOpen && pairing == null) items(nearby, key = { "nearby:${it.id}" }) { device ->
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(device.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        MotionTextButton(onClick = { controller.pair(device.id) }, enabled = !state.busy) {
-                            Text("配对", fontSize = 12.sp)
-                        }
-                    }
-                }
-                if (state.conflicts.isNotEmpty()) item(key = "conflicts-title") {
+                if (!desktop) addDevices()
+                if ((!desktop || reviewing) && state.conflicts.isNotEmpty()) item(key = "conflicts-title") {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("${state.conflicts.size} 处差异待确认", style = MaterialTheme.typography.titleSmall)
                         Text("当前已采用默认结果。继续阅读会更新相应版本，其他候选仍保留；点选一个版本后，才确认这条记录的选择。",
@@ -170,8 +209,8 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                             fontSize = 12.sp, color = colors.onSurfaceVariant)
                     }
                 }
-                items(state.conflicts, key = { "conflict:${it.key}" }) { conflict ->
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                if (!desktop || reviewing) items(state.conflicts, key = { "conflict:${it.key}" }) { conflict ->
+                    Column(Modifier.fillMaxWidth().accountReviewRow(expanded == conflict.key), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(conflict.title, style = MaterialTheme.typography.bodyMedium, maxLines = 2,
                             overflow = TextOverflow.Ellipsis)
                         MotionTextButton(onClick = { expanded = if (expanded == conflict.key) null else conflict.key },
@@ -180,6 +219,9 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                         }
                         if (expanded == conflict.key) conflict.choices.forEach { choice ->
                             MotionTextButton(onClick = { controller.chooseConflict(conflict.key, choice.id) },
+                                colors = if (desktop && choice.selected) ButtonDefaults.textButtonColors(
+                                    containerColor = colors.surface, contentColor = colors.onSurface)
+                                    else ButtonDefaults.textButtonColors(),
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
                                     .semantics { selected = choice.selected }) {
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {

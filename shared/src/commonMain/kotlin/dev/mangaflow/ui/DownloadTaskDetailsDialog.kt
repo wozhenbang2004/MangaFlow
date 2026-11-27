@@ -9,11 +9,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -38,6 +43,8 @@ import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.enhancement.EnhancementTaskPhase
 import dev.mangaflow.enhancement.ReaderChapterEnhancementTask
+import dev.mangaflow.ui.motion.MotionButton
+import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
@@ -109,42 +116,68 @@ internal fun DownloadTaskDetails(
                     Icon(Icons.Outlined.Close, "关闭下载状态", Modifier.size(20.dp))
                 }
             }
-            val scroll = rememberScrollState()
+            val scroll = key(shown.id, shown.createdAt) { rememberScrollState() }
             val facts: @Composable (Modifier) -> Unit = { modifier ->
                 Column(modifier.fillMaxWidth().verticalScroll(scroll).motionInputGate(enabled)
                     .padding(top = 14.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(13.dp))
-                        .padding(horizontal = 14.dp, vertical = 11.dp).semantics(mergeDescendants = true) {},
-                        verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text("原始下载", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp),
-                            verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    val tone = downloadStatusColor(shown.status)
+                    Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(14.dp))
+                        .padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(when (shown.status) {
+                                DownloadStatus.COMPLETED -> Icons.Outlined.CheckCircle
+                                DownloadStatus.FAILED -> Icons.Outlined.ErrorOutline
+                                DownloadStatus.PAUSED -> Icons.Outlined.Pause
+                                DownloadStatus.QUEUED, DownloadStatus.WAITING -> Icons.Outlined.Schedule
+                                DownloadStatus.RUNNING -> Icons.Outlined.Download
+                            }, null, Modifier.size(18.dp), tint = tone)
+                            Text(downloadTransferPhaseLabel(shown, now), style = MaterialTheme.typography.titleSmall,
+                                color = tone)
+                        }
+                        FlowRow(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {},
+                            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                             Text(shown.completedPages.toString(), Modifier.alignByBaseline(),
-                                style = mangaMetricValueStyle(27.sp, 33.sp), color = colors.onSurface)
-                            val totalPages = if (shown.totalPages > 0) "/ ${shown.totalPages} 页已保存" else "页已保存"
-                            Text(mangaNumberText(totalPages), Modifier.alignByBaseline(),
+                                style = mangaMetricValueStyle(29.sp, 35.sp), color = colors.onSurface)
+                            val saved = if (shown.totalPages > 0) "/ ${shown.totalPages} 页已保存" else "页已保存"
+                            Text(mangaNumberText(saved), Modifier.alignByBaseline(),
                                 style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
                         }
-                        val bytes = downloadBytes(shown.downloadedBytes)
-                        val phase = if (shown.status == DownloadStatus.COMPLETED) bytes
-                            else "$bytes · ${downloadTransferPhaseLabel(shown, now)}"
-                        Text(mangaNumberText(phase),
-                            color = if (shown.status == DownloadStatus.FAILED) colors.error else colors.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall)
+                        if (shown.totalPages > 0) LinearProgressIndicator(
+                            progress = { (shown.completedPages.toFloat() / shown.totalPages).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth().height(4.dp),
+                            color = tone, trackColor = colors.onSurface.copy(alpha = .09f))
+                        Text("原始下载 · ${downloadBytes(shown.downloadedBytes)}", style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant)
                     }
-                    shown.progress.httpStatus?.let { DownloadFactRow("来源响应", "HTTP $it") }
+                    if (shown.error.isNotBlank() || shown.status == DownloadStatus.FAILED) {
+                        val failed = shown.status == DownloadStatus.FAILED
+                        val ink = if (failed) colors.onErrorContainer else colors.onSurface
+                        Column(Modifier.fillMaxWidth().background(if (failed) colors.errorContainer.copy(alpha = .6f)
+                            else colors.surfaceContainerLow, RoundedCornerShape(10.dp))
+                            .padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                            Text(if (failed) "失败详情" else "最近一次传输", style = MaterialTheme.typography.titleSmall, color = ink)
+                            val cause = shown.error.ifBlank { shown.progress.failureReason?.label ?: "未记录具体原因" }
+                            SelectionContainer { Text(cause, style = MaterialTheme.typography.bodySmall, color = ink) }
+                            shown.progress.httpStatus?.let { Text("HTTP $it", style = MaterialTheme.typography.labelMedium, color = ink) }
+                        }
+                    } else shown.progress.httpStatus?.let { DownloadFactRow("来源响应", "HTTP $it") }
                     downloadTransferByteLabel(shown, now).takeIf(String::isNotBlank)?.let {
-                        DownloadFactRow("正在接收", it)
+                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                            val receiving = shown.status == DownloadStatus.RUNNING && shown.progress.activePages > 0
+                            DownloadFactRow(if (receiving) "正在接收" else "已接收数据", it)
+                            DownloadProgressLine(listOf(shown))
+                        }
                     }
                     if (shown.progress.activePages > 1) DownloadFactRow("同时接收", "${shown.progress.activePages} 页")
                     if (!local) {
-                        DownloadFactRow("来源", source)
-                        DownloadFactRow("本任务线路", shown.progress.routeLabel.ifBlank { "线路尚未记录" })
-                        Text("修改默认设置只影响新任务；在这里明确选择重试线路。",
-                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                    }
-                    if (shown.error.isNotBlank()) SelectionContainer {
-                        Text(shown.error, style = MaterialTheme.typography.bodySmall, color = colors.error)
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("任务线路", style = MaterialTheme.typography.titleSmall)
+                            DownloadFactRow("来源", source)
+                            DownloadFactRow("已记录线路", shown.progress.routeLabel.ifBlank { "尚未记录" })
+                            if (retryable) Text("原线路重试沿用任务记录。使用当前设置会重新选择线路。",
+                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        }
                     }
                     if (!local && shown.status != DownloadStatus.COMPLETED) Text(when (platformKind) {
                         PlatformKind.DESKTOP -> "应用运行时继续下载；退出后暂停，重新打开会核对并恢复队列。"
@@ -205,7 +238,7 @@ internal fun DownloadTaskDetails(
                     }
                 }
             }
-            if (inPane) {
+            if (platformKind == PlatformKind.DESKTOP || inPane) {
                 Box(Modifier.weight(1f, fill = false).fillMaxWidth()) {
                     facts(Modifier.padding(end = 12.dp))
                     DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd))
@@ -222,9 +255,11 @@ internal fun DownloadTaskDetails(
                     MotionTextButton(onClick = { onRetryUsingLatestRoute(shown) }, enabled = enabled && !refreshing) {
                         Text("使用当前设置重试", style = MaterialTheme.typography.labelMedium)
                     }
-                    MotionTextButton(onClick = { onRetry(shown) }, enabled = enabled && !refreshing) {
-                        Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
-                        Text(if (refreshing) "正在准备" else "原线路重试", style = MaterialTheme.typography.labelMedium)
+                    MotionButton(onClick = { onRetry(shown) }, enabled = enabled && !refreshing) {
+                        if (refreshing) MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                        else Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (refreshing) "正在准备" else "原线路重试")
                     }
                 }
             }

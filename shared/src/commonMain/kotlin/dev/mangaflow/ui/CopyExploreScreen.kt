@@ -19,9 +19,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -48,7 +45,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -57,7 +53,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -182,7 +177,7 @@ internal fun CopyExploreScreen(
                 CopyCatalogControls(state, controller, backdrop, active,
                     onDirectory = openDirectory)
             } else if (state.section == CopyExploreSection.TOPICS && state.topic == null && !wide) {
-                CopyExploreKeyword(topicQuery, { topicQuery = it }, "查找已加载专题",
+                CatalogueKeywordField(topicQuery, { topicQuery = it }, "查找已加载专题",
                     active, Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
                 Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
@@ -235,7 +230,7 @@ internal fun CopyExploreScreen(
                             DesktopIndexNote(summary)
                         }
                         if (topicList) Box(Modifier.width(242.dp)) {
-                            CopyExploreKeyword(topicQuery, { if (paneActive) topicQuery = it }, "查找已加载专题", paneActive)
+                            CatalogueKeywordField(topicQuery, { if (paneActive) topicQuery = it }, "查找已加载专题", paneActive)
                         } else MotionTabs(if (indexView) 1 else 0, listOf("封面", "列表"),
                             onSelect = { if (paneActive) indexView = it == 1 }, modifier = Modifier.width(116.dp).motionInputGate(paneActive),
                             controlHeight = 36.dp, fullWidthIndicator = true, indicatorHeight = 30.dp,
@@ -548,7 +543,7 @@ private fun CopyDirectoryDialog(
                             Icon(Icons.Outlined.Close, "关闭目录", Modifier.size(20.dp))
                         }
                     }
-                    CopyExploreKeyword(query, { query = it }, "查找名称或编号", visible,
+                    CatalogueKeywordField(query, { query = it }, "查找名称或编号", visible,
                         Modifier.padding(vertical = 8.dp))
                     if (state.directoryLoading) MotionBusyIndicator(
                         Modifier.padding(vertical = 4.dp).size(16.dp)
@@ -625,42 +620,6 @@ private fun CopyDirectoryChoice(
             maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
         if (count != null) Text(count.toString(), Modifier.padding(start = 5.dp),
             style = mangaMetricValueStyle(), color = colors.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun CopyExploreKeyword(
-    value: String,
-    onChange: (String) -> Unit,
-    hint: String,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val focus = LocalFocusManager.current
-    val keyboard = LocalSoftwareKeyboardController.current
-    val colors = MaterialTheme.colorScheme
-    Row(modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
-        .background(colors.onSurface.copy(alpha = .045f)).padding(start = 12.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.Outlined.Search, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
-        BasicTextField(value, onValueChange = { if (enabled) onChange(it) }, enabled = enabled,
-            singleLine = true, modifier = Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 12.dp)
-                .semantics { contentDescription = hint },
-            textStyle = MaterialTheme.typography.bodySmall.copy(color = colors.onSurface),
-            cursorBrush = SolidColor(colors.onSurface),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { keyboard?.hide(); focus.clearFocus(force = true) }),
-            decorationBox = { input ->
-                Box {
-                    if (value.isEmpty()) Text(hint, style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant)
-                    input()
-                }
-            })
-        MotionIconButton(onClick = { if (enabled) onChange("") }, modifier = Modifier.size(44.dp),
-            enabled = enabled && value.isNotEmpty(), tooltip = "清除关键词") {
-            Icon(Icons.Outlined.Close, "清除关键词", Modifier.size(16.dp))
-        }
     }
 }
 

@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -48,6 +47,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.storage.BodySourceRegistryEntry
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -183,7 +184,7 @@ internal fun ContentProfileSourceSheet(
     fun canChoose() = !delivered && pendingSource == null && pendingInspect == null && pendingAccount == null &&
         !manageAfterDismiss && !accountAfterDismiss
     MotionBottomSheet(
-        backdrop = backdrop,
+        backdrop = backdrop, desktopWidth = 592.dp,
         onDismissRequest = {
             if (!delivered) {
                 delivered = true
@@ -204,140 +205,153 @@ internal fun ContentProfileSourceSheet(
             }
         },
     ) { dismiss ->
-        LazyColumn(
-            modifier = Modifier.fillMaxWidth()
-                .heightIn(max = (LocalMangaWindow.current.height - 96.dp).coerceAtLeast(1.dp)),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 20.dp),
-        ) {
-            item(key = "profile-source-header") {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("漫画来源", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                    MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭") {
-                        Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
+        val desktop = platformKind == PlatformKind.DESKTOP
+        val height = LocalMangaWindow.current.height
+        val pinned = desktop && height >= 310.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val heading: @Composable () -> Unit = {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("漫画来源", style = MaterialTheme.typography.titleMedium)
+                    val selectedName = sources.firstOrNull { it.source.id == selectedId }?.source?.name
+                    if (desktop && sources.size > 4 && (selectedId == "*" || selectedName != null)) {
+                        Text("当前 · " + (selectedName ?: "全部来源"), style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
-            }
-            if (sources.any { it.enabled && it.isInstalled && !it.removed && it.source.id !in accountRequiredIds }) item(key = "all-sources") {
-                MotionTextButton(onClick = {
-                    if (canChoose()) { pendingSource = "*"; dismiss() }
-                }, enabled = !choosing,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
-                        .semantics { selected = selectedId == "*" },
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.textButtonColors(
-                        containerColor = if (selectedId == "*") colors.onSurface.copy(alpha = .055f) else Color.Transparent,
-                        contentColor = colors.onSurface,
-                    ), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)) {
-                    Icon(Icons.Outlined.ViewModule, null, Modifier.size(24.dp), tint = colors.onSurfaceVariant)
-                    Spacer(Modifier.width(12.dp))
-                    Text("全部来源", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = if (selectedId == "*") FontWeight.Medium else FontWeight.Normal)
-                    if (selectedId == "*") Icon(Icons.Outlined.Check, null, Modifier.size(18.dp))
+                MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭") {
+                    Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                 }
             }
-            if (sources.isEmpty()) item(key = "profile-source-empty") {
-                Text("尚未添加来源", Modifier.padding(vertical = 16.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        val management: @Composable () -> Unit = {
+            Row(Modifier.fillMaxWidth().padding(top = if (desktop) 4.dp else 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (onAccount != null) MotionTextButton(
+                    onClick = {
+                        if (canChoose()) { accountAfterDismiss = true; dismiss() }
+                    }, enabled = !choosing, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                ) {
+                    Icon(Icons.Outlined.Lock, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("账号登录", style = MaterialTheme.typography.labelLarge)
+                }
+                MotionTextButton(
+                    onClick = {
+                        if (canChoose()) { manageAfterDismiss = true; dismiss() }
+                    }, enabled = !choosing, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                ) {
+                    Icon(Icons.Outlined.Tune, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("管理来源", style = MaterialTheme.typography.labelLarge)
+                }
             }
-            sourceGroups.forEach { (group, groupSources) ->
-                item(key = "profile-source-list-heading:$group") {
-                    Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 18.dp, bottom = 5.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(when (group) { 0 -> "浏览来源"; 1 -> "登录后浏览"; else -> "待处理" },
-                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                        Text(groupSources.size.toString(), style = MaterialTheme.typography.labelSmall,
-                            color = colors.onSurfaceVariant.copy(alpha = .65f))
+        }
+        Column(Modifier.fillMaxWidth().heightIn(max = if (desktop) height.coerceAtMost(660.dp)
+            else (height - 96.dp).coerceAtLeast(1.dp)).padding(horizontal = 20.dp)) {
+            if (pinned) heading()
+            AccountReviewList(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(bottom = if (pinned) 6.dp else 20.dp)) {
+                if (!pinned) item(key = "profile-source-header") { heading() }
+                if (sources.any { it.enabled && it.isInstalled && !it.removed && it.source.id !in accountRequiredIds }) item(key = "all-sources") {
+                    MotionTextButton(onClick = {
+                        if (canChoose()) { pendingSource = "*"; dismiss() }
+                    }, enabled = !choosing,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                            .semantics { selected = selectedId == "*" },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.textButtonColors(
+                            containerColor = if (selectedId == "*") colors.onSurface.copy(alpha = .055f) else Color.Transparent,
+                            contentColor = colors.onSurface,
+                        ), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)) {
+                        Icon(Icons.Outlined.ViewModule, null, Modifier.size(24.dp), tint = colors.onSurfaceVariant)
+                        Spacer(Modifier.width(12.dp))
+                        Text("全部来源", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (selectedId == "*") FontWeight.Medium else FontWeight.Normal)
+                        if (selectedId == "*") Icon(Icons.Outlined.Check, null, Modifier.size(18.dp))
                     }
                 }
-                items(groupSources, key = { "profile-source:" + it.source.id }) { entry ->
-                    val hasReason = entry.source.id in unavailableReasons
-                    val reason = unavailableReasons[entry.source.id]?.ifBlank { "暂不可用" }
-                    val usable = entry.enabled && entry.isInstalled && !entry.removed
-                    val requiresAccount = usable && entry.source.id in accountRequiredIds
-                    val canOpenAccount = requiresAccount && (onOpenSourceAccount != null || onInspect != null || onAccount != null)
-                    val available = !hasReason && usable && !requiresAccount
-                    val isSelected = entry.source.id == selectedId
-                    val status = when {
-                        entry.removed -> "已移除"
-                        !entry.isInstalled -> "未安装"
-                        !entry.enabled -> "已停用"
-                        requiresAccount -> "浏览需要登录"
-                        hasReason -> reason.orEmpty()
-                        isSelected -> "当前"
-                        else -> "已启用"
-                    }
-                    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
-                        .background(if (isSelected) colors.onSurface.copy(alpha = .055f) else Color.Transparent,
-                            RoundedCornerShape(14.dp)), verticalAlignment = Alignment.CenterVertically) {
-                        MotionTextButton(
-                            onClick = {
-                                if (canChoose() && (available || canOpenAccount)) {
-                                    if (canOpenAccount) pendingAccount = entry.source.id else pendingSource = entry.source.id
-                                    dismiss()
-                                }
-                            },
-                            enabled = (available || canOpenAccount) && !choosing,
-                            modifier = Modifier.weight(1f).heightIn(min = 56.dp)
-                                .semantics { selected = isSelected; stateDescription = status },
-                            shape = RoundedCornerShape(14.dp),
-                            colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface),
-                            contentPadding = PaddingValues(start = 12.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
-                        ) {
-                            ChapterSourceLogo(entry.source.id, entry.source.name,
-                                Modifier.size(24.dp).clearAndSetSemantics { }, muted = !available && !canOpenAccount)
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(entry.source.name, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal)
-                                if (!available) Text(status, maxLines = 3, overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                            }
-                            Spacer(Modifier.width(8.dp))
-                            if (canOpenAccount) Text("登录", style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
-                            else if (isSelected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp),
-                                tint = colors.onSurfaceVariant)
-                            else Spacer(Modifier.size(18.dp))
+                if (sources.isEmpty()) item(key = "profile-source-empty") {
+                    Text("尚未添加来源", Modifier.padding(vertical = 16.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                sourceGroups.forEach { (group, groupSources) ->
+                    item(key = "profile-source-list-heading:$group") {
+                        Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 18.dp, bottom = 5.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(when (group) { 0 -> "浏览来源"; 1 -> "登录后浏览"; else -> "待处理" },
+                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                            Text(groupSources.size.toString(), style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant.copy(alpha = .65f))
                         }
-                        if (onInspect != null && entry.isInstalled && !entry.removed) {
-                            MotionIconButton(onClick = {
-                                if (canChoose()) { pendingInspect = entry.source.id; dismiss() }
-                            }, enabled = !choosing, modifier = Modifier.size(48.dp), tooltip = "${entry.source.name}状态与设置") {
-                                Icon(Icons.Outlined.Tune, "${entry.source.name}状态与设置", Modifier.size(18.dp),
+                    }
+                    items(groupSources, key = { "profile-source:" + it.source.id }) { entry ->
+                        val hasReason = entry.source.id in unavailableReasons
+                        val reason = unavailableReasons[entry.source.id]?.ifBlank { "暂不可用" }
+                        val usable = entry.enabled && entry.isInstalled && !entry.removed
+                        val requiresAccount = usable && entry.source.id in accountRequiredIds
+                        val canOpenAccount = requiresAccount && (onOpenSourceAccount != null || onInspect != null || onAccount != null)
+                        val available = !hasReason && usable && !requiresAccount
+                        val isSelected = entry.source.id == selectedId
+                        val status = when {
+                            entry.removed -> "已移除"
+                            !entry.isInstalled -> "未安装"
+                            !entry.enabled -> "已停用"
+                            requiresAccount -> "浏览需要登录"
+                            hasReason -> reason.orEmpty()
+                            isSelected -> "当前"
+                            else -> "已启用"
+                        }
+                        Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                            .background(if (isSelected) colors.onSurface.copy(alpha = .055f) else Color.Transparent,
+                                RoundedCornerShape(14.dp)), verticalAlignment = Alignment.CenterVertically) {
+                            MotionTextButton(
+                                onClick = {
+                                    if (canChoose() && (available || canOpenAccount)) {
+                                        if (canOpenAccount) pendingAccount = entry.source.id else pendingSource = entry.source.id
+                                        dismiss()
+                                    }
+                                },
+                                enabled = (available || canOpenAccount) && !choosing,
+                                modifier = Modifier.weight(1f).heightIn(min = 56.dp)
+                                    .semantics { selected = isSelected; stateDescription = status },
+                                shape = RoundedCornerShape(14.dp),
+                                colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface),
+                                contentPadding = PaddingValues(start = 12.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+                            ) {
+                                ChapterSourceLogo(entry.source.id, entry.source.name,
+                                    Modifier.size(24.dp).clearAndSetSemantics { }, muted = !available && !canOpenAccount)
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text(entry.source.name, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal)
+                                    if (!available) Text(status, maxLines = 3, overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                if (canOpenAccount) Text("登录", style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
+                                else if (isSelected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp),
                                     tint = colors.onSurfaceVariant)
+                                else Spacer(Modifier.size(18.dp))
                             }
-                        } else if (onInspect != null) Spacer(Modifier.size(48.dp))
+                            if (onInspect != null && entry.isInstalled && !entry.removed) {
+                                MotionIconButton(onClick = {
+                                    if (canChoose()) { pendingInspect = entry.source.id; dismiss() }
+                                }, enabled = !choosing, modifier = Modifier.size(48.dp), tooltip = "${entry.source.name}状态与设置") {
+                                    Icon(Icons.Outlined.Tune, "${entry.source.name}状态与设置", Modifier.size(18.dp),
+                                        tint = colors.onSurfaceVariant)
+                                }
+                            } else if (onInspect != null) Spacer(Modifier.size(48.dp))
+                        }
                     }
                 }
+                if (!pinned) item(key = "profile-source-management") { management() }
             }
-            item(key = "profile-source-management") {
-                Row(Modifier.fillMaxWidth().padding(top = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (onAccount != null) MotionTextButton(
-                        onClick = {
-                            if (canChoose()) { accountAfterDismiss = true; dismiss() }
-                        }, enabled = !choosing, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
-                    ) {
-                        Icon(Icons.Outlined.Lock, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("账号登录", style = MaterialTheme.typography.labelLarge)
-                    }
-                    MotionTextButton(
-                        onClick = {
-                            if (canChoose()) { manageAfterDismiss = true; dismiss() }
-                        }, enabled = !choosing, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
-                    ) {
-                        Icon(Icons.Outlined.Tune, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("管理来源", style = MaterialTheme.typography.labelLarge)
-                    }
-                }
-            }
+            if (pinned) management()
         }
     }
 }

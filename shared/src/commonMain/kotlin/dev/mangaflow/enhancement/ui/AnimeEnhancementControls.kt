@@ -47,6 +47,7 @@ internal class EnhancementNavigation(initial: EnhancementPage = EnhancementPage.
         private set
     private var history by mutableStateOf(initialHistory(initial))
     val parent: EnhancementPage? get() = history.lastOrNull()
+    val primary: EnhancementPage get() = history.firstOrNull { it.isPrimary } ?: page
 
     fun open(next: EnhancementPage) {
         if (next == page) return

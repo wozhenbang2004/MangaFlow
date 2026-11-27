@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -25,6 +26,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,6 +40,8 @@ import dev.mangaflow.MangaApplicationServices
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.reader.ReaderDialogSurface
@@ -50,8 +56,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private data class StorageClearPlan(val items: List<StoredCacheItem>, val legacy: Boolean,
-    val estimatedBytes: Long, val label: String, val legacyRevision: Long?, val legacyStamp: String?)
+private data class StorageClearPlan(val items: List<StoredCacheItem>, val legacy: Boolean, val legacyBytes: Long,
+    val protectedCount: Int, val protectedBytes: Long, val estimatedBytes: Long, val label: String,
+    val legacyRevision: Long?, val legacyStamp: String?)
 private data class StoragePane(val area: CacheArea?, val book: String?, val source: String?, val review: StorageClearPlan?, val snapshot: StorageCacheSnapshot?)
 
 /** One retained panel; overview, drill-down and review share the same header and scroll owner. */
@@ -160,8 +167,9 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     }
     fun previewClear() {
         if (busy || loading || scopeBytes <= 0L) return
-        plan = StorageClearPlan(reclaimable.toList(), includeLegacy, scopeBytes,
-            scopeLabel, snapshot?.legacyRevision, snapshot?.legacyStamp)
+        val protected = chosen.filter { it.protected }
+        plan = StorageClearPlan(reclaimable.toList(), includeLegacy, if (includeLegacy) snapshot?.coilUnclassifiedBytes ?: 0L else 0L,
+            protected.size, protected.sumOf { it.bytes }, scopeBytes, scopeLabel, snapshot?.legacyRevision, snapshot?.legacyStamp)
     }
     fun applyClear(reviewed: StorageClearPlan) {
         if (operations.find(UserOperationKeys.CACHE)?.active == true) return
@@ -207,18 +215,60 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
         // operation or the registry's bounded terminal retention releases it.
     }
     MotionDialog(visible, onDismissRequest = ::back,
-        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 560.dp, onClosed = onClosed) {
+        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = if (platformKind == PlatformKind.DESKTOP) 940.dp else 560.dp, onClosed = onClosed) {
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
+            val desktop = platformKind == PlatformKind.DESKTOP
+            val font = LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
+            val split = desktop && maxWidth >= 700.dp * font && maxHeight >= 320.dp * font
             val maximum = minOf(maxHeight, LocalMangaWindow.current.height * .9f, 680.dp)
+            val railWidth = (maxWidth * .25f).coerceIn(170.dp, 232.dp)
+            val short = maximum < 390.dp * font
             ReaderDialogSurface(Modifier.fillMaxWidth(), backdrop) {
-                Column(Modifier.fillMaxWidth().heightIn(max = maximum).padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Row(Modifier.fillMaxWidth().then(if (split) Modifier.height(maximum) else Modifier.heightIn(max = maximum))) {
+                if (split) {
+                    val rail = rememberLazyListState()
+                    val usageByArea = remember(snapshot) { snapshot?.let { inventory ->
+                        CacheArea.entries.associateWith { storageBytes(inventory.areaBytes(it)) }
+                    } }
+                    val canNavigate = visible && active && plan == null
+                    fun navigate(kind: CacheArea?) {
+                        if (kind == area && book == null) return
+                        selected = emptySet()
+                        source = null
+                        book = null
+                        area = kind
+                    }
+                    Box(Modifier.width(railWidth).fillMaxHeight().background(colors.surfaceContainerLow)) {
+                        LazyColumn(Modifier.fillMaxWidth(), state = rail, contentPadding = PaddingValues(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            item("heading") { Text("存储管理", Modifier.padding(start = 9.dp, top = 8.dp, bottom = 12.dp),
+                                style = MaterialTheme.typography.titleMedium) }
+                            item("overview") {
+                                ManagementNavigationItem("存储概览", area == null, canNavigate, { navigate(null) }) {
+                                    Icon(Icons.Outlined.Storage, null, Modifier.size(17.dp))
+                                }
+                            }
+                            item("categories") { Text("缓存分类", Modifier.padding(start = 9.dp, top = 14.dp, bottom = 2.dp),
+                                style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant) }
+                            items(CacheArea.entries, key = { it.name }) { kind ->
+                                ManagementNavigationItem(kind.label, area == kind, canNavigate, { navigate(kind) },
+                                    detail = usageByArea?.get(kind)) {
+                                    Icon(areaIcon(kind), null, Modifier.size(17.dp),
+                                        tint = if (area == kind) colors.primary else colors.onSurfaceVariant)
+                                }
+                            }
+                        }
+                        DesktopVerticalScrollbar(rail, Modifier.align(Alignment.CenterEnd))
+                    }
+                }
+                Column(Modifier.weight(1f).padding(horizontal = if (split) 20.dp else 16.dp, vertical = 8.dp)) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (area != null || plan != null) MotionIconButton(::back,
+                        if ((!split && area != null) || book != null || plan != null) MotionIconButton(::back,
                             modifier = Modifier.size(44.dp), tooltip = "返回") {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                         }
                         PreferenceHeading(if (plan != null) "清理预览" else bookTitle
-                            ?: area?.label ?: "存储管理", Modifier.weight(1f))
+                            ?: area?.label ?: if (split) "存储概览" else "存储管理", Modifier.weight(1f))
                         MotionIconButton({ revision++ }, enabled = !busy && !loading && plan == null, modifier = Modifier.size(44.dp), tooltip = "刷新用量") {
                             MotionSwap(loading, Modifier.size(18.dp)) { working ->
                                 if (working) MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
@@ -238,7 +288,20 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                             onClick = { operations.cancel(clearOperation.id) }) { Text("取消") }
                     }
                     val review = plan
-                    if (review == null) {
+                    val feedback: @Composable () -> Unit = {
+                        notice?.let { message ->
+                            Row(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(10.dp))
+                                .padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(message, Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
+                                    style = MaterialTheme.typography.bodySmall, color = colors.onSurface)
+                                MotionIconButton({ notice = null }, modifier = Modifier.size(40.dp), tooltip = "收起消息") {
+                                    Icon(Icons.Outlined.Close, "收起消息", Modifier.size(14.dp))
+                                }
+                            }
+                        }
+                    }
+                    if (!short) feedback()
+                    val usage: @Composable () -> Unit = {
                         Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 12.dp)
                             .background(colors.surfaceContainerLow, RoundedCornerShape(16.dp))
                             .padding(horizontal = 14.dp, vertical = 10.dp)) {
@@ -257,7 +320,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                 }
                                 MotionButton(::previewClear, enabled = !busy && !loading && scopeBytes > 0L) {
-                                    Text(if (hasSelection) "清理所选" else "清理缓存")
+                                    Text(if (hasSelection) "预览所选" else "预览清理")
                                 }
                             }
                             if (occupiedBytes != null && occupiedBytes > 0L) {
@@ -271,6 +334,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                             }
                         }
                     }
+                    if (review == null && !short) usage()
                     MotionTabContent(StoragePane(area, book, source, plan, snapshot),
                         modifier = Modifier.weight(1f, fill = false).fillMaxWidth(),
                         contentKey = { listOf(it.area, it.book, it.source, it.review != null) },
@@ -286,22 +350,34 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                             (paneBook == null || item.storageBookId() == paneBook) &&
                             (paneSource == null || item.resource.sourceId == paneSource)
                     }
-                    LazyColumn(Modifier.fillMaxWidth(), contentPadding = PaddingValues(bottom = 8.dp)) {
+                    val list = rememberLazyListState()
+                    Box(Modifier.fillMaxWidth()) {
+                    LazyColumn(Modifier.fillMaxWidth().padding(end = if (desktop) 12.dp else 0.dp),
+                        state = list, contentPadding = PaddingValues(bottom = 8.dp)) {
+                        if (paneReview == null && short) item("usage") { usage() }
+                        if (short && notice != null) item("notice") { feedback() }
                         if (paneReview != null) {
                             item("review") {
                                 Column(Modifier.padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    Text(paneReview.label, style = MaterialTheme.typography.titleSmall)
-                                    Text("预计释放 ${storageBytes(paneReview.estimatedBytes)}", style = MaterialTheme.typography.headlineSmall)
-                                    paneReview.items.groupBy { it.resource.area }.forEach { (kind, items) ->
+                                    Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(14.dp))
+                                        .padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                        Text(paneReview.label, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                                        Text("预计释放 ${storageBytes(paneReview.estimatedBytes)}", style = MaterialTheme.typography.headlineSmall)
+                                        val count = "${paneReview.items.size} 项缓存" + if (paneReview.legacy) " · 含旧版图片缓存" else ""
+                                        Text(count, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    if (paneReview.protectedCount > 0) StorageLine("正在使用 · 保留",
+                                        "${paneReview.protectedCount} 项受保护", storageBytes(paneReview.protectedBytes))
+                                    paneReview.items.groupBy { it.resource.area }.entries.sortedByDescending { entry -> entry.value.sumOf { it.bytes } }.forEach { (kind, items) ->
                                         StorageLine(kind.label, "${items.size} 项", storageBytes(items.sumOf { it.bytes }))
                                     }
-                                    if (paneReview.legacy) StorageLine("旧版图片缓存", "无可靠作品归属，空闲时清理", storageBytes(paneSnapshot?.coilUnclassifiedBytes ?: 0L))
+                                    if (paneReview.legacy) StorageLine("旧版图片缓存", "无可靠作品归属，空闲时清理", storageBytes(paneReview.legacyBytes))
                                     Text("当前阅读、正在播放或准备的番剧片段、使用中的增强结果与处理文件会保留。漫画与番剧离线原片、下载断点和模型由各自入口管理。",
                                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                 }
                             }
                         } else if (paneArea == null) {
-                            items(CacheArea.entries, key = { it.name }) { kind ->
+                            if (!split) items(CacheArea.entries, key = { it.name }) { kind ->
                                 StorageNavigationRow(kind.label, when (kind) {
                                     CacheArea.ANIME -> "按作品与剧集管理 · 使用中的片段保留"
                                     CacheArea.READING -> "原图 · 脚本与解密图片"
@@ -309,7 +385,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                     CacheArea.DATA -> "推荐 · 榜单 · 目录 · 评分与评论"
                                     CacheArea.PANELS -> "识别坐标，可重新生成"
                                     CacheArea.ENHANCEMENT -> "增强衍生内容 · 原始下载独立保留"
-                                }, storageBytes(paneSnapshot?.areaBytes(kind) ?: 0L), areaIcon(kind), true) {
+                                }, paneSnapshot?.let { storageBytes(it.areaBytes(kind)) } ?: "—", areaIcon(kind), true) {
                                     area = kind; selected = emptySet()
                                 }
                             }
@@ -317,6 +393,8 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                 StorageLine("旧版图片缓存", if (paneSnapshot?.legacyReclaimable == true) "归属会在再次使用后补齐" else "正在使用，稍后可清理",
                                     storageBytes(paneSnapshot?.coilUnclassifiedBytes ?: 0L))
                             }
+                            if (split) item("offline-heading") { Text("独立存储", Modifier.padding(top = 8.dp, bottom = 3.dp),
+                                style = MaterialTheme.typography.titleSmall) }
                             item("offline") { StorageNavigationRow("漫画离线下载", "独立保存 · 不自动回收",
                                 offlineBytes?.let(::storageBytes) ?: "—", Icons.Outlined.Download, !busy, onDownloads) }
                             item("anime-offline") { StorageNavigationRow("番剧离线下载", "原视频与下载中内容 · 不自动回收",
@@ -361,9 +439,9 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                             }
                             item("budget") {
                                 Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Text("索引与写入 ${storageBytes((paneSnapshot?.indexBytes ?: 0L) + (paneSnapshot?.temporaryBytes ?: 0L))}",
+                                    Text("索引与写入 " + (paneSnapshot?.let { storageBytes(it.indexBytes + it.temporaryBytes) } ?: "—"),
                                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                                    Text("缓存预算 ${storageBytes(paneSnapshot?.budgetBytes ?: 0L)} · 各类共享",
+                                    Text("缓存预算 " + (paneSnapshot?.let { storageBytes(it.budgetBytes) } ?: "—") + " · 各类共享",
                                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                         Text("内存图片 ${imageLoader.memoryCache?.size?.let(::storageBytes) ?: "—"}", Modifier.weight(1f),
@@ -389,7 +467,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                 }
                             }
                         } else if (paneArea == CacheArea.DATA) {
-                            item("data") { StorageLine("资料与列表", "离线目录受保护", storageBytes(paneSnapshot?.areaBytes(CacheArea.DATA) ?: 0L)) }
+                            item("data") { StorageLine("资料与列表", "离线目录受保护", paneSnapshot?.let { storageBytes(it.areaBytes(CacheArea.DATA)) } ?: "—") }
                         } else if (paneBook == null) {
                             val groups = paneItems.groupBy { it.storageBookId() }.entries.sortedByDescending { it.value.sumOf { row -> row.bytes } }
                             if (groups.isEmpty()) item("empty") { StorageEmpty(loading) }
@@ -463,15 +541,20 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                 }
                             }
                         }
-                        notice?.let { message -> item("notice") { Text(message, Modifier.padding(vertical = 8.dp),
-                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) } }
+                    }
+                    if (desktop) DesktopVerticalScrollbar(list, Modifier.align(Alignment.CenterEnd))
                     }
                     }
-                    if (review != null) Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                        MotionButton({ applyClear(review) }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                            if (busy) MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp) else Text("确认释放")
+                    if (review != null) Row(Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
+                        if (split) MotionTextButton(onClick = ::back, enabled = !busy) { Text("返回选择") }
+                        MotionButton({ applyClear(review) }, enabled = visible && active && !busy,
+                            modifier = if (split) Modifier else Modifier.fillMaxWidth()) {
+                            if (busy) MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
+                            else Text("确认释放 ${storageBytes(review.estimatedBytes)}")
                         }
                     }
+                }
                 }
             }
         }

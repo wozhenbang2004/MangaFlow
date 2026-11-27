@@ -17,6 +17,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -32,14 +34,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -162,7 +168,39 @@ internal fun DetailCommentFilter(
         Column(Modifier.fillMaxWidth().motionInputGate(visible)
             .padding(start = 12.dp, end = 12.dp, bottom = 4.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Row(Modifier.weight(1f).onSizeChanged { stripWidth = it.width }
+                if (platformKind == PlatformKind.DESKTOP) {
+                    var open by remember { mutableStateOf(false) }
+                    val chosen = reviewSources.firstOrNull { it.id == selected }
+                    val selectSource: (String?) -> Unit = { id ->
+                        onSelect(id)
+                        detailsId = id?.takeIf { candidate -> pending.any { it.id == candidate } }
+                    }
+                    val choices = listOf(DesktopMenuAction("全部评论来源", selected = selected == null) { selectSource(null) }) +
+                        reviewSources.map { source ->
+                            val status = when {
+                                source.loadingMore -> "读取中"
+                                source.status == ReviewStatus.UNAVAILABLE || source.reviewsError != null -> "暂不可用"
+                                source.status == ReviewStatus.NO_MATCH && source.candidates.isNotEmpty() -> "待匹配"
+                                else -> null
+                            }
+                            DesktopMenuAction(listOfNotNull(source.name, status).joinToString(" · "),
+                                selected = selected == source.id) { selectSource(source.id) }
+                        }
+                    Box(Modifier.weight(1f)) {
+                        dev.mangaflow.ui.motion.MotionTextButton(onClick = { open = !open }, enabled = visible,
+                            modifier = Modifier.heightIn(min = 40.dp).semantics {
+                                stateDescription = if (open) "来源已展开" else "来源已收起"
+                            }) {
+                            if (chosen != null) ReviewSourceMark(chosen.id, size = 17.dp)
+                            else Icon(Icons.Outlined.Public, null, Modifier.size(17.dp))
+                            Spacer(Modifier.width(7.dp))
+                            Text(chosen?.name ?: "全部评论来源", Modifier.weight(1f, fill = false),
+                                style = MaterialTheme.typography.labelLarge, maxLines = 2)
+                            Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(15.dp))
+                        }
+                        DesktopActionPopup(open && visible, choices, { open = false }, alignToStart = true)
+                    }
+                } else Row(Modifier.weight(1f).onSizeChanged { stripWidth = it.width }
                     .horizontalScroll(sourceScroll).selectableGroup().drawBehind {
                         if (selectedSource >= 0) {
                             val cell = 44.dp.roundToPx().toFloat()
@@ -188,7 +226,7 @@ internal fun DetailCommentFilter(
                         }
                     }
                 }
-                MotionIconButton(onClick = { more = !more }, modifier = Modifier.size(36.dp).semantics {
+                MotionIconButton(onClick = { more = !more }, tooltip = if (more) "收起更多筛选" else "更多评论筛选", modifier = Modifier.size(36.dp).semantics {
                     stateDescription = if (more) "更多筛选已展开" else "更多筛选已收起"
                 }) {
                     Box(Modifier.size(19.dp), contentAlignment = Alignment.Center) {
@@ -284,6 +322,7 @@ private fun SourceChoice(
                 else -> "未选择"
             }
         }, contentAlignment = Alignment.Center) {
+        DesktopIconTooltip(name, interaction, true)
         if (id == null) Icon(Icons.Outlined.Public, null, tint = accent, modifier = Modifier.size(19.dp))
         else ReviewSourceMark(id, size = 20.dp)
         if (source?.loadingMore == true)

@@ -316,14 +316,7 @@ private fun DownloadInlineTransferSummary(
     val interaction = remember { MutableInteractionSource() }
     val saved = entries.count { it.status == DownloadStatus.COMPLETED }
     val allSaved = saved == entries.size
-    val status = mangaStatusColors()
-    val signal = when (entry.status) {
-        DownloadStatus.COMPLETED -> status.success
-        DownloadStatus.RUNNING -> status.activity
-        DownloadStatus.FAILED -> status.error
-        DownloadStatus.WAITING, DownloadStatus.QUEUED -> status.waiting
-        DownloadStatus.PAUSED -> status.neutral
-    }
+    val signal = downloadStatusColor(entry.status)
     val title = when {
         source != null -> source + " · " + downloadPageProgress(entries)
         entries.size == 1 -> entry.chapter.title + " · " + downloadPageProgress(entries)
@@ -472,7 +465,7 @@ private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: 
 }
 
 @Composable
-private fun DownloadProgressLine(entries: List<DownloadEntry>) {
+internal fun DownloadProgressLine(entries: List<DownloadEntry>) {
     val knownProgress = downloadCurrentPageFraction(entries) ?: return
     val observed = downloadObservedEntry(entries) ?: return
     val motion = LocalMotionEnabled.current

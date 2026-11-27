@@ -1,6 +1,9 @@
 package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -54,6 +57,9 @@ import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.canonicalBangumiId
 import dev.mangaflow.anime.canonicalDoubanId
 import dev.mangaflow.anime.discoveryProvider
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.DesktopVerticalScrollbar
 import dev.mangaflow.ui.LocalMetricSourceFan
 import dev.mangaflow.ui.MetricSourceFan
 import dev.mangaflow.ui.MetricSourceFanState
@@ -179,10 +185,14 @@ private fun AnimeRatingsSheet(request: AnimeRatingRequest, controller: AnimeRati
     val providers = (scores.map { it.provider } + checks.keys).distinct()
         .sortedBy { if (it == AnimeDiscoveryProvider.DOUBAN) -1 else it.ordinal }
     val refreshing = checks.values.any { it.loading }
-    MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop) { dismiss ->
+    MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop, desktopWidth = 814.dp) { dismiss ->
         Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).padding(horizontal = 18.dp)) {
             Row(Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 12.dp),
                 verticalAlignment = Alignment.CenterVertically) {
+                if (platformKind == PlatformKind.DESKTOP && request.subject != null) {
+                    AnimePoster(request.subject, Modifier.size(44.dp, 64.dp))
+                    Spacer(Modifier.width(12.dp))
+                }
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text("各站评分", style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -199,18 +209,30 @@ private fun AnimeRatingsSheet(request: AnimeRatingRequest, controller: AnimeRati
                     Icon(Icons.Outlined.Close, "关闭评分", Modifier.size(20.dp))
                 }
             }
-            Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState())
-                .padding(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                providers.forEach { provider ->
-                    val score = scores.firstOrNull { it.provider == provider }
-                    AnimeRatingProviderRow(provider, score, checks[provider], refreshEnabled = !refreshing,
-                        onRefresh = request.subject?.let { subject ->
-                            { controller.refresh(subject, provider) }
-                        })
-                }
-                if (providers.isEmpty()) {
-                    AnimeMessage("暂未取得评分",
+            BoxWithConstraints(Modifier.weight(1f, fill = false).fillMaxWidth()) {
+                val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+                val columns = if (platformKind == PlatformKind.DESKTOP && providers.size > 1)
+                    (maxWidth / (216.dp * scale)).toInt().coerceIn(1, providers.size) else 1
+                val scroll = rememberScrollState()
+                Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(end = 6.dp, bottom = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    providers.chunked(columns).forEach { group ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                            group.forEach { provider ->
+                                Box(Modifier.weight(1f)) {
+                                    AnimeRatingProviderRow(provider, scores.firstOrNull { it.provider == provider },
+                                        checks[provider], refreshEnabled = !refreshing, comparison = columns > 1,
+                                        onRefresh = request.subject?.let { subject -> { controller.refresh(subject, provider) } })
+                                }
+                            }
+                            repeat(columns - group.size) { Spacer(Modifier.weight(1f)) }
+                        }
+                    }
+                    if (providers.isEmpty()) AnimeMessage("暂未取得评分",
                         if (request.subject == null) "这条结果没有可读取的评分资料。" else null)
+                }
+                Box(Modifier.matchParentSize()) {
+                    DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                 }
             }
         }
@@ -223,6 +245,7 @@ private fun AnimeRatingProviderRow(
     score: AnimeSourceScore?,
     check: AnimeScoreCheck?,
     refreshEnabled: Boolean,
+    comparison: Boolean,
     onRefresh: (() -> Unit)?,
 ) {
     val name = animeDiscoveryProviderLabel(provider)
@@ -235,6 +258,45 @@ private fun AnimeRatingProviderRow(
         check?.message != null -> check.message
         score == null -> "暂无评分"
         else -> null
+    }
+    val refreshAction: @Composable () -> Unit = {
+        when {
+            refreshing -> Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                MotionBusyIndicator(Modifier.size(16.dp))
+            }
+            onRefresh != null -> {
+                val action = if (failure != null) "重试 $name 评分" else "刷新 $name 评分"
+                MotionIconButton(onClick = onRefresh, enabled = refreshEnabled,
+                    modifier = Modifier.size(44.dp), tooltip = action) {
+                    Icon(Icons.Outlined.Refresh, action, Modifier.size(18.dp),
+                        tint = if (failure != null && refreshEnabled) colors.error
+                            else colors.onSurfaceVariant.copy(alpha = if (refreshEnabled) 1f else .45f))
+                }
+            }
+            else -> Unit
+        }
+    }
+    if (comparison) {
+        Column(Modifier.fillMaxWidth().heightIn(min = 156.dp)
+            .background(colors.onSurface.copy(alpha = .04f), RoundedCornerShape(16.dp))
+            .padding(start = 14.dp, end = 10.dp, top = 8.dp, bottom = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                ReviewSourceMark(animeDiscoveryScoreSourceId(provider), size = 18.dp)
+                Text(name, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                refreshAction()
+            }
+            if (score != null) {
+                AnimeRatingValue(score, large = true)
+                AnimeProgressTrack((score.rating / score.scale).toFloat().coerceIn(0f, 1f))
+                score.ratingCount?.let { AnimeQuietLabel("$it 人评分") }
+            }
+            if (status != null) Text(status, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                style = MaterialTheme.typography.bodySmall, color = if (failure != null && !refreshing) colors.error else colors.onSurfaceVariant)
+        }
+        return
     }
     BoxWithConstraints(Modifier.fillMaxWidth()
         .padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = if (status == null) 6.dp else 10.dp)) {
@@ -255,21 +317,7 @@ private fun AnimeRatingProviderRow(
                     }
                 }
                 if (score != null && !separateScore) AnimeRatingValue(score)
-                when {
-                    refreshing -> Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
-                        MotionBusyIndicator(Modifier.size(16.dp))
-                    }
-                    onRefresh != null -> {
-                        val action = if (failure != null) "重试 $name 评分" else "刷新 $name 评分"
-                        MotionIconButton(onClick = onRefresh, enabled = refreshEnabled,
-                            modifier = Modifier.size(44.dp), tooltip = action) {
-                            Icon(Icons.Outlined.Refresh, action, Modifier.size(18.dp),
-                                tint = if (failure != null && refreshEnabled) colors.error
-                                    else colors.onSurfaceVariant.copy(alpha = if (refreshEnabled) 1f else .45f))
-                        }
-                    }
-                    else -> Unit
-                }
+                refreshAction()
             }
             if (status != null) Text(status, Modifier.padding(start = 44.dp, end = 8.dp)
                 .semantics { liveRegion = LiveRegionMode.Polite },
@@ -280,13 +328,13 @@ private fun AnimeRatingProviderRow(
 }
 
 @Composable
-private fun AnimeRatingValue(score: AnimeSourceScore) {
+private fun AnimeRatingValue(score: AnimeSourceScore, large: Boolean = false) {
     Row(horizontalArrangement = Arrangement.spacedBy(3.dp),
         modifier = Modifier.semantics(mergeDescendants = true) {
             contentDescription = "评分 ${animeDiscoveryScoreText(score)}"
         }) {
         Text(detailMetricScore(score.rating), Modifier.alignByBaseline(),
-            style = mangaMetricValueStyle(23.sp, 29.sp), maxLines = 1, softWrap = false)
+            style = if (large) mangaMetricValueStyle(32.sp, 38.sp) else mangaMetricValueStyle(23.sp, 29.sp), maxLines = 1, softWrap = false)
         Text("/ ${score.scale}", Modifier.alignByBaseline(), style = mangaMetricValueStyle(12.sp, 16.sp),
             color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, softWrap = false)
     }

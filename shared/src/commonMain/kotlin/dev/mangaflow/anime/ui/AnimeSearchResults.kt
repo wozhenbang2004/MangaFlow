@@ -5,13 +5,14 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Public
@@ -297,33 +298,58 @@ internal fun AnimeSearchProgressSheet(
     fun currentSearch(): AnimeUnifiedSearchState? = controller.searchState.value.takeIf { current ->
         current.query == search.query && current.indexOnly == search.indexOnly && current.catalogProvider == search.catalogProvider
     }
-    MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop) { dismiss ->
+    var filter by remember(search.query, search.indexOnly, search.catalogProvider) { mutableIntStateOf(0) }
+    val index = search.index
+    val pending = search.sources.count { it.loading || it.loadingMore || it.queued } + if (index.loading) 1 else 0
+    val failed = search.sources.count { it.error != null && !it.loading && !it.loadingMore && !it.queued } +
+        if (index.error != null && !index.loading) 1 else 0
+    MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop, desktopWidth = 780.dp) { dismiss ->
         AnimeSearchSheetHeading("搜索来源", "「${search.query}」", dismiss)
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 460.dp),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 14.dp)) {
-            item(key = "catalogue-heading") { AnimeQuietLabel("番剧资料", Modifier.padding(top = 5.dp)) }
-            item(key = "catalogue-progress") {
-                val index = search.index
-                AnimeSearchSourceProgress(animeDiscoverySourceId(search.catalogProvider), animeDiscoveryProviderLabel(search.catalogProvider),
-                    index.items.size, index.page, index.loading, queued = false, failed = index.error != null,
-                    retry = {
-                        // A synchronous repeat of the same failure may be conflated. Match the
-                        // shown value (including page and error), not its allocation identity.
-                        if (currentSearch()?.index == index && index.error != null && !index.loading)
-                            controller.retrySearchIndex()
-                    })
+        AnimePaneLayout(Modifier.fillMaxWidth().heightIn(max = 460.dp), minimumWidth = 600.dp,
+            showSidebar = search.sources.isNotEmpty(), sidebar = {
+                AnimePaneChoice("全部来源", filter == 0, { filter = 0 }, Icons.Outlined.Public, (search.sources.size + 1).toString())
+                AnimePaneChoice("查询中", filter == 1, { filter = 1 }, Icons.Outlined.Schedule, pending.toString())
+                AnimePaneChoice("需重试", filter == 2, { filter = 2 }, Icons.Outlined.Refresh, failed.toString())
+            }) { wide ->
+            val category = if (wide) filter else 0
+            fun matches(working: Boolean, error: String?): Boolean = when (category) {
+                1 -> working
+                2 -> error != null && !working
+                else -> true
             }
-            if (search.sources.isNotEmpty()) item(key = "source-heading") {
-                AnimeQuietLabel("播放片源", Modifier.padding(top = 9.dp))
-            }
-            items(search.sources, key = { "source-progress:${it.providerId}" }) { source ->
-                AnimeSearchSourceProgress(source.providerId, source.name, source.items.size, source.page,
-                    source.loading || source.loadingMore, source.queued, source.error != null,
-                    retry = {
-                        if (source.error != null && !source.loading && !source.loadingMore &&
-                            currentSearch()?.sources?.any { it == source } == true)
-                            controller.retrySearchProvider(source.providerId)
-                    })
+            val showCatalogue = matches(index.loading, index.error)
+            val sources = search.sources.filter { matches(it.loading || it.loadingMore || it.queued, it.error) }
+            key(category) {
+                AnimeScrollableList(Modifier.fillMaxWidth().weight(1f, fill = false),
+                    contentPadding = PaddingValues(start = if (wide) 4.dp else 16.dp, end = 16.dp, bottom = 14.dp)) {
+                    if (showCatalogue) {
+                        item(key = "catalogue-heading") { AnimeQuietLabel("番剧资料", Modifier.padding(top = 5.dp)) }
+                        item(key = "catalogue-progress") {
+                            AnimeSearchSourceProgress(animeDiscoverySourceId(search.catalogProvider), animeDiscoveryProviderLabel(search.catalogProvider),
+                                index.items.size, index.page, index.loading, queued = false, error = index.error,
+                                retry = {
+                                    if (currentSearch()?.index == index && index.error != null && !index.loading)
+                                        controller.retrySearchIndex()
+                                })
+                        }
+                    }
+                    if (sources.isNotEmpty()) item(key = "source-heading") {
+                        AnimeQuietLabel("播放片源", Modifier.padding(top = 9.dp))
+                    }
+                    items(sources, key = { "source-progress:${it.providerId}" }) { source ->
+                        AnimeSearchSourceProgress(source.providerId, source.name, source.items.size, source.page,
+                            source.loading || source.loadingMore, source.queued, source.error,
+                            retry = {
+                                if (source.error != null && !source.loading && !source.loadingMore &&
+                                    currentSearch()?.sources?.any { it == source } == true)
+                                    controller.retrySearchProvider(source.providerId)
+                            })
+                    }
+                    if (!showCatalogue && sources.isEmpty()) item {
+                        AnimeMessage(if (category == 1) "当前没有进行中的查询" else "当前没有需要重试的来源",
+                            icon = if (category == 1) Icons.Outlined.Schedule else Icons.Outlined.Refresh)
+                    }
+                }
             }
         }
     }
@@ -331,7 +357,7 @@ internal fun AnimeSearchProgressSheet(
 
 @Composable
 private fun AnimeSearchSourceProgress(
-    id: String, name: String, count: Int, page: Int, loading: Boolean, queued: Boolean, failed: Boolean, retry: () -> Unit,
+    id: String, name: String, count: Int, page: Int, loading: Boolean, queued: Boolean, error: String?, retry: () -> Unit,
 ) {
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -341,14 +367,17 @@ private fun AnimeSearchSourceProgress(
             val state = when {
                 queued -> "等待查询"
                 loading -> "正在查找"
-                failed -> "未能查完"
+                error != null -> "未能查完"
                 page == 0 -> "尚未返回"
                 count == 0 -> "暂无匹配"
                 else -> "已返回"
             }
             AnimeQuietLabel(state + if (count > 0) " · $count 条" else "")
+            if (error != null && !loading && !queued) Text(error, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error, maxLines = 3, overflow = TextOverflow.Ellipsis)
         }
-        if (failed && !loading) MotionTextButton(onClick = retry, modifier = Modifier.heightIn(min = 44.dp)
+        if (loading) MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
+        if (error != null && !loading && !queued) MotionTextButton(onClick = retry, modifier = Modifier.heightIn(min = 44.dp)
             .semantics { contentDescription = "重试$name" }, contentPadding = PaddingValues(horizontal = 8.dp)) {
             Text("重试")
         }
@@ -375,23 +404,38 @@ internal fun AnimeSearchVersionSheet(
     backdrop: HazeState, onDismiss: () -> Unit, onChoose: (AnimeSourceTitle) -> Unit,
 ) {
     var selected by remember { mutableStateOf<AnimeSourceTitle?>(null) }
+    var currentSource by remember { mutableStateOf<String?>(null) }
+    val groups = versions.groupBy { it.sourceId }
+    val activeSource = currentSource?.takeIf(groups::containsKey)
     MotionBottomSheet(onDismissRequest = {
         val chosen = selected
         selected = null
         onDismiss()
         chosen?.let(onChoose)
-    }, containerColor = MaterialTheme.colorScheme.background, backdrop = backdrop) { dismiss ->
+    }, containerColor = MaterialTheme.colorScheme.background, backdrop = backdrop, desktopWidth = 824.dp) { dismiss ->
         AnimeSearchSheetHeading("选择要打开的版本", null, dismiss)
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 460.dp),
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 10.dp)) {
-            if (versions.isEmpty()) item(key = "empty") { AnimeMessage("可用版本已更新，返回搜索重试") }
-            items(versions, key = { controller.sourceSubject(it).id }) { version ->
-                val subtitle = listOfNotNull(version.year?.toString(),
-                    version.episodeCount?.takeIf { it > 0 }?.let { "$it 集" },
-                    version.updateText.takeIf(String::isNotBlank)).joinToString(" · ")
-                AnimeSearchWorkRow(controller.sourceSubject(version), subtitle, null,
-                    listOf(version.sourceId to sourceName(version.sourceId)), true,
-                    onOpen = { selected = version; dismiss() }, openLabel = "打开此版本")
+        AnimePaneLayout(Modifier.fillMaxWidth().heightIn(max = 460.dp), showSidebar = groups.size > 1, sidebar = {
+            AnimeScrollableList(Modifier.fillMaxWidth()) {
+                item { AnimePaneChoice("全部版本", activeSource == null, { currentSource = null }, count = versions.size.toString()) }
+                groups.forEach { (id, choices) ->
+                    item(key = id) { AnimePaneChoice(sourceName(id), currentSource == id, { currentSource = id }, count = choices.size.toString()) }
+                }
+            }
+        }) { wide ->
+            val scope = activeSource.takeIf { wide }
+            key(scope) {
+                AnimeScrollableList(Modifier.fillMaxWidth().weight(1f, fill = false),
+                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 10.dp)) {
+                    if (versions.isEmpty()) item(key = "empty") { AnimeMessage("可用版本已更新，返回搜索重试") }
+                    items(if (scope == null) versions else groups[scope].orEmpty(), key = { controller.sourceSubject(it).id }) { version ->
+                        val subtitle = listOfNotNull(version.year?.toString(),
+                            version.episodeCount?.takeIf { it > 0 }?.let { "$it 集" },
+                            version.updateText.takeIf(String::isNotBlank)).joinToString(" · ")
+                        AnimeSearchWorkRow(controller.sourceSubject(version), subtitle, null,
+                            listOf(version.sourceId to sourceName(version.sourceId)), true, showSourceNames = wide,
+                            onOpen = { selected = version; dismiss() }, openLabel = "打开此版本")
+                    }
+                }
             }
         }
     }

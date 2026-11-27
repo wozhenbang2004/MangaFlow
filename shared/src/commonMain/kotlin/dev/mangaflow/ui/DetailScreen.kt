@@ -69,6 +69,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FilterList
@@ -256,13 +257,19 @@ fun DetailScreen(
     onDesktopFindHandled: (Int) -> Unit = {},
 ) {
     val current = detail?.manga ?: manga
+    var batchChapterIds by remember(current.id) { mutableStateOf<Set<String>?>(null) }
     var pendingDownload by remember(current.id) { mutableStateOf<Chapter?>(null) }
     var pendingDownloadAnchor by remember(current.id) { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
     val downloadSourceEntries = remember(downloadEntries) { downloadEntries.associateBy { it.chapter.id } }
     val preparingSources = remember(downloadPreparations, current.id) {
         downloadPreparations.filter { it.manga.id == current.id }.associateBy { it.chapter.id }
     }
-    LaunchedEffect(active, current.id) { if (!active) pendingDownload = null }
+    LaunchedEffect(active, current.id) {
+        if (!active) {
+            pendingDownload = null
+            batchChapterIds = null
+        }
+    }
     val feedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
     val downloaded = remember(downloadEntries, manga.id) {
         downloadEntries.filter { it.manga.id == manga.id }.associateBy { it.chapter.id }
@@ -452,6 +459,9 @@ fun DetailScreen(
                             onCancelSourceSelection = onCancelSourceSelection,
                             sourceLoading = sourceLoading, sourceError = sourceError,
                             desktopFindRequest = handledFindRequest,
+                            onBatchDownload = { scoped ->
+                                if (active) batchChapterIds = scoped.mapTo(linkedSetOf(), Chapter::id)
+                            },
                         )
                         else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
                             val discussionWidth = if (platformKind == PlatformKind.DESKTOP)
@@ -460,24 +470,17 @@ fun DetailScreen(
                                 sourceCommentsContent(discussionWidth, paneBottomPadding, commentsOpenRevision,
                                     active && targetSection == activeSection)
                             } else if (commentsAvailable) Box(discussionWidth) {
-                                Box(Modifier.fillMaxSize().padding(end =
-                                    if (platformKind == PlatformKind.DESKTOP) 12.dp else 0.dp)) {
-                                    CommunityPanel(
-                                        mangaId = current.id, sources = reviews, loading = reviewsLoading,
-                                        openRevision = commentsOpenRevision,
-                                        onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
-                                        onRelink = onReviewRelink, loadReplies = loadReplies,
-                                        onScrollTarget = { commentsList = it }, backdrop = readingBackdrop,
-                                        captureBackdrop = false,
-                                        active = active && targetSection == activeSection, bottomPadding = paneBottomPadding,
-                                        filterOpen = commentFilterOpen, onFilterDismiss = { commentFilterOpen = false },
-                                        onFilterChanged = { commentFilterChanged = it },
-                                    )
-                                }
-                                if (platformKind == PlatformKind.DESKTOP) commentsList?.let { list ->
-                                    DesktopVerticalScrollbar(list,
-                                        Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
-                                }
+                                CommunityPanel(
+                                    mangaId = current.id, sources = reviews, loading = reviewsLoading,
+                                    openRevision = commentsOpenRevision,
+                                    onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
+                                    onRelink = onReviewRelink, loadReplies = loadReplies,
+                                    onScrollTarget = { commentsList = it }, backdrop = readingBackdrop,
+                                    captureBackdrop = false,
+                                    active = active && targetSection == activeSection, bottomPadding = paneBottomPadding,
+                                    filterOpen = commentFilterOpen, onFilterDismiss = { commentFilterOpen = false },
+                                    onFilterChanged = { commentFilterChanged = it },
+                                )
                             }
                         }
                     }
@@ -849,6 +852,15 @@ fun DetailScreen(
         onOriginal = { original -> if (active) { fullIntroduction = false; onOriginal(original) } },
         onDismiss = { fullIntroduction = false })
     if (!adultProfile && fullRatings) DetailRatingSheet(current, backdrop = readingBackdrop) { fullRatings = false }
+    batchChapterIds?.takeIf { active }?.let { ids ->
+        val scoped = remember(chapters, ids) { chapters.filter { it.id in ids }.distinctBy(Chapter::id) }
+        ChapterBatchDownloadSheet(current, scoped, downloadSourceEntries, preparingSources, readingBackdrop,
+            onSubmit = { targets, route ->
+                if (active && batchChapterIds == ids) targets.forEach { (chapter, variant) ->
+                    if (chapter.variants.isEmpty()) onDownload(chapter, route) else onDownloadVariant(chapter, variant, route)
+                }
+            }, onDismiss = { batchChapterIds = null })
+    }
     pendingDownload?.takeIf { active }?.let { pending ->
         key(current.id, pending.logicalId, pending.id) {
             ChapterDownloadSourceSheet(current, pending, downloadSourceEntries, readingBackdrop,
@@ -1146,10 +1158,12 @@ private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduct
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: Boolean = false,
     includeState: Boolean = true, enabled: Boolean = true, onTag: ((String) -> Unit)?,
-    largeTouchTarget: Boolean = false, maximumVisible: Int = Int.MAX_VALUE, onMore: (() -> Unit)? = null) {
+    largeTouchTarget: Boolean = false, maximumVisible: Int = Int.MAX_VALUE, onMore: (() -> Unit)? = null,
+    wrap: Boolean = false) {
     val tags = remember(manga.status, manga.tags, manga.latestChapter, includeState) {
         buildList<Pair<String, Boolean>> {
             val status = manga.status.trim()
@@ -1160,11 +1174,8 @@ private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: B
             if (includeState && update != null) add(update to false)
         }.distinctBy { it.first }
     }
-    if (tags.isNotEmpty()) Row(
-        modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = if (onArtwork) 0.dp else 3.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    if (tags.isEmpty()) return
+    val labels: @Composable () -> Unit = {
         tags.take(maximumVisible.coerceAtLeast(1)).forEachIndexed { index, (tag, topic) ->
             DetailTag(tag, index, onArtwork, enabled, largeTouchTarget = largeTouchTarget,
                 onClick = if (topic) onTag?.let { action -> { action(tag) } } else null)
@@ -1172,6 +1183,10 @@ private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: B
         if (tags.size > maximumVisible && onMore != null) DetailTag("+${tags.size - maximumVisible}",
             maximumVisible, onArtwork, enabled, largeTouchTarget = largeTouchTarget, onClickLabel = "查看全部标签", onClick = onMore)
     }
+    if (wrap) FlowRow(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalArrangement = Arrangement.spacedBy(1.dp)) { labels() }
+    else Row(modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = if (onArtwork) 0.dp else 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) { labels() }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1179,6 +1194,61 @@ private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: B
 private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: ((String) -> Unit)?,
     onTag: ((String) -> Unit)?, onOriginal: (MangaTag) -> Unit, adultProfile: Boolean = false,
     onDismiss: () -> Unit) {
+    if (platformKind == PlatformKind.DESKTOP) {
+        val colors = MaterialTheme.colorScheme
+        val scroll = rememberScrollState()
+        MotionBottomSheet(onDismissRequest = onDismiss, desktopWidth = 816.dp, backdrop = backdrop,
+            containerColor = colors.surface, contentColor = colors.onSurface) { dismiss ->
+            BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max = 590.dp)) {
+                val split = maxWidth >= 660.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+                val aliases = remember(manga.alternativeTitles, manga.title) {
+                    manga.alternativeTitles.map(String::trim).filter { it.isNotBlank() && it != manga.title }.distinct()
+                }
+                val metadata: @Composable () -> Unit = {
+                    Column(Modifier.fillMaxWidth().background(colors.onSurface.copy(alpha = .045f), RoundedCornerShape(13.dp))
+                        .padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        MangaBrowseSource(manga)
+                        if (aliases.isNotEmpty()) {
+                            Text("其他书名", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                            SelectionContainer { Text(aliases.joinToString(" / "), style = MaterialTheme.typography.bodyMedium) }
+                        }
+                        DetailTags(manga, onTag = onTag, wrap = true)
+                        DetailSourceMetadata(manga, onOriginal)
+                        if (!adultProfile) MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailSecondary, plain = true)
+                    }
+                }
+                val synopsis: @Composable () -> Unit = {
+                    SelectionContainer {
+                        Text(manga.description.ifBlank { "来源暂无简介" }, fontFamily = mangaFontFamily(MangaFontScene.READING),
+                            fontSize = 16.sp, lineHeight = 28.sp, color = if (manga.description.isBlank()) DetailSecondary else DetailForeground)
+                    }
+                }
+                Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(start = 20.dp, end = 26.dp, top = 12.dp, bottom = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(13.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            SelectionContainer { Text(manga.title, style = browseTitleStyle(24.sp, 31.sp), color = DetailForeground) }
+                            AuthorNames(manga.authors, DetailSecondary, onAuthor = onAuthor)
+                        }
+                        MotionIconButton(onClick = dismiss, modifier = Modifier.size(36.dp), tooltip = "关闭作品介绍") {
+                            Icon(Icons.Outlined.Close, "关闭作品介绍", Modifier.size(18.dp))
+                        }
+                    }
+                    if (split) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+                        Box(Modifier.weight(1.52f)) { synopsis() }
+                        Box(Modifier.weight(1f)) { metadata() }
+                    } else {
+                        synopsis()
+                        metadata()
+                    }
+                }
+                Box(Modifier.matchParentSize(), contentAlignment = Alignment.CenterEnd) {
+                    DesktopVerticalScrollbar(scroll, Modifier.fillMaxHeight())
+                }
+            }
+        }
+        return
+    }
     MotionBottomSheet(
         onDismissRequest = onDismiss,
         backdrop = backdrop, desktopCloseButton = true,

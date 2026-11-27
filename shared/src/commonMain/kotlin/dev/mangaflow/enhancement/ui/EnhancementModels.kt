@@ -7,6 +7,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -15,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
@@ -34,6 +36,8 @@ import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.platform.releasePickedDocuments
 import dev.mangaflow.ui.platform.rememberOpenDocumentPicker
 import kotlinx.coroutines.CancellationException
@@ -113,6 +117,15 @@ private fun EngineProgress.shortProgress(): String {
 }
 
 @Composable
+private fun InstallationProgress(progress: EngineProgress?) {
+    if (platformKind != PlatformKind.DESKTOP || progress == null || !progress.installing()) return
+    val total = progress.total?.takeIf { it > 0L && progress.completed in 0L..it } ?: return
+    LinearProgressIndicator(progress = { (progress.completed.toDouble() / total).toFloat() },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp).height(3.dp),
+        trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
+}
+
+@Composable
 internal fun EnhancementModelList(
     inventory: EngineInventory,
     progress: Map<String, EngineProgress>,
@@ -127,16 +140,28 @@ internal fun EnhancementModelList(
 ) {
     val choices = remember(inventory, content) { modelChoices(inventory, content) }
     val selectedModel = policy.modelId
+    var modelFilter by rememberSaveable(content) { mutableIntStateOf(0) }
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val visibleChoices = if (!desktop || modelFilter == 0) choices else choices.filter {
+        (it.selectionId != null) == (modelFilter == 1)
+    }
     ModelChoiceRow("使用预设", "返回画质页选择预设算法；保留 ${policy.scale}× 输出设置",
         selectedModel == null, true, onClick = onUsePresets)
     ModelListTools("可选模型", onImport, onRefresh)
+    if (desktop && choices.isNotEmpty()) {
+        val local = choices.count { it.selectionId != null }
+        MotionTabs(modelFilter, listOf("全部 ${choices.size}", "本机 $local", "未安装 ${choices.size - local}"),
+            onSelect = { modelFilter = it }, modifier = Modifier.fillMaxWidth(),
+            controlHeight = 40.dp, treatment = MotionTabTreatment.Soft)
+    }
     EnhancementQuiet("选用后按具体模型处理。通过「使用预设」切回档位选择。")
     if (content != EnhancementContent.ANIME)
         EnhancementQuiet("先按黑白／彩色与原图尺寸选。MB、MiB 是文件体积，不是画质排名；放大更多也不代表细节一定更准。")
     if (content == EnhancementContent.ANIME && choices.any { it.engineId == EnhancementEngineIds.ANIME4K_MEDIUM && it.builtIn })
         EnhancementQuiet("日常观看可先选均衡（Anime4K M/M）。掉帧时试轻量（S/S）；有性能余量再比较其他模型。")
     if (choices.isEmpty()) EnhancementQuiet("还没有可选模型，可先准备运行组件或导入模型。")
-    choices.forEach { choice ->
+    else if (visibleChoices.isEmpty()) EnhancementQuiet(if (modelFilter == 1) "本机还没有此类模型。" else "列表中的模型均已在本机。")
+    visibleChoices.forEach { choice ->
         val pending = choice.progressKey?.let { progress[it] }
         val selectionId = choice.selectionId
         val selection = selectionId?.let { enhancementModelSelectionPolicy(content, policy, inventory, it) }
@@ -272,15 +297,31 @@ private fun mangaModelGuidance(choice: ModelChoice): ModelGuidance? {
 
 @Composable
 private fun ModelListTools(title: String, onImport: () -> Unit, onRefresh: () -> Unit) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+    val labeled = platformKind == PlatformKind.DESKTOP && maxWidth >= 320.dp * LocalDensity.current.fontScale
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(title, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (labeled) {
+            MotionTextButton(onImport, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                Icon(Icons.Outlined.UploadFile, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("导入模型", style = MaterialTheme.typography.labelMedium)
+            }
+            MotionTextButton(onRefresh, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("检查安装", style = MaterialTheme.typography.labelMedium)
+            }
+        } else {
         if (platformKind != PlatformKind.IOS) MotionIconButton(onImport, Modifier.size(44.dp), tooltip = "导入模型") {
             Icon(Icons.Outlined.UploadFile, "导入模型", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         MotionIconButton(onRefresh, Modifier.size(44.dp), tooltip = "重新检查安装") {
             Icon(Icons.Outlined.Refresh, "重新检查安装", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        }
+    }
     }
 }
 
@@ -409,6 +450,7 @@ internal fun EnhancementModelDetail(
             choice.profile != null && model != null && pending?.stage == EngineStage.COMPLETE && selectionId != selectedModel
         }
     feedback?.let { EnhancementQuiet(it, error = pending?.failed == true || noticeFailed) }
+    InstallationProgress(pending)
     if (busy && pending?.detail != null && !pending.failed) EnhancementQuiet(pending.detail)
     when {
         selectionId != null && selection == null ->
@@ -511,6 +553,7 @@ internal fun EnhancementEngineDetail(
         Text(if (busy) pending?.shortProgress() ?: "正在安装" else if (pending?.failed == true) "重试安装"
             else if (engine.detail.startsWith("组件需要更新")) "更新组件" else "安装组件")
     }
+    InstallationProgress(pending)
     pending?.let { value ->
         if (value.detail != null) EnhancementQuiet(value.detail, error = value.failed)
         else if (value.failed) EnhancementQuiet("安装未完成，请重试。", error = true)

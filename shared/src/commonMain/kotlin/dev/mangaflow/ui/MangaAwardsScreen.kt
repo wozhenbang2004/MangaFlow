@@ -9,6 +9,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -60,6 +65,8 @@ import dev.mangaflow.data.SiteRankingFilters
 import dev.mangaflow.data.SiteRankingKind
 import dev.mangaflow.data.SiteRankingSelection
 import dev.mangaflow.data.SiteRankingsRepository
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.*
@@ -87,6 +94,7 @@ internal fun MangaAwardsScreen(
     val positions = rememberSaveableStateHolder()
     val focus = LocalFocusManager.current
     val colors = MaterialTheme.colorScheme
+    val desktop = platformKind == PlatformKind.DESKTOP
     val pageTitle = if (sectionTabs != null) "漫画榜单" else "年度获奖"
     var yearVisible by remember { mutableStateOf(false) }
     var yearPresent by remember { mutableStateOf(false) }
@@ -141,7 +149,8 @@ internal fun MangaAwardsScreen(
                         Icon(Icons.Outlined.Info, "获奖目录说明", Modifier.size(19.dp))
                     }
                 })
-            Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+            Row(Modifier.then(if (desktop) Modifier.widthIn(max = 640.dp) else Modifier)
+                .fillMaxWidth().padding(start = if (desktop) 24.dp else 14.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 val choices = listOf<MangaAward?>(null) + MangaAward.entries
                 val labels = listOf("全部", "漫画大赏", "小学馆", "讲谈社")
@@ -186,7 +195,14 @@ internal fun MangaAwardsScreen(
                         (pane.award == null || it.award == pane.award) && (pane.year == null || it.year == pane.year)
                     }.sortedWith(compareByDescending<MangaAwardEntry> { it.year }.thenBy { it.award.ordinal })
                 }
-                LazyColumn(state = rememberLazyListState(),
+                val choose: (MangaAwardEntry) -> Unit = { entry ->
+                    lookupEntry = entry
+                    requestedWork = null
+                    lookupPresent = true
+                    lookupVisible = true
+                }
+                if (desktop) DesktopAwardArchive(pane, rows, backdrop, contentReady && pane == selection, choose)
+                else LazyColumn(state = rememberLazyListState(),
                     modifier = Modifier.fillMaxSize().mangaHazeSource(backdrop)
                         .motionInputGate(contentReady && pane == selection),
                     contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp,
@@ -211,12 +227,7 @@ internal fun MangaAwardsScreen(
                                 MangaAwardGroupHeading(source.takeIf { pane.award == null }, edition)
                             }
                             items(works, key = { it.key }, contentType = { "award-work" }) { entry ->
-                                MangaAwardRow(entry, contentReady && pane == selection) {
-                                    lookupEntry = entry
-                                    requestedWork = null
-                                    lookupPresent = true
-                                    lookupVisible = true
-                                }
+                                MangaAwardRow(entry, contentReady && pane == selection) { choose(entry) }
                             }
                         }
                     }
@@ -282,6 +293,57 @@ private data class AwardCatalogueSelection(val award: MangaAward?, val year: Int
 
 /** A bounded year palette replaces the long anchored dropdown. */
 @Composable
+private fun DesktopAwardArchive(selection: AwardCatalogueSelection, rows: List<MangaAwardEntry>, backdrop: HazeState,
+    enabled: Boolean, onChoose: (MangaAwardEntry) -> Unit) {
+    val state = rememberLazyGridState()
+    val colors = MaterialTheme.colorScheme
+    val yearly = remember(rows) { rows.groupBy { it.year }.mapValues { (_, entries) -> entries.groupBy { it.award to it.edition } } }
+    BoxWithConstraints(Modifier.fillMaxSize().mangaHazeSource(backdrop).motionInputGate(enabled)) {
+        val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val width = maxWidth.coerceAtMost(1160.dp)
+        val columns = when {
+            width >= 960.dp * fontScale -> 3
+            width >= 620.dp * fontScale -> 2
+            else -> 1
+        }
+        val margin = if (columns == 1) 15.dp else 24.dp
+        LazyVerticalGrid(GridCells.Fixed(columns), state = state, modifier = Modifier.align(Alignment.TopCenter).width(width).fillMaxHeight(),
+            contentPadding = PaddingValues(start = margin, end = margin + 8.dp, top = 12.dp, bottom = 28.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            item("scope", span = { GridItemSpan(maxLineSpan) }) {
+                Column(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(selection.year?.let { "${it} 年获奖作品" } ?: "历年获奖作品",
+                        Modifier.semantics { heading() }, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                    Text(listOf(selection.award?.title ?: "全部奖项", "${rows.size} 条获奖记录").joinToString(" · "),
+                        style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                }
+            }
+            yearly.forEach { (year, groups) ->
+                if (selection.year == null) item("award-year:$year", span = { GridItemSpan(maxLineSpan) }) {
+                    Text("${year} 年", Modifier.padding(top = 14.dp).semantics { heading() },
+                        style = mangaMetricValueStyle(22.sp, 30.sp), fontWeight = FontWeight.SemiBold)
+                }
+                groups.forEach { (group, works) ->
+                    val (award, edition) = group
+                    if (selection.award == null || edition != null) {
+                        item("award-group:$year:${award.id}:$edition", span = { GridItemSpan(maxLineSpan) }) {
+                            MangaAwardGroupHeading(award.takeIf { selection.award == null }, edition)
+                        }
+                    }
+                    gridItems(works, key = { it.key }, contentType = { "award-work" }) { entry ->
+                        MangaAwardRow(entry, enabled) { onChoose(entry) }
+                    }
+                }
+            }
+            if (rows.isEmpty()) item("empty-awards", span = { GridItemSpan(maxLineSpan) }) {
+                EmptyMessage("当前年份尚未收录", "可以选择其他年份，或查看目录说明。")
+            }
+        }
+        DesktopVerticalScrollbar(state, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+    }
+}
+
+@Composable
 private fun MangaAwardYearDialog(
     visible: Boolean,
     years: List<Int>,
@@ -291,7 +353,8 @@ private fun MangaAwardYearDialog(
     onDismiss: () -> Unit,
     onClosed: () -> Unit,
 ) {
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 360.dp, onClosed = onClosed) {
+    val desktop = platformKind == PlatformKind.DESKTOP
+    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = if (desktop) 460.dp else 360.dp, onClosed = onClosed) {
         val colors = MaterialTheme.colorScheme
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
         LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 24.dp,
@@ -308,25 +371,31 @@ private fun MangaAwardYearDialog(
                         Icon(Icons.Outlined.Close, "关闭年份选择", Modifier.size(19.dp))
                     }
                 }
-                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).selectableGroup()) {
-                    RankingMenuChoice("全部年份", selectedYear == null, visible) { onSelect(null) }
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(vertical = 8.dp)) {
-                        years.forEach { candidate ->
-                            val chosen = candidate == selectedYear
-                            MotionTextButton(onClick = { onSelect(candidate) }, enabled = visible,
-                                modifier = Modifier.widthIn(min = 68.dp * fontScale).heightIn(min = 44.dp).semantics {
-                                    selected = chosen
-                                    contentDescription = "${candidate}年公布"
-                                }, colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface,
-                                    containerColor = colors.onSurface.copy(alpha = if (chosen) .08f else 0f)),
-                                contentPadding = PaddingValues(horizontal = 10.dp)) {
-                                Box(Modifier.padding(end = 4.dp).size(13.dp), contentAlignment = Alignment.Center) {
-                                    if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp))
+                val scroll = rememberScrollState()
+                Box(Modifier.weight(1f, fill = false).fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(end = if (desktop) 10.dp else 0.dp).selectableGroup()) {
+                        RankingMenuChoice("全部年份", selectedYear == null, visible) { onSelect(null) }
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(vertical = 8.dp)) {
+                            years.forEach { candidate ->
+                                val chosen = candidate == selectedYear
+                                MotionTextButton(onClick = { onSelect(candidate) }, enabled = visible,
+                                    modifier = Modifier.widthIn(min = 68.dp * fontScale).heightIn(min = 44.dp).semantics {
+                                        selected = chosen
+                                        contentDescription = "${candidate}年公布"
+                                    }, colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface,
+                                        containerColor = colors.onSurface.copy(alpha = if (chosen) .08f else 0f)),
+                                    contentPadding = PaddingValues(horizontal = 10.dp)) {
+                                    Box(Modifier.padding(end = 4.dp).size(13.dp), contentAlignment = Alignment.Center) {
+                                        if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp))
+                                    }
+                                    Text(candidate.toString(), style = MaterialTheme.typography.bodySmall)
                                 }
-                                Text(candidate.toString(), style = MaterialTheme.typography.bodySmall)
                             }
                         }
+                    }
+                    if (desktop) Box(Modifier.matchParentSize(), contentAlignment = Alignment.CenterEnd) {
+                        DesktopVerticalScrollbar(scroll, Modifier.fillMaxHeight())
                     }
                 }
             }
@@ -351,9 +420,13 @@ private fun MangaAwardRow(entry: MangaAwardEntry, enabled: Boolean, onClick: () 
     val interaction = remember { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
     val category = entry.category.takeUnless { it == "获奖作品" || entry.award == MangaAward.MANGA_TAISHO && it == "大赏" }
-    Row(Modifier.fillMaxWidth().clickable(enabled = enabled, role = Role.Button, interactionSource = interaction,
-        indication = null, onClickLabel = "查找作品", onClick = onClick).motionPress(interaction, enabled, pressedScale = .985f)
-        .heightIn(min = 48.dp).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val card = if (desktop) Modifier.clip(RoundedCornerShape(13.dp))
+        .background(colors.onSurface.copy(alpha = .04f)) else Modifier
+    Row(Modifier.fillMaxWidth().then(card).clickable(enabled = enabled, role = Role.Button, interactionSource = interaction,
+        indication = null, onClickLabel = "查找${entry.title}", onClick = onClick).motionPress(interaction, enabled, pressedScale = .985f)
+        .heightIn(min = if (desktop) 82.dp else 48.dp)
+        .padding(horizontal = if (desktop) 14.dp else 0.dp, vertical = if (desktop) 12.dp else 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             if (!category.isNullOrBlank()) Text(category, style = MaterialTheme.typography.labelSmall,
                 color = colors.primary)
@@ -426,8 +499,8 @@ private fun MangaAwardLookupDialog(
     }
 
     MotionDialog(open, onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 560.dp,
-        onClosed = onClosed) {
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        maximumWidth = if (platformKind == PlatformKind.DESKTOP) 690.dp else 560.dp, onClosed = onClosed) {
         val shown = entry ?: return@MotionDialog
         val colors = MaterialTheme.colorScheme
         val focus = LocalFocusManager.current
@@ -458,93 +531,99 @@ private fun MangaAwardLookupDialog(
                         }
                     }
                     // The header and search controls scroll with results when the keyboard reduces available height.
-                    LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(),
-                        contentPadding = PaddingValues(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                        item("award-original") {
-                            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                                Text(shown.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                                    style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                                Text(shown.authors.joinToString(" / "), style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant)
-                                Text("${shown.year} · ${shown.award.title} · ${shown.category}",
-                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                                if (provenance) {
-                                    Text("${shown.edition?.let { "第${it}届 · " }.orEmpty()}核对于 ${MangaAwardsCatalog.verifiedAt}",
+                    val desktop = platformKind == PlatformKind.DESKTOP
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        LazyColumn(state = listState, modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(end = if (desktop) 10.dp else 0.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                            item("award-original") {
+                                Column(Modifier.fillMaxWidth().then(if (desktop) Modifier
+                                    .background(colors.onSurface.copy(alpha = .04f), RoundedCornerShape(12.dp)).padding(12.dp)
+                                    else Modifier.padding(vertical = 6.dp)), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    Text(shown.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                                        style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                                    Text(shown.authors.joinToString(" / "), style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant)
+                                    Text("${shown.year} · ${shown.award.title} · ${shown.category}",
                                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                                    SelectionContainer {
-                                        Text(shown.sourceUrl, style = MaterialTheme.typography.labelSmall,
+                                    if (provenance) {
+                                        Text("${shown.edition?.let { "第${it}届 · " }.orEmpty()}核对于 ${MangaAwardsCatalog.verifiedAt}",
+                                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                        SelectionContainer {
+                                            Text(shown.sourceUrl, style = MaterialTheme.typography.labelSmall,
+                                                color = colors.onSurfaceVariant)
+                                        }
+                                    }
+                                }
+                            }
+                            item("lookup-controls") {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    BoxWithConstraints(Modifier.fillMaxWidth()) {
+                                        val width = maxWidth.coerceAtLeast(324.dp * LocalDensity.current.fontScale.coerceAtLeast(1f))
+                                        Box(Modifier.horizontalScroll(rememberScrollState())) {
+                                            MotionTabs(site.ordinal, RankingSite.entries.map { it.title }, onSelect = { index ->
+                                                if (open) {
+                                                    focus.clearFocus(force = true)
+                                                    site = RankingSite.entries[index]
+                                                }
+                                            }, modifier = Modifier.width(width).motionInputGate(open),
+                                                treatment = MotionTabTreatment.Capsule, controlHeight = 44.dp, fontSize = 12.sp)
+                                        }
+                                    }
+                                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
+                                        .background(colors.onSurface.copy(alpha = .045f)).padding(start = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically) {
+                                        BasicTextField(query, onValueChange = { query = it.take(300) }, enabled = open,
+                                            modifier = Modifier.weight(1f).padding(vertical = 12.dp)
+                                                .semantics { contentDescription = "搜索书名，可修改后重新搜索" },
+                                            singleLine = true, textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
+                                            cursorBrush = SolidColor(colors.onSurface),
+                                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                            keyboardActions = KeyboardActions(onSearch = { submit() }))
+                                        MotionIconButton(onClick = submit, enabled = open && query.isNotBlank(),
+                                            modifier = Modifier.size(44.dp), tooltip = "搜索该站目录") {
+                                            Icon(Icons.Outlined.Search, "搜索该站目录", Modifier.size(19.dp))
+                                        }
+                                    }
+                                    Text("请选择对应作品，再查看阅读来源。", style = MaterialTheme.typography.labelSmall,
+                                        color = colors.onSurfaceVariant)
+                                    if (query.trim() != submitted) Text("当前结果 · $submitted",
+                                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                            items(snapshot.works, key = { "catalogue:" + it.key }, contentType = { "award-candidate" }) { work ->
+                                AwardCatalogueCandidateRow(work, open) {
+                                    if (open && snapshot.works.any { it.key == work.key }) {
+                                        focus.clearFocus(force = true)
+                                        onSelect(work)
+                                    }
+                                }
+                            }
+                            item("lookup-footer") {
+                                Column(Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    when {
+                                        snapshot.loading -> MotionBusyIndicator(Modifier.padding(10.dp).size(20.dp))
+                                        snapshot.error != null -> {
+                                            Text(snapshot.error.orEmpty(), style = MaterialTheme.typography.bodySmall,
+                                                color = colors.error)
+                                            MotionTextButton(onClick = { retry++ }, enabled = open) { Text("重试") }
+                                        }
+                                        snapshot.works.isEmpty() && snapshot.page >= 0 -> Text(
+                                            if (snapshot.hasMore) "当前页没有条目，可继续读取。" else "未找到对应条目，可修改书名或更换站点。",
+                                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                    }
+                                    if (snapshot.hasMore && !snapshot.loading && snapshot.error == null) {
+                                        if (snapshot.page < 199) MotionTextButton(onClick = {
+                                            requestedPage = snapshot.page + 1
+                                        }, enabled = open) { Text("更多结果") }
+                                        else Text("已到该站分页范围，可缩小搜索词。", style = MaterialTheme.typography.labelSmall,
                                             color = colors.onSurfaceVariant)
                                     }
                                 }
                             }
                         }
-                        item("lookup-controls") {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                BoxWithConstraints(Modifier.fillMaxWidth()) {
-                                    val width = maxWidth.coerceAtLeast(324.dp * LocalDensity.current.fontScale.coerceAtLeast(1f))
-                                    Box(Modifier.horizontalScroll(rememberScrollState())) {
-                                        MotionTabs(site.ordinal, RankingSite.entries.map { it.title }, onSelect = { index ->
-                                            if (open) {
-                                                focus.clearFocus(force = true)
-                                                site = RankingSite.entries[index]
-                                            }
-                                        }, modifier = Modifier.width(width).motionInputGate(open),
-                                            treatment = MotionTabTreatment.Capsule, controlHeight = 44.dp, fontSize = 12.sp)
-                                    }
-                                }
-                                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
-                                    .background(colors.onSurface.copy(alpha = .045f)).padding(start = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically) {
-                                    BasicTextField(query, onValueChange = { query = it.take(300) }, enabled = open,
-                                        modifier = Modifier.weight(1f).padding(vertical = 12.dp)
-                                            .semantics { contentDescription = "搜索书名，可修改后重新搜索" },
-                                        singleLine = true, textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
-                                        cursorBrush = SolidColor(colors.onSurface),
-                                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                        keyboardActions = KeyboardActions(onSearch = { submit() }))
-                                    MotionIconButton(onClick = submit, enabled = open && query.isNotBlank(),
-                                        modifier = Modifier.size(44.dp), tooltip = "搜索该站目录") {
-                                        Icon(Icons.Outlined.Search, "搜索该站目录", Modifier.size(19.dp))
-                                    }
-                                }
-                                Text("请选择对应作品，再查看阅读来源。", style = MaterialTheme.typography.labelSmall,
-                                    color = colors.onSurfaceVariant)
-                                if (query.trim() != submitted) Text("当前结果 · $submitted",
-                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                        items(snapshot.works, key = { "catalogue:" + it.key }, contentType = { "award-candidate" }) { work ->
-                            AwardCatalogueCandidateRow(work, open) {
-                                if (open && snapshot.works.any { it.key == work.key }) {
-                                    focus.clearFocus(force = true)
-                                    onSelect(work)
-                                }
-                            }
-                        }
-                        item("lookup-footer") {
-                            Column(Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                when {
-                                    snapshot.loading -> MotionBusyIndicator(Modifier.padding(10.dp).size(20.dp))
-                                    snapshot.error != null -> {
-                                        Text(snapshot.error.orEmpty(), style = MaterialTheme.typography.bodySmall,
-                                            color = colors.error)
-                                        MotionTextButton(onClick = { retry++ }, enabled = open) { Text("重试") }
-                                    }
-                                    snapshot.works.isEmpty() && snapshot.page >= 0 -> Text(
-                                        if (snapshot.hasMore) "当前页没有条目，可继续读取。" else "未找到对应条目，可修改书名或更换站点。",
-                                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                                }
-                                if (snapshot.hasMore && !snapshot.loading && snapshot.error == null) {
-                                    if (snapshot.page < 199) MotionTextButton(onClick = {
-                                        requestedPage = snapshot.page + 1
-                                    }, enabled = open) { Text("更多结果") }
-                                    else Text("已到该站分页范围，可缩小搜索词。", style = MaterialTheme.typography.labelSmall,
-                                        color = colors.onSurfaceVariant)
-                                }
-                            }
-                        }
+                        if (desktop) DesktopVerticalScrollbar(listState, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                     }
                 }
             }

@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -19,6 +18,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -29,6 +32,8 @@ import dev.mangaflow.anime.sources.lanerc.LanercSourceKind
 import dev.mangaflow.anime.sources.lanerc.LanercSourceListing
 import dev.mangaflow.anime.sources.lanerc.SourcePreparationPhase
 import dev.mangaflow.anime.sources.lanerc.SourcePreparationState
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
@@ -81,7 +86,7 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
         }
     }
 
-    MotionDialog(visible, onDismissRequest = ::goUp, maximumWidth = 640.dp,
+    MotionDialog(visible, onDismissRequest = ::goUp, maximumWidth = animePanelWidth(964.dp, 640.dp), properties = animePanelDialogProperties,
         onClosed = {
             selectedId = null
             returnSourceId = null
@@ -92,137 +97,185 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
             if (provider != null) onBrowse(provider)
         }) {
         AnimePanelSurface(backdrop) {
-            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
-                val nested = selected != null || moreVideoSources
-                Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    if (nested) MotionIconButton(onClick = ::goUp, modifier = Modifier.size(44.dp), tooltip = "返回来源目录") {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
-                    }
-                    Text(selected?.displayName ?: if (moreVideoSources) "更多播放来源" else "管理番剧来源",
-                        Modifier.weight(1f).padding(start = if (nested) 0.dp else 8.dp),
-                        style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    MotionIconButton(onClick = ::closeManager, modifier = Modifier.size(44.dp),
-                        tooltip = "关闭来源管理") {
-                        Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
-                    }
-                }
-                if (selected != null) {
-                    val alternatives = videoGroups.firstOrNull { selected in it.sources }?.sources.orEmpty()
-                        .filter { it.id != selected.id && it.installable }
-                    key(selected.id) {
-                        AnimeSourceManagerDetail(selected, alternatives, selected.id in fixedBuiltIns, state, controller,
-                            Modifier.weight(1f, fill = false),
-                            onSelectAlternative = { alternative ->
-                                returnSourceId = if (alternative.id == returnSourceId) null else selected.id
-                                selectedId = alternative.id
-                            },
-                            onRemoved = { selectedId = returnSourceId; returnSourceId = null })
-                    }
-                } else if (moreVideoSources) {
-                    val inactive = videoGroups.map { it.primary }.filterNot { it.active }
-                    val (automatic, manual) = inactive.partition { it.automaticPreparation && !it.installed &&
-                        state.sourcePreparation[it.id]?.phase != SourcePreparationPhase.DISABLED }
-                    val (paused, available) = manual.partition { it.installed || it.id in BUNDLED_ANIME_SOURCE_IDS ||
-                        state.sourcePreparation[it.id]?.phase == SourcePreparationPhase.DISABLED }
-                    val failed = automatic.any { state.sourcePreparation[it.id]?.retryableFailure == true }
-                    LazyColumn(Modifier.weight(1f, fill = false), state = moreScroll, contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (automatic.isNotEmpty()) {
-                            item(key = "automatic-header") {
-                                AnimeSectionTitle("自动准备")
-                            }
-                            sourceManagerRows(automatic, state, ::openSource)
-                            if (failed) item(key = "automatic-retry") {
-                                CompactMenuAction(Icons.Outlined.Refresh, "重试可恢复的来源", enabled = state.sourceOperationIds.isEmpty(),
-                                    onClick = controller::retryAutomaticSources)
-                            }
+            val window = LocalMangaWindow.current
+            BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max = window.panelHeight)) {
+                val wide = platformKind == PlatformKind.DESKTOP && maxWidth >= 732.dp * window.fontScale &&
+                    maxHeight >= 292.dp * window.fontScale
+                val listWidth = (maxWidth * .40f).coerceIn(260.dp, 370.dp)
+                val bodyHeight = minOf(maxHeight, 568.dp * window.fontScale)
+                val firstInList = if (wide) when (tab) {
+                    AnimeSourceManagerTab.VIDEO -> videoGroups.firstOrNull { it.primary.active != moreVideoSources }?.primary
+                    AnimeSourceManagerTab.DANMAKU -> extensions.firstOrNull { it.kind == LanercSourceKind.DANMAKU }
+                    AnimeSourceManagerTab.BROWSE -> null
+                } else null
+                val inspected = selected ?: firstInList
+                val split = wide && inspected != null
+                Column(Modifier.fillMaxWidth()) {
+                    val nested = moreVideoSources || selected != null && !split
+                    Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        if (nested) MotionIconButton(onClick = {
+                            if (split && moreVideoSources) {
+                                selectedId = null
+                                returnSourceId = null
+                                moreVideoSources = false
+                            } else goUp()
+                        }, modifier = Modifier.size(44.dp), tooltip = "返回来源目录") {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                         }
-                        if (paused.isNotEmpty()) {
-                            item(key = "paused-header") { AnimeSectionTitle("当前不参与找源") }
-                            sourceManagerRows(paused, state, ::openSource, fixedBuiltIns.keys)
-                        }
-                        if (available.isNotEmpty()) {
-                            item(key = "available-header") { AnimeSectionTitle("可添加") }
-                            sourceManagerRows(available, state, ::openSource)
-                        }
-                        if (references.isNotEmpty()) {
-                            item(key = "reference-toggle") {
-                                CompactMenuAction(if (referenceExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                                    "待接入 · ${references.size} 个", onClick = { referenceExpanded = !referenceExpanded })
-                            }
-                            if (referenceExpanded) sourceManagerRows(references, state, ::openSource)
-                        }
-                        if (inactive.isEmpty() && references.isEmpty()) item {
-                            AnimeMessage("暂无需要管理的其他来源")
+                        Text(selected?.displayName?.takeUnless { split } ?: if (moreVideoSources) "更多播放来源" else "管理番剧来源",
+                            Modifier.weight(1f).padding(start = if (nested) 0.dp else 8.dp),
+                            style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        MotionIconButton(onClick = ::closeManager, modifier = Modifier.size(44.dp),
+                            tooltip = "关闭来源管理") {
+                            Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                         }
                     }
-                } else {
-                    MotionTabs(tab.ordinal, AnimeSourceManagerTab.entries.map { it.label },
-                        onSelect = { tab = AnimeSourceManagerTab.entries[it] },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), controlHeight = 44.dp,
-                        treatment = MotionTabTreatment.Soft)
-                    when (tab) {
-                        AnimeSourceManagerTab.VIDEO -> {
-                            val active = videoGroups.map { it.primary }.filter { it.active }
-                            val remaining = videoGroups.size - active.size
-                            LazyColumn(Modifier.weight(1f, fill = false), state = videoScroll, contentPadding = PaddingValues(16.dp),
+                    val detail: @Composable ColumnScope.(LanercSourceListing) -> Unit = { source ->
+                        val alternatives = videoGroups.firstOrNull { source in it.sources }?.sources.orEmpty()
+                            .filter { it.id != source.id && it.installable }
+                        key(source.id) {
+                            AnimeSourceManagerDetail(source, alternatives, source.id in fixedBuiltIns, state, controller,
+                                Modifier.weight(1f, fill = false),
+                                onSelectAlternative = { alternative ->
+                                    returnSourceId = if (alternative.id == returnSourceId) null else source.id
+                                    selectedId = alternative.id
+                                },
+                                onRemoved = { selectedId = returnSourceId; returnSourceId = null })
+                        }
+                    }
+                    val directory: @Composable ColumnScope.() -> Unit = {
+                        if (moreVideoSources) {
+                            val inactive = videoGroups.map { it.primary }.filterNot { it.active }
+                            val (automatic, manual) = inactive.partition { it.automaticPreparation && !it.installed &&
+                                state.sourcePreparation[it.id]?.phase != SourcePreparationPhase.DISABLED }
+                            val (paused, available) = manual.partition { it.installed || it.id in BUNDLED_ANIME_SOURCE_IDS ||
+                                state.sourcePreparation[it.id]?.phase == SourcePreparationPhase.DISABLED }
+                            val failed = automatic.any { state.sourcePreparation[it.id]?.retryableFailure == true }
+                            AnimeScrollableList(Modifier.weight(1f, fill = false), state = moreScroll, contentPadding = PaddingValues(16.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                item(key = "active-video-header") {
-                                    AnimeSectionTitle("参与找源 · ${active.size}", subtitle = "启用不代表线路可播放") {
-                                        if (remaining > 0 || references.isNotEmpty()) {
-                                            MotionTextButton(onClick = { moreVideoSources = true }) { Text("管理其他来源") }
+                                if (automatic.isNotEmpty()) {
+                                    item(key = "automatic-header") {
+                                        AnimeSectionTitle("自动准备")
+                                    }
+                                    sourceManagerRows(automatic, state, ::openSource, selectedSourceId = inspected?.id.takeIf { split })
+                                    if (failed) item(key = "automatic-retry") {
+                                        CompactMenuAction(Icons.Outlined.Refresh, "重试可恢复的来源", enabled = state.sourceOperationIds.isEmpty(),
+                                            onClick = controller::retryAutomaticSources)
+                                    }
+                                }
+                                if (paused.isNotEmpty()) {
+                                    item(key = "paused-header") { AnimeSectionTitle("当前不参与找源") }
+                                    sourceManagerRows(paused, state, ::openSource, fixedBuiltIns.keys, inspected?.id.takeIf { split })
+                                }
+                                if (available.isNotEmpty()) {
+                                    item(key = "available-header") { AnimeSectionTitle("可添加") }
+                                    sourceManagerRows(available, state, ::openSource, selectedSourceId = inspected?.id.takeIf { split })
+                                }
+                                if (references.isNotEmpty()) {
+                                    item(key = "reference-toggle") {
+                                        CompactMenuAction(if (referenceExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                            "待接入 · ${references.size} 个", onClick = { referenceExpanded = !referenceExpanded })
+                                    }
+                                    if (referenceExpanded) sourceManagerRows(references, state, ::openSource, selectedSourceId = inspected?.id.takeIf { split })
+                                }
+                                if (inactive.isEmpty() && references.isEmpty()) item {
+                                    AnimeMessage("暂无需要管理的其他来源")
+                                }
+                            }
+                        } else {
+                            MotionTabs(tab.ordinal, AnimeSourceManagerTab.entries.map { it.label },
+                                onSelect = {
+                                    if (tab != AnimeSourceManagerTab.entries[it]) {
+                                        tab = AnimeSourceManagerTab.entries[it]
+                                        selectedId = null
+                                        returnSourceId = null
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), controlHeight = 44.dp,
+                                treatment = MotionTabTreatment.Soft)
+                            when (tab) {
+                                AnimeSourceManagerTab.VIDEO -> {
+                                    val active = videoGroups.map { it.primary }.filter { it.active }
+                                    val remaining = videoGroups.size - active.size
+                                    AnimeScrollableList(Modifier.weight(1f, fill = false), state = videoScroll, contentPadding = PaddingValues(16.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        item(key = "active-video-header") {
+                                            AnimeSectionTitle("参与找源 · ${active.size}", subtitle = "启用不代表线路可播放") {
+                                                if (remaining > 0 || references.isNotEmpty()) {
+                                                    MotionTextButton(onClick = { selectedId = null; returnSourceId = null; moreVideoSources = true }) { Text("管理其他来源") }
+                                                }
+                                            }
+                                        }
+                                        sourceManagerRows(active, state, ::openSource, fixedBuiltIns.keys, inspected?.id.takeIf { split })
+                                        if (active.isEmpty()) item { AnimeMessage("暂无已启用的视频来源") }
+                                    }
+                                }
+                                AnimeSourceManagerTab.BROWSE -> {
+                                    val browse = extensions.filter { it.kind == LanercSourceKind.BROWSE }
+                                    AnimeScrollableList(Modifier.weight(1f, fill = false), state = browseScroll, contentPadding = PaddingValues(16.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        item(key = "builtin-browse-heading") {
+                                            AnimeSectionTitle("作品与播出资料", subtitle = "只提供资料，不提供播放线路")
+                                        }
+                                        items(AnimeDiscoveryProvider.entries, key = { "builtin-browse:" + it.name }) { provider ->
+                                            AnimeSelection(animeDiscoveryProviderLabel(provider),
+                                                when (provider) {
+                                                    AnimeDiscoveryProvider.DOUBAN -> "作品主目录、评分、分类"
+                                                    AnimeDiscoveryProvider.BANGUMI -> "评分、新番、番表"
+                                                    AnimeDiscoveryProvider.ANILIST -> "评分、人气、趋势"
+                                                }, selected = false,
+                                                onClick = { pendingBrowse = provider; onDismiss() })
+                                        }
+                                        if (browse.isNotEmpty()) {
+                                            item(key = "extension-browse-heading") { AnimeSectionTitle("扩展目录") }
+                                            sourceManagerRows(browse, state, ::openSource, selectedSourceId = inspected?.id.takeIf { split })
                                         }
                                     }
                                 }
-                                sourceManagerRows(active, state, ::openSource, fixedBuiltIns.keys)
-                                if (active.isEmpty()) item { AnimeMessage("暂无已启用的视频来源") }
-                            }
-                        }
-                        AnimeSourceManagerTab.BROWSE -> {
-                            val browse = extensions.filter { it.kind == LanercSourceKind.BROWSE }
-                            LazyColumn(Modifier.weight(1f, fill = false), state = browseScroll, contentPadding = PaddingValues(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                item(key = "builtin-browse-heading") {
-                                    AnimeSectionTitle("作品与播出资料", subtitle = "只提供资料，不提供播放线路")
-                                }
-                                items(AnimeDiscoveryProvider.entries, key = { "builtin-browse:" + it.name }) { provider ->
-                                    AnimeSelection(animeDiscoveryProviderLabel(provider),
-                                        when (provider) {
-                                            AnimeDiscoveryProvider.DOUBAN -> "作品主目录、评分、分类"
-                                            AnimeDiscoveryProvider.BANGUMI -> "评分、新番、番表"
-                                            AnimeDiscoveryProvider.ANILIST -> "评分、人气、趋势"
-                                        }, selected = false,
-                                        onClick = { pendingBrowse = provider; onDismiss() })
-                                }
-                                if (browse.isNotEmpty()) {
-                                    item(key = "extension-browse-heading") { AnimeSectionTitle("扩展目录") }
-                                    sourceManagerRows(browse, state, ::openSource)
-                                }
-                            }
-                        }
-                        AnimeSourceManagerTab.DANMAKU -> {
-                            val danmaku = extensions.filter { it.kind == LanercSourceKind.DANMAKU }
-                            LazyColumn(Modifier.weight(1f, fill = false), state = danmakuScroll, contentPadding = PaddingValues(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                item(key = "builtin-danmaku") {
-                                    AnimeSectionTitle("弹弹play 官方服务", subtitle = "在播放时打开弹幕面板，配置应用凭据后搜索剧集")
-                                }
-                                if (danmaku.isNotEmpty()) {
-                                    item(key = "extension-danmaku-heading") { AnimeSectionTitle("脚本扩展") }
-                                    sourceManagerRows(danmaku, state, ::openSource)
+                                AnimeSourceManagerTab.DANMAKU -> {
+                                    val danmaku = extensions.filter { it.kind == LanercSourceKind.DANMAKU }
+                                    AnimeScrollableList(Modifier.weight(1f, fill = false), state = danmakuScroll, contentPadding = PaddingValues(16.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        item(key = "builtin-danmaku") {
+                                            AnimeSectionTitle("弹弹play 官方服务", subtitle = "在播放时打开弹幕面板，配置应用凭据后搜索剧集")
+                                        }
+                                        if (danmaku.isNotEmpty()) {
+                                            item(key = "extension-danmaku-heading") { AnimeSectionTitle("脚本扩展") }
+                                            sourceManagerRows(danmaku, state, ::openSource, selectedSourceId = inspected?.id.takeIf { split })
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                if (state.notice != null && state.notice != selected?.error) {
-                    Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, bottom = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Text(state.notice, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        MotionIconButton(onClick = controller::dismissNotice, modifier = Modifier.size(44.dp),
-                            tooltip = "关闭提示") { Icon(Icons.Outlined.Close, "关闭提示", Modifier.size(18.dp)) }
+                    if (split && inspected != null) {
+                        Row(Modifier.fillMaxWidth().weight(1f, fill = false).height(bodyHeight)
+                            .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Column(Modifier.width(listWidth).fillMaxHeight().clip(RoundedCornerShape(16.dp))
+                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .032f))) { directory() }
+                            Column(Modifier.weight(1f).fillMaxHeight()) {
+                                Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                                    if (returnSourceId != null) MotionIconButton(onClick = ::goUp, modifier = Modifier.size(44.dp),
+                                        tooltip = "返回上一个来源") { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回上一个来源") }
+                                    AnimeSourceMark(inspected.id, inspected.displayName, size = 22.dp)
+                                    Text(inspected.displayName, Modifier.weight(1f).semantics { heading() },
+                                        style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                                detail(inspected)
+                            }
+                        }
+                    } else if (selected != null) detail(selected) else directory()
+                    if (state.notice != null && state.notice != inspected?.error) {
+                        Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Text(state.notice, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            MotionIconButton(onClick = controller::dismissNotice, modifier = Modifier.size(44.dp),
+                                tooltip = "关闭提示") { Icon(Icons.Outlined.Close, "关闭提示", Modifier.size(18.dp)) }
+                        }
                     }
                 }
             }
@@ -250,7 +303,7 @@ private val SourcePreparationState.retryableFailure: Boolean get() = phase == So
 
 private fun LazyListScope.sourceManagerRows(sources: List<LanercSourceListing>, state: AnimeScreenState,
     onSelect: (LanercSourceListing) -> Unit, fixedBuiltInIds: Set<String> = emptySet(),
-    rowTitle: (LanercSourceListing) -> String = { it.displayName }) {
+    selectedSourceId: String? = null, rowTitle: (LanercSourceListing) -> String = { it.displayName }) {
     items(sources, key = { it.id }) { source ->
         val native = source.id in BUNDLED_ANIME_SOURCE_IDS || source.id in fixedBuiltInIds
         val title = rowTitle(source)
@@ -259,6 +312,8 @@ private fun LazyListScope.sourceManagerRows(sources: List<LanercSourceListing>, 
         Row(
             Modifier.fillMaxWidth().heightIn(min = 56.dp)
                 .clip(RoundedCornerShape(12.dp))
+                .background(if (source.id == selectedSourceId) colors.primary.copy(alpha = .10f) else Color.Transparent)
+                .semantics { if (source.id == selectedSourceId) stateDescription = "正在查看" }
                 .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                     onClickLabel = "管理 $title", onClick = { onSelect(source) })
                 .motionPress(interaction, pressedScale = .99f)
@@ -302,7 +357,7 @@ private fun AnimeSourceManagerDetail(
     val home = homeFeeds[source.id]
     val search = state.sourceResults.firstOrNull { it.providerId == source.id }
     val catalogueError = state.sourceCatalogErrors[source.id]
-    LazyColumn(modifier, contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    AnimeScrollableList(modifier, contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             AnimeSectionTitle(animeExtensionKind(source.kind), subtitle = animeSourceManagerLabel(source, state, native))
         }

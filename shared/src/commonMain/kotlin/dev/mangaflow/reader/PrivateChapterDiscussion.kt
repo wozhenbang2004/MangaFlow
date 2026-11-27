@@ -1,6 +1,8 @@
 package dev.mangaflow.reader
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -16,6 +18,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -35,6 +45,10 @@ import dev.mangaflow.storage.PrivateChapterKey
 import dev.mangaflow.storage.PrivateChapterThread
 import dev.mangaflow.storage.PrivateDiscussionSpace
 import dev.mangaflow.storage.WebDavBackupConfig
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.DesktopVerticalScrollbar
+import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.CommunityDiscussionComment
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.QuietLoading
@@ -155,10 +169,12 @@ internal fun PrivateChapterDiscussionButton(backdrop: HazeState, onOpen: () -> U
 }
 
 /** Read witnesses and in-flight drafts are owned by the exact reader chapter, independent of panel visibility. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun PrivateChapterDiscussion(chapterTitle: String, sourceName: String, state: PrivateChapterDiscussionState,
     background: Color, foreground: Color, onClose: () -> Unit) {
-    val muted = foreground.copy(alpha = .62f)
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val muted = foreground.copy(alpha = if (desktop) .74f else .62f)
     val activeSpace = state.space
     var editing by remember(state) { mutableStateOf(false) }
     var room by remember(state, activeSpace) { mutableStateOf(activeSpace?.room.orEmpty()) }
@@ -167,12 +183,14 @@ internal fun PrivateChapterDiscussion(chapterTitle: String, sourceName: String, 
     LaunchedEffect(state) {
         if (state.thread == null) state.refresh()
     }
-    MotionBottomSheet(onDismissRequest = onClose, containerColor = background, contentColor = foreground) { dismiss ->
-        Column(Modifier.fillMaxWidth().fillMaxHeight(.86f).imePadding().padding(horizontal = 16.dp)) {
+    MotionBottomSheet(onDismissRequest = onClose, desktopWidth = 730.dp, containerColor = background, contentColor = foreground) { dismiss ->
+        val window = LocalMangaWindow.current
+        val compactHeight = desktop && window.height < 500.dp * window.fontScale
+        Column(Modifier.fillMaxWidth().fillMaxHeight(.86f).imePadding().padding(horizontal = if (desktop) 22.dp else 16.dp)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("私有讨论", style = MaterialTheme.typography.titleLarge, color = foreground)
-                    Text(listOfNotNull(chapterTitle, sourceName, activeSpace?.room).joinToString(" · "),
+                    Text(listOfNotNull(chapterTitle, sourceName, activeSpace?.room).filter(String::isNotBlank).joinToString(" · "),
                         style = MaterialTheme.typography.labelMedium, color = muted,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
@@ -190,79 +208,134 @@ internal fun PrivateChapterDiscussion(chapterTitle: String, sourceName: String, 
                 }
             }
             if (!state.canConnect || activeSpace == null || editing) {
-                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp),
-                    contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp)) {
-                    if (!state.canConnect) item {
-                        Text("在设置的 WebDAV 阅读备份中保存你有权限使用的 HTTPS 服务器、账号和密码，再连接讨论区。",
-                            style = MaterialTheme.typography.bodySmall, color = muted)
-                    } else {
-                        item {
-                            Text("有目录权限、使用同一讨论区名的成员可以看到消息。显示昵称由各成员填写。",
+                val setup = rememberLazyListState()
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    LazyColumn(Modifier.fillMaxSize(), state = setup, verticalArrangement = Arrangement.spacedBy(10.dp),
+                        contentPadding = PaddingValues(top = 8.dp, end = if (desktop) 12.dp else 0.dp, bottom = 16.dp)) {
+                        if (!state.canConnect) item {
+                            Text("在设置的 WebDAV 阅读备份中保存你有权限使用的 HTTPS 服务器、账号和密码，再连接讨论区。",
                                 style = MaterialTheme.typography.bodySmall, color = muted)
-                            Text(state.config.endpoint + " · " + state.config.remotePath.substringBeforeLast('/', "").ifBlank { "/" },
-                                Modifier.padding(top = 6.dp), style = MaterialTheme.typography.labelSmall, color = muted)
-                        }
-                        item { SourceAccountField("讨论区名", room, !state.busy, secret = false) { room = it.take(64) } }
-                        item { SourceAccountField("昵称", nickname, !state.busy, secret = false) { nickname = it.take(32) } }
-                        item {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                if (activeSpace != null) MotionTextButton(onClick = { editing = false }, enabled = !state.busy) { Text("返回") }
-                                if (activeSpace != null) MotionTextButton(onClick = { state.leaveSpace(); editing = false }, enabled = !state.busy) {
-                                    Text("断开")
+                        } else {
+                            item {
+                                Text("有目录权限、使用同一讨论区名的成员可以看到消息。显示昵称由各成员填写。",
+                                    style = MaterialTheme.typography.bodySmall, color = muted)
+                                Text(state.config.endpoint + " · " + state.config.remotePath.substringBeforeLast('/', "").ifBlank { "/" },
+                                    Modifier.padding(top = 6.dp), style = MaterialTheme.typography.labelSmall, color = muted)
+                            }
+                            item { SourceAccountField("讨论区名", room, !state.busy, secret = false) { room = it.take(64) } }
+                            item { SourceAccountField("昵称", nickname, !state.busy, secret = false) { nickname = it.take(32) } }
+                            item {
+                                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                                    if (activeSpace != null) MotionTextButton(onClick = { editing = false }, enabled = !state.busy) { Text("返回") }
+                                    if (activeSpace != null) MotionTextButton(onClick = { state.leaveSpace(); editing = false }, enabled = !state.busy) {
+                                        Text("断开")
+                                    }
+                                    MotionButton(onClick = { state.selectSpace(room, nickname) { editing = false } },
+                                        enabled = !state.busy && room.isNotBlank() && nickname.isNotBlank()) { Text("连接讨论区") }
                                 }
-                                Spacer(Modifier.weight(1f))
-                                MotionButton(onClick = { state.selectSpace(room, nickname) { editing = false } },
-                                    enabled = !state.busy && room.isNotBlank() && nickname.isNotBlank()) { Text("连接讨论区") }
                             }
                         }
+                        state.error?.let { issue -> item { Text(issue, style = MaterialTheme.typography.bodySmall, color = muted) } }
+                        if (state.busy) item { QuietLoading("正在读取本话讨论…") }
                     }
-                    state.error?.let { issue -> item { Text(issue, style = MaterialTheme.typography.bodySmall, color = muted) } }
-                    if (state.busy) item { QuietLoading("正在读取本话讨论…") }
+                    if (desktop) DesktopVerticalScrollbar(setup, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                 }
             } else {
                 val thread = state.thread
                 val rows = thread?.rows.orEmpty()
                 val replies = remember(rows) { rows.filter { it.parentId != null }.groupBy { it.parentId } }
-                LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = position,
-                    contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp)) {
-                    if (thread == null && state.busy) item("loading") { QuietLoading("正在读取本话讨论…") }
-                    if (thread != null && rows.isEmpty()) item("empty") {
-                        Text("暂未读到本话消息。", Modifier.padding(vertical = 14.dp),
-                            style = MaterialTheme.typography.bodySmall, color = muted)
-                    }
-                    items(rows.filter { it.parentId == null }.asReversed(), key = { it.id }) { row ->
-                        val children = replies[row.id].orEmpty()
-                        key(children) {
-                            CommunityDiscussionComment(state.subject, row.toReview(children.size),
-                                loadReplies = { source, review, page ->
-                                    ReviewPage(if (source.subjectId == state.subject.subjectId && page == 0 && review.id == row.id)
-                                        children.map { it.toReview() } else emptyList())
-                                }, foreground = foreground, muted = muted)
+                val roots = remember(rows) { rows.filter { it.parentId == null }.asReversed() }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    LazyColumn(Modifier.fillMaxSize(), state = position,
+                        contentPadding = PaddingValues(top = 4.dp, end = if (desktop) 12.dp else 0.dp, bottom = 12.dp)) {
+                        if (thread == null && state.busy) item("loading") { QuietLoading("正在读取本话讨论…") }
+                        if (thread != null && rows.isEmpty()) item("empty") {
+                            Text("暂未读到本话消息。", Modifier.padding(vertical = 14.dp),
+                                style = MaterialTheme.typography.bodySmall, color = muted)
                         }
-                        if (thread?.canPost == true) MotionTextButton(onClick = {
-                            state.parent = row
-                            state.composing = true
-                        }, modifier = Modifier.padding(start = 36.dp), enabled = !state.busy) { Text("回复") }
+                        items(roots, key = { it.id }) { row ->
+                            val children = replies[row.id].orEmpty()
+                            key(children) {
+                                CommunityDiscussionComment(state.subject, row.toReview(children.size),
+                                    loadReplies = { source, review, page ->
+                                        ReviewPage(if (source.subjectId == state.subject.subjectId && page == 0 && review.id == row.id)
+                                            children.map { it.toReview() } else emptyList())
+                                    }, foreground = foreground, muted = muted, comfortable = desktop)
+                            }
+                            if (thread?.canPost == true) MotionTextButton(onClick = {
+                                state.parent = row
+                                state.composing = true
+                            }, modifier = Modifier.padding(start = 36.dp), enabled = !state.busy) { Text("回复") }
+                        }
+                        if (compactHeight) item("editor") { DiscussionEditor(state, muted, foreground) }
+                    }
+                    if (desktop) DesktopVerticalScrollbar(position, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                }
+                LaunchedEffect(compactHeight, state.composing) {
+                    if (compactHeight && state.composing) {
+                        val notice = thread == null && state.busy || thread != null && rows.isEmpty()
+                        position.scrollToItem(roots.size + if (notice) 1 else 0)
                     }
                 }
-                state.error?.let { issue -> Text(issue, Modifier.padding(vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = muted) }
-                if (thread?.canPost == false) Text("本话暂为只读。服务器需提供可核对的记录版本，且讨论需有剩余容量。",
-                    Modifier.padding(bottom = 6.dp), style = MaterialTheme.typography.bodySmall, color = muted)
-                if (state.composing) {
-                    val label = state.parent?.let { "回复 ${it.nickname}" } ?: "本话评论"
-                    SourceAccountField(label, state.draft, !state.busy, secret = false, singleLine = false) {
-                        state.draft = it.take(PrivateChapterDiscussionStore.MAX_TEXT)
-                    }
-                    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.End) {
-                        MotionTextButton(onClick = { state.composing = false }, enabled = !state.busy) { Text("收起") }
-                        MotionButton(onClick = state::send, enabled = thread?.canPost == true && !state.busy && state.draft.isNotBlank()) {
-                            Text(if (state.busy) "正在处理…" else "发送")
-                        }
-                    }
-                } else if (thread?.canPost == true) {
-                    MotionTextButton(onClick = { state.composing = true }, enabled = !state.busy,
-                        modifier = Modifier.align(Alignment.End).padding(bottom = 4.dp)) { Text(if (state.draft.isNotBlank()) "继续编辑" else "写评论") }
+                if (!compactHeight) DiscussionEditor(state, muted, foreground)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DiscussionEditor(state: PrivateChapterDiscussionState, muted: Color, foreground: Color) {
+    val thread = state.thread
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val canSend = thread?.canPost == true && !state.busy && state.draft.isNotBlank()
+    Column(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        state.error?.let { issue ->
+            Text(issue, style = MaterialTheme.typography.bodySmall, color = muted)
+        }
+        if (thread?.canPost == false) Text("本话暂为只读。服务器需提供可核对的记录版本，且讨论需有剩余容量。",
+            style = MaterialTheme.typography.bodySmall, color = muted)
+        if (state.composing) {
+            val target = state.parent
+            val requester = remember { FocusRequester() }
+            if (desktop && target != null) Row(Modifier.fillMaxWidth()
+                .background(foreground.copy(alpha = .05f), RoundedCornerShape(10.dp)).padding(start = 10.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
+                    Text("回复 ${target.nickname}", style = MaterialTheme.typography.labelMedium, color = foreground)
+                    Text(target.text, style = MaterialTheme.typography.bodySmall, color = muted,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
+                MotionIconButton(onClick = { state.parent = null }, enabled = !state.busy, modifier = Modifier.size(32.dp),
+                    tooltip = "改为本话评论") { Icon(Icons.Outlined.Close, "取消回复对象", Modifier.size(16.dp), tint = muted) }
+            }
+            val field = Modifier.fillMaxWidth().focusRequester(requester).onPreviewKeyEvent { event ->
+                if (desktop && canSend && event.key == Key.Enter && event.isCtrlPressed && event.type == KeyEventType.KeyDown) {
+                    state.send()
+                    true
+                } else false
+            }
+            Box(field) {
+                SourceAccountField(if (target == null) "本话评论" else "回复 ${target.nickname}", state.draft,
+                    !state.busy, secret = false, singleLine = false) { state.draft = it.take(PrivateChapterDiscussionStore.MAX_TEXT) }
+            }
+            LaunchedEffect(target?.id) { if (desktop && !state.busy) requester.requestFocus() }
+            if (desktop) FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("${state.draft.length} / ${PrivateChapterDiscussionStore.MAX_TEXT} 字",
+                    style = MaterialTheme.typography.labelSmall, color = muted)
+                Text("Ctrl+Enter 发送", style = MaterialTheme.typography.labelSmall, color = muted)
+            }
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End)) {
+                MotionTextButton(onClick = {
+                    if (state.draft.isBlank()) state.parent = null
+                    state.composing = false
+                }, enabled = !state.busy) { Text("收起") }
+                MotionButton(onClick = state::send, enabled = canSend) { Text(if (state.busy) "正在处理…" else "发送") }
+            }
+        } else if (thread?.canPost == true) {
+            MotionTextButton(onClick = { state.composing = true }, enabled = !state.busy,
+                modifier = Modifier.align(Alignment.End)) {
+                Text(if (state.draft.isNotBlank()) state.parent?.let { "继续回复 ${it.nickname}" } ?: "继续编辑" else "写评论")
             }
         }
     }

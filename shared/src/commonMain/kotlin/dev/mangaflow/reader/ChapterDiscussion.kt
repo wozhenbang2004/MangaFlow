@@ -1,6 +1,8 @@
 package dev.mangaflow.reader
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -42,6 +44,9 @@ import dev.mangaflow.data.Manga
 import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.data.ReviewRepository
 import dev.mangaflow.ui.CommunityDiscussionComment
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.DesktopVerticalScrollbar
 import dev.mangaflow.ui.CommentSourceBadge
 import dev.mangaflow.ui.mangaNumberText
 import dev.mangaflow.ui.motion.MotionBottomSheet
@@ -77,7 +82,8 @@ internal fun ChapterDiscussion(
     LaunchedEffect(state) { state.ensureLoaded() }
     val mixed = remember(state.sources, chapter.id) { mixedDiscussionRows(state.sources, chapter.id) }
     val chapterCount = state.totalCount
-    val muted = foreground.copy(alpha = .58f)
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val muted = foreground.copy(alpha = if (desktop) .74f else .58f)
     val busy = state.refreshing || state.paging
     val delayedBusy = rememberDelayedBusy(busy)
     val notices = state.sources.filter { it.loaded && !it.busy &&
@@ -94,42 +100,46 @@ internal fun ChapterDiscussion(
         if (nearEnd && !busy) state.loadNext()
     }
 
-    MotionBottomSheet(onDismissRequest = onClose,
+    MotionBottomSheet(onDismissRequest = onClose, desktopWidth = 732.dp,
         containerColor = background, contentColor = foreground) { dismiss ->
         Column(Modifier.fillMaxWidth().fillMaxHeight(.9f).navigationBarsPadding()) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                DiscussionHeading(chapterCount, mixed.size, busy, foreground,
+                DiscussionHeading(chapter.title, chapterCount, mixed.size, busy, foreground,
                     modifier = Modifier.weight(1f), onRefresh = {
                         state.refresh(forceRefresh = true)
                         scope.launch { listState.scrollToItem(0) }
                     })
-                MotionIconButton(onClick = dismiss) {
+                MotionIconButton(onClick = dismiss, tooltip = "关闭评论") {
                     Icon(Icons.Outlined.Close, "关闭评论", tint = muted, modifier = Modifier.size(20.dp))
                 }
             }
-            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp)) {
-                items(mixed, key = ReaderDiscussionRow::key) { row ->
-                    CommunityDiscussionComment(row.source.source, row.review, state::replies,
-                        foreground = foreground, muted = muted)
-                    HorizontalDivider(Modifier.padding(start = 38.dp), color = foreground.copy(alpha = .065f), thickness = .5.dp)
-                }
-                items(notices, key = { "notice:${it.key}" }) { source ->
-                    DiscussionNotice(source, foreground, busy) { state.retry(source.key) }
-                }
-                item("discussion-footer") {
-                    when {
-                        delayedBusy -> DiscussionLoading(muted)
-                        busy -> Spacer(Modifier.height(40.dp))
-                        state.hasMore -> TextButton(onClick = state::loadNext, modifier = Modifier.fillMaxWidth()) {
-                            Text("加载更多", color = foreground, fontSize = 12.sp)
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = if (desktop) 22.dp else 16.dp, end = if (desktop) 26.dp else 16.dp,
+                        top = if (desktop) 6.dp else 0.dp, bottom = 8.dp)) {
+                    items(mixed, key = ReaderDiscussionRow::key) { row ->
+                        CommunityDiscussionComment(row.source.source, row.review, state::replies,
+                            foreground = foreground, muted = muted, comfortable = desktop)
+                        HorizontalDivider(Modifier.padding(start = 38.dp), color = foreground.copy(alpha = .065f), thickness = .5.dp)
+                    }
+                    items(notices, key = { "notice:${it.key}" }) { source ->
+                        DiscussionNotice(source, foreground, busy) { state.retry(source.key) }
+                    }
+                    item("discussion-footer") {
+                        when {
+                            delayedBusy -> DiscussionLoading(muted)
+                            busy -> Spacer(Modifier.height(40.dp))
+                            state.hasMore -> TextButton(onClick = state::loadNext, modifier = Modifier.fillMaxWidth()) {
+                                Text("加载更多", color = foreground, fontSize = 12.sp)
+                            }
+                            mixed.isEmpty() && notices.isEmpty() -> Text("还没有评论", color = muted,
+                                fontSize = 12.sp, modifier = Modifier.padding(vertical = 18.dp))
+                            mixed.isNotEmpty() -> Spacer(Modifier.height(12.dp))
                         }
-                        mixed.isEmpty() && notices.isEmpty() -> Text("还没有评论", color = muted,
-                            fontSize = 12.sp, modifier = Modifier.padding(vertical = 18.dp))
-                        mixed.isNotEmpty() -> Spacer(Modifier.height(12.dp))
                     }
                 }
+                if (desktop) DesktopVerticalScrollbar(listState, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
             }
         }
     }
@@ -137,6 +147,7 @@ internal fun ChapterDiscussion(
 
 @Composable
 private fun DiscussionHeading(
+    chapterTitle: String,
     chapterCount: Int?,
     loadedCount: Int,
     busy: Boolean,
@@ -144,17 +155,19 @@ private fun DiscussionHeading(
     modifier: Modifier = Modifier,
     onRefresh: () -> Unit,
 ) {
-    val muted = foreground.copy(alpha = .58f)
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val muted = foreground.copy(alpha = if (desktop) .74f else .58f)
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        val count = chapterCount?.let { "$it 条评论" } ?: "已加载 $loadedCount 条".takeIf { loadedCount > 0 }.orEmpty()
+        Column(Modifier.weight(1f).padding(vertical = if (desktop) 8.dp else 2.dp)) {
             Text("评论", color = foreground, style = MaterialTheme.typography.titleLarge)
-            val count = chapterCount?.toString() ?: "已加载 $loadedCount".takeIf { loadedCount > 0 }.orEmpty()
-            if (count.isNotEmpty()) Text(mangaNumberText(count), color = muted, style = MaterialTheme.typography.labelMedium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val info = listOf(chapterTitle.takeIf { desktop }.orEmpty(), count)
+                .filter(String::isNotBlank).joinToString(" · ")
+            if (info.isNotEmpty()) Text(mangaNumberText(info), color = muted, style = MaterialTheme.typography.labelMedium,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
-        MotionIconButton(onClick = onRefresh, enabled = !busy) {
-            Icon(Icons.Outlined.Refresh, "刷新最新评论", tint = muted.copy(alpha = if (busy) .28f else .58f),
+        MotionIconButton(onClick = onRefresh, enabled = !busy, tooltip = "刷新最新评论") {
+            Icon(Icons.Outlined.Refresh, "刷新最新评论", tint = if (busy) foreground.copy(alpha = .38f) else muted,
                 modifier = Modifier.size(18.dp))
         }
     }

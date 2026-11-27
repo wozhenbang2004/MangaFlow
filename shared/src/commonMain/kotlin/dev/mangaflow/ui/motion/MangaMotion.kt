@@ -279,12 +279,14 @@ private fun Modifier.motionPressFeedback(
     val desktopFeedback = if (desktop) Modifier.drawBehind {
         if (!enabled) return@drawBehind
         val hover = hoverAmount?.value ?: 0f
+        val steadyPress = !motion && pressed
         if (desktopIcon != null) {
             val contrast = iconAccessibility?.increaseContrast == true
             val focusVisible = focused && (contrast || iconAccessibility?.touchExploration == true || !desktopIcon.pointerFocus)
             val hoverRadius = minOf(14.dp.toPx(), size.minDimension / 2f)
-            if (hover > 0f && hoverRadius > 0f) {
-                drawCircle(feedbackColor.copy(alpha = hover * if (contrast) .14f else .055f), radius = hoverRadius)
+            if ((hover > 0f || steadyPress) && hoverRadius > 0f) {
+                val ink = if (steadyPress) if (contrast) .23f else .14f else hover * if (contrast) .14f else .055f
+                drawCircle(feedbackColor.copy(alpha = ink), radius = hoverRadius)
             }
             if (focusVisible) {
                 val inset = (if (contrast) 2.dp else 1.dp).toPx()
@@ -295,11 +297,18 @@ private fun Modifier.motionPressFeedback(
                     style = Stroke(inset))
             }
         } else {
+            val contrast = accessibility?.increaseContrast == true
             val radius = CornerRadius(minOf(12.dp.toPx(), size.minDimension / 2f))
-            if (hover > 0f || focused) drawRoundRect(
-                feedbackColor.copy(alpha = if (focused) .075f else .045f * hover), cornerRadius = radius)
-            if (focused) drawRoundRect(feedbackColor.copy(alpha = .36f),
-                cornerRadius = radius, style = Stroke(1.25.dp.toPx()))
+            val ink = when {
+                steadyPress -> if (contrast) .22f else .14f
+                focused -> if (contrast) .13f else .075f
+                else -> hover * if (contrast) .09f else .045f
+            }
+            if (ink > 0f) drawRoundRect(feedbackColor.copy(alpha = ink), cornerRadius = radius)
+            val stroke = (if (contrast) 2.dp else 1.25.dp).toPx()
+            if (focused && size.minDimension > stroke) drawRoundRect(
+                feedbackColor.copy(alpha = if (contrast) 1f else .44f), topLeft = Offset(stroke / 2, stroke / 2),
+                size = Size(size.width - stroke, size.height - stroke), cornerRadius = radius, style = Stroke(stroke))
         }
     } else Modifier
     val iconContact = if (icon && !desktop && motion) Modifier.drawBehind {
@@ -321,7 +330,7 @@ private fun Modifier.motionPressFeedback(
         transformOrigin = contact
         scaleX = scale
         scaleY = scale
-        alpha = if (!motion && pressed) .72f else 1f
+        alpha = if (!desktop && !motion && pressed) .72f else 1f
     }.then(iconContact)
 }
 

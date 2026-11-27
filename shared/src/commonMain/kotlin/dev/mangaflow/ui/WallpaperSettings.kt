@@ -54,12 +54,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -104,6 +109,9 @@ internal fun WallpaperSettings(
     val feedback = rememberFeelFeedback()
     val colors = MaterialTheme.colorScheme
     val motion = LocalMotionEnabled.current
+    val desktop = platformKind == PlatformKind.DESKTOP
+    var showOriginal by rememberSaveable(selected.mediaPath) { mutableStateOf(false) }
+    var importMenu by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     var controlsExpanded by remember { mutableStateOf(false) }
@@ -146,6 +154,7 @@ internal fun WallpaperSettings(
     }
     fun adjust(transform: (WallpaperAdjustment) -> WallpaperAdjustment) {
         val path = editingPath ?: selected.mediaPath ?: return
+        showOriginal = false
         if (editingPath == null) { editingPath = path; store.setEditing(editOwner, true) }
         try { store.updateAdjustment(path, persist = false, transform = transform) }
         catch (failure: Exception) { notice = failure.message ?: "调节未能应用，请重试。" }
@@ -164,13 +173,25 @@ internal fun WallpaperSettings(
             }
         }
     }
-    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val addLocal = { finishAdjustment(); picker.launch(arrayOf("image/*", "video/*")) }
+    val addFromPc = { finishAdjustment(); pcVisible = true }
+    val addFromSteam = { finishAdjustment(); steamVisible = true }
+    PreferenceWorkspace(modifier, preview = {
+      Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         val preview = if (selected.kind == WallpaperKind.VIDEO) selected.posterPath else selected.mediaPath
+        if (desktop && current != null) MotionTabs(selected = if (showOriginal) 1 else 0,
+            labels = listOf("应用效果", if (selected.kind == WallpaperKind.VIDEO) "原始封面" else "原图"),
+            onSelect = { showOriginal = it == 1 }, modifier = Modifier.fillMaxWidth(),
+            treatment = MotionTabTreatment.Underline, controlHeight = 38.dp)
         BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val previewHeight = if (current == null) 96.dp else (maxWidth / 2.4f).coerceIn(100.dp, 184.dp)
+            val previewHeight = when {
+                desktop -> (maxWidth * 9f / 16f).coerceIn(118.dp, 270.dp)
+                current == null -> 96.dp
+                else -> (maxWidth / 2.4f).coerceIn(100.dp, 184.dp)
+            }
             val previewModifier = Modifier.fillMaxWidth().height(previewHeight).clip(RoundedCornerShape(16.dp))
-                .background(colors.onSurface.copy(alpha = .045f))
-            Box(if (current == null) previewModifier
+                .background(if (desktop && current != null) colors.background else colors.onSurface.copy(alpha = .045f))
+            Box(if (current == null && !desktop) previewModifier
                 .clickable(enabled = !importing, interactionSource = emptyInteraction, indication = null,
                     role = Role.Button, onClickLabel = "添加壁纸") {
                     picker.launch(arrayOf("image/*", "video/*"))
@@ -181,8 +202,17 @@ internal fun WallpaperSettings(
                     Column(horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Icon(Icons.Outlined.AddPhotoAlternate, null, Modifier.size(28.dp), tint = colors.onSurfaceVariant)
-                        Text("添加壁纸", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                        Text(if (desktop) "当前使用默认背景" else "添加壁纸", style = MaterialTheme.typography.bodyMedium,
+                            color = colors.onSurfaceVariant)
                     }
+                } else if (desktop && preview.isNullOrBlank()) {
+                    Icon(Icons.Outlined.VideoFile, null, Modifier.align(Alignment.Center).size(28.dp),
+                        tint = colors.onSurfaceVariant)
+                    Text("暂无视频封面", Modifier.align(Alignment.BottomCenter).padding(8.dp),
+                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                } else if (desktop && showOriginal) {
+                    AsyncImage(model = preview, contentDescription = current.name, contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize())
                 } else {
                     WallpaperPreview(preview, selected.kind, selected.adjustment, Modifier.fillMaxSize())
                     if (selected.kind == WallpaperKind.VIDEO) Icon(Icons.Outlined.VideoFile, "视频壁纸",
@@ -192,28 +222,41 @@ internal fun WallpaperSettings(
                 }
             }
         }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        if (!desktop || current != null || importing) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(if (importing) "正在添加…" else current?.name ?: "图片 · 静音视频",
                     style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (selected.items.isNotEmpty()) Text("${selected.items.size} 张",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
-            MotionIconButton(onClick = { finishAdjustment(); steamVisible = true }, enabled = !importing,
+            if (desktop && current != null) Box {
+                MotionTextButton(onClick = { importMenu = true }, enabled = !importing) {
+                    Icon(Icons.Outlined.AddPhotoAlternate, null, Modifier.size(17.dp))
+                    Text("添加", Modifier.padding(start = 5.dp))
+                }
+                DesktopActionPopup(importMenu, listOf(
+                    DesktopMenuAction("本地图片或视频", icon = Icons.Outlined.AddPhotoAlternate, onClick = addLocal),
+                    DesktopMenuAction("Steam 创意工坊", icon = Icons.Outlined.Storefront, onClick = addFromSteam),
+                    DesktopMenuAction("连接电脑", icon = Icons.Outlined.Computer, onClick = addFromPc)
+                ), onDismiss = { importMenu = false })
+            }
+            if (!desktop) {
+            MotionIconButton(onClick = addFromSteam, enabled = !importing,
                 modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.Storefront, "Steam 创意工坊", Modifier.size(21.dp), tint = colors.onSurfaceVariant)
             }
-            MotionIconButton(onClick = { finishAdjustment(); pcVisible = true }, enabled = !importing,
+            MotionIconButton(onClick = addFromPc, enabled = !importing,
                 modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.Computer, "连接电脑", Modifier.size(21.dp), tint = colors.onSurfaceVariant)
             }
-            MotionIconButton(onClick = { finishAdjustment(); picker.launch(arrayOf("image/*", "video/*")) }, enabled = !importing,
+            MotionIconButton(onClick = addLocal, enabled = !importing,
                 modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.AddPhotoAlternate, "添加图片或视频", Modifier.size(21.dp), tint = colors.onSurfaceVariant)
             }
+            }
             if (importing) Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
                 MotionBusyIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp)
-            } else MotionIconButton(onClick = { finishAdjustment(); controlsExpanded = !controlsExpanded },
+            } else if (!desktop) MotionIconButton(onClick = { finishAdjustment(); controlsExpanded = !controlsExpanded },
                 enabled = current != null, modifier = Modifier.size(44.dp)
                     .semantics { stateDescription = if (controlsExpanded) "已展开" else "已收起" }) {
                 Icon(Icons.Outlined.Tune, "壁纸设置", Modifier.size(21.dp),
@@ -246,14 +289,25 @@ internal fun WallpaperSettings(
                 }
             }
         }
-        AnimatedVisibility(visible = controlsExpanded && current != null,
+      }
+    }, controls = {
+      Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (desktop && current == null) {
+            SettingsLinkRow("本地文件", "选择图片或静音视频", Icons.Outlined.AddPhotoAlternate,
+                compact = true, enabled = !importing, onClick = addLocal)
+            SettingsLinkRow("Steam 创意工坊", "浏览、收藏与订阅", Icons.Outlined.Storefront,
+                compact = true, enabled = !importing, onClick = addFromSteam)
+            SettingsLinkRow("连接电脑", "从 Wallpaper Engine 接收", Icons.Outlined.Computer,
+                compact = true, enabled = !importing, onClick = addFromPc)
+        }
+        AnimatedVisibility(visible = (desktop || controlsExpanded) && current != null,
             enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) +
                 expandVertically(tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
                     expandFrom = Alignment.Top),
             exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
                 shrinkVertically(tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.ExitEasing),
                     shrinkTowards = Alignment.Top)) {
-            Column(Modifier.fillMaxWidth().motionInputGate(controlsExpanded && !importing),
+            Column(Modifier.fillMaxWidth().motionInputGate((desktop || controlsExpanded) && current != null && !importing),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     MotionTabs(selected = adjustmentTab, labels = listOf("外观", "摆放", "轮换"),
@@ -263,6 +317,7 @@ internal fun WallpaperSettings(
                         track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
                     MotionIconButton(enabled = !importing && current != null, onClick = {
                         finishAdjustment()
+                        showOriginal = false
                         selected.mediaPath?.let { path -> change(FeelEvent.Confirm) { store.resetAdjustment(path) } }
                     }, modifier = Modifier.size(44.dp)) {
                         Icon(Icons.Outlined.Restore, "还原当前壁纸调节", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
@@ -300,6 +355,7 @@ internal fun WallpaperSettings(
                             1 -> if (selected.kind == WallpaperKind.IMAGE) {
                                 MotionTabs(selected = if (adjustment.fit == WallpaperFit.FILL) 0 else 1,
                                     labels = listOf("填充", "完整"), onSelect = { index ->
+                                        showOriginal = false
                                         selected.mediaPath?.let { path -> change(null) {
                                             store.updateAdjustment(path) { it.copy(fit = if (index == 0) WallpaperFit.FILL else WallpaperFit.FIT) }
                                         } }
@@ -368,10 +424,12 @@ internal fun WallpaperSettings(
         }
         val problem = notice ?: selected.error
         if (problem != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(problem, style = MaterialTheme.typography.bodySmall, color = colors.error, modifier = Modifier.weight(1f))
+            Text(problem, style = MaterialTheme.typography.bodySmall, color = colors.error,
+                modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite })
             if (selected.error != null && !importing) MotionTextButton(onClick = { store.retry(); notice = null }) { Text("重试") }
         }
-    }
+      }
+    })
     WallpaperPcSheet(onDismiss = { pcVisible = false }, visible = pcVisible, backdrop = backdrop)
     SteamWallpaperSheet(onDismiss = { steamVisible = false }, visible = steamVisible, backdrop = backdrop)
     MotionDialog(visible = removalVisible,

@@ -220,7 +220,7 @@ internal fun ChapterSourcePicker(
     val variants = remember(key, shown.id, shown.variants) {
         shown.variants.sortedBy { if (it.storageId == shown.id) 0 else 1 }.distinctBy { it.storageId }
     }
-    ChapterSourceOrbit("read:$key", anchor, backdrop, variants.size, onDismiss,
+    ChapterSourceOrbit("read:$key", "阅读来源", shown.title, anchor, backdrop, variants.size, onDismiss,
         closeRequested = closeRequested || invalid, onCancel = onCancelSelection,
         onPresenceChange = onPresenceChange, onClosingChange = { closing = it },
         hasStatus = loading && requestedVariant == null || !error.isNullOrBlank() || variants.isEmpty() || inspected != null,
@@ -261,7 +261,7 @@ internal fun ChapterSourcePicker(
             details = details, secondary = secondary,
             entry = entry, resolution = resolution, resolutionActionEnabled = false,
             revealProgress = reveal,
-            actionLabel = if (selected) "重新加载当前来源此页" else "使用${variant.sourceName}阅读本章",
+            actionLabel = if (selected) "使用当前来源阅读本章" else "使用${variant.sourceName}阅读本章",
             onInspect = { inspected = listOf(variant.sourceName, secondary, details)
                 .filter(String::isNotBlank).distinct().joinToString(" · ") },
             onClick = {

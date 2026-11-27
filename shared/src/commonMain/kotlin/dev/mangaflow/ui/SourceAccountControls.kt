@@ -7,6 +7,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
@@ -38,6 +39,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.sources.BodySourceInfo
@@ -240,7 +243,7 @@ internal fun SourceAccountControls(
         }
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().accountReviewRow(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("账号", style = MaterialTheme.typography.titleSmall)
                 Text(when {
@@ -317,7 +320,7 @@ internal fun SourceAccountControls(
         }
         message?.let { Text(it, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, fontSize = 12.sp,
             color = if (messageIsSuccess) colors.onSurfaceVariant else colors.error) }
-        AnimatedVisibility(expanded && !account.signedIn) {
+        AccountFormReveal(expanded && !account.signedIn) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 val registerMode = panel == SourceAccountPanel.REGISTER
                 if (!registerMode && capabilities.passwordLogin && capabilities.cookieFields.isNotEmpty()) {
@@ -439,19 +442,32 @@ internal fun SourceAccountControls(
                         Text(if (running) "验证中…" else "验证并保存", fontSize = 12.sp)
                     }
                 } else if (capabilities.passwordLogin) {
+                    val canSubmit = enabled && !running && username.isNotBlank() && password.isNotBlank()
+                    val submit: () -> Unit = {
+                        if (canSubmit) {
+                            val user = username
+                            val secret = password
+                            clearInput()
+                            operate { repository.sourceLogin(source.id, user, secret) }
+                        }
+                    }
                     SourceAccountField("账号", username, enabled && !running, false) { if (it.length <= 160) username = it }
-                    SourceAccountField("密码", password, enabled && !running, true) { if (it.length <= 512) password = it }
+                    SourceAccountField("密码", password, enabled && !running, true,
+                        onSubmit = if (platformKind == PlatformKind.DESKTOP) submit else null) { if (it.length <= 512) password = it }
                     Text("密码只用于本次提交，不保存密码。", fontSize = 11.sp, color = colors.onSurfaceVariant)
-                    MotionButton(onClick = {
-                        val user = username; val secret = password; clearInput()
-                        operate { repository.sourceLogin(source.id, user, secret) }
-                    }, enabled = enabled && !running && username.isNotBlank() && password.isNotBlank()) {
+                    MotionButton(onClick = submit, enabled = canSubmit) {
                         Text(if (running) "登录中…" else "登录", fontSize = 12.sp)
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun AccountFormReveal(visible: Boolean, content: @Composable () -> Unit) {
+    if (platformKind == PlatformKind.DESKTOP) CopyShelfReveal(visible, content = content)
+    else AnimatedVisibility(visible) { content() }
 }
 
 @Composable
@@ -470,7 +486,7 @@ private fun SourceAccountChoice(label: String, chosen: Boolean, enabled: Boolean
 internal fun SourceAccountField(
     label: String, value: String, enabled: Boolean, secret: Boolean,
     singleLine: Boolean = true,
-    modifier: Modifier = Modifier, onChange: (String) -> Unit,
+    modifier: Modifier = Modifier, onSubmit: (() -> Unit)? = null, onChange: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     var focused by remember { mutableStateOf(false) }
@@ -481,7 +497,8 @@ internal fun SourceAccountField(
         maxLines = if (singleLine) 1 else 6, enabled = enabled,
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text,
-            imeAction = if (singleLine) ImeAction.Next else ImeAction.Default),
+            imeAction = if (onSubmit != null) ImeAction.Done else if (singleLine) ImeAction.Next else ImeAction.Default),
+        keyboardActions = KeyboardActions(onDone = { if (enabled) onSubmit?.invoke() }),
         cursorBrush = SolidColor(colors.primary), textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
         decorationBox = { inner -> Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(label, style = MaterialTheme.typography.labelMedium, color = if (focused) colors.primary else colors.onSurfaceVariant)

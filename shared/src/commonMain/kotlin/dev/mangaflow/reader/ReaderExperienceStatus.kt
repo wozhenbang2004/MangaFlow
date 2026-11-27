@@ -1,5 +1,6 @@
 package dev.mangaflow.reader
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -60,6 +61,7 @@ import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.BodySourceMark
+import dev.mangaflow.ui.DesktopVerticalScrollbar
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.ExperienceSettingsDialog
 import dev.mangaflow.ui.LocalMangaWindow
@@ -127,6 +129,8 @@ internal fun ReaderExperienceStatus(
     val shown = visible && placement != ReaderStatusPlacement.HIDDEN
     var section by remember(sessionKey) { mutableStateOf(ReaderStatusSection.PREPARATION) }
     var parent by remember(sessionKey) { mutableStateOf(ReaderStatusSection.PREPARATION) }
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val scrolls = remember(sessionKey) { mutableMapOf<ReaderStatusSection, ScrollState>() }
     val expandedWorks = remember(sessionKey) { mutableStateMapOf<ReaderStatusSection, ReaderWork?>() }
     var cacheView by remember(sessionKey) { mutableStateOf<ReaderWork?>(null) }
     var popoverPresent by remember { mutableStateOf(false) }
@@ -300,9 +304,12 @@ internal fun ReaderExperienceStatus(
                         val bodyEnabled = panelOpen && section == shownSection
                         val expandedWork = expandedWorks[shownSection]
                         fun toggle(work: ReaderWork) { if (bodyEnabled) expandedWorks[shownSection] = if (expandedWork == work) null else work }
-                        val bodyPosition = rememberScrollState()
+                        val bodyPosition = if (desktop) remember(shownSection) { scrolls.getOrPut(shownSection) { ScrollState(0) } }
+                            else rememberScrollState()
+                        Box(Modifier.fillMaxWidth()) {
                         Column(Modifier.fillMaxWidth().verticalScroll(bodyPosition, enabled = bodyEnabled)
-                            .padding(horizontal = 4.dp, vertical = 5.dp).motionInputGate(bodyEnabled)) {
+                            .padding(start = 4.dp, end = if (desktop) 10.dp else 4.dp, top = 5.dp, bottom = 5.dp)
+                            .motionInputGate(bodyEnabled)) {
                             when (shownSection) {
                                 ReaderStatusSection.PREPARATION -> {
                                     ReadinessRow(if (preparingBackwards) Icons.Outlined.KeyboardDoubleArrowLeft else Icons.Outlined.KeyboardDoubleArrowRight,
@@ -475,6 +482,10 @@ internal fun ReaderExperienceStatus(
                                     expanded = scopeHelp[shownSection] == true) { scopeHelp[shownSection] = scopeHelp[shownSection] != true }
                                 StatusReveal(scopeHelp[shownSection] == true) { ReaderStatusLegend(shownSection, budget, preparation) }
                             }
+                        }
+                        if (desktop && bodyEnabled) Box(Modifier.matchParentSize()) {
+                            DesktopVerticalScrollbar(bodyPosition, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                        }
                         }
                     }
                 }
@@ -1058,10 +1069,39 @@ private fun PreparationDetails(state: ReaderPreparationState, work: ReaderWork) 
 private fun PreparationPages(pages: List<ReaderPreparationPage>, work: ReaderWork) {
     var showAll by remember(work, pages.map { it.pageIndex }) { mutableStateOf(false) }
     val sortedPages = pages.sortedBy { it.pageIndex }
-    val visiblePages = if (showAll) sortedPages else sortedPages.take(12)
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val limit = if (desktop) 6 else 12
+    val visiblePages = if (showAll) sortedPages else sortedPages.take(limit)
     val pageReserve = "8".repeat((pages.maxOfOrNull { it.pageIndex.toLong() + 1L } ?: 1L).toString().length)
     val pageWidth = statusNumberWidth(pageReserve, 10.dp).coerceAtLeast(32.dp)
-    FlowRow(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(7.dp),
+    if (desktop) {
+        val colors = MaterialTheme.colorScheme
+        Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            visiblePages.forEach { page ->
+                val step = work.step(page)
+                val detail = when {
+                    work == ReaderWork.ORIGINAL && step.phase == ReaderPreparationPhase.ACTIVE && page.receivedBytes > 0L ->
+                        transferLabel(page.receivedBytes, page.expectedBytes)
+                    work == ReaderWork.ORIGINAL -> "原图" + presenceLabel(page.originalPresent)
+                    work == ReaderWork.PREVIEW -> previewPresenceLabel(page.previewResident)
+                    else -> null
+                }
+                Row(Modifier.fillMaxWidth().semantics(mergeDescendants = true) { },
+                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    StatusNumber((page.pageIndex + 1).toString(), Modifier.width(pageWidth)
+                        .background(colors.onSurface.copy(alpha = if (page.role == ReaderPreparationRole.VISIBLE) .075f else .035f),
+                            RoundedCornerShape(6.dp)).padding(horizontal = 3.dp, vertical = 3.dp))
+                    Text(roleLabel(page.role), Modifier.weight(.8f), style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant)
+                    StepMark(step.phase)
+                    Column(Modifier.weight(1.55f)) {
+                        Text(work.title + phaseLabel(step.phase), style = MaterialTheme.typography.labelMedium)
+                        detail?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant) }
+                    }
+                }
+            }
+        }
+    } else FlowRow(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(7.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)) {
         visiblePages.forEach { page ->
             Column(Modifier.width(pageWidth).semantics(mergeDescendants = true) {
@@ -1082,8 +1122,8 @@ private fun PreparationPages(pages: List<ReaderPreparationPage>, work: ReaderWor
             }
         }
     }
-    if (pages.size > 12) MotionTextButton(onClick = { showAll = !showAll }, modifier = Modifier.heightIn(min = 44.dp)) {
-        Text(if (showAll) "收起页码" else "其余 ${pages.size - 12} 页", style = MaterialTheme.typography.labelSmall)
+    if (pages.size > limit) MotionTextButton(onClick = { showAll = !showAll }, modifier = Modifier.heightIn(min = 44.dp)) {
+        Text(if (showAll) "收起页码" else "其余 ${pages.size - limit} 页", style = MaterialTheme.typography.labelSmall)
         Icon(if (showAll) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
     }
 }

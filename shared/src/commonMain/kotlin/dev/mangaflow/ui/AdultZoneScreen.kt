@@ -15,11 +15,11 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -36,6 +36,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.data.UnifiedMangaRepository
@@ -70,10 +74,32 @@ internal fun ContentProfileAccountScreen(
     val enabled = active && !busy
     val densityScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
 
-    Box(Modifier.fillMaxSize().padding(top = contentTopPadding).imePadding(), contentAlignment = Alignment.TopCenter) {
-        Column(Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxWidth()
-            .verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 12.dp)) {
-            if (installed.size > 1 || selected == null && installed.isNotEmpty()) {
+    AccountWorkspace(Modifier.fillMaxSize().padding(top = contentTopPadding).imePadding(),
+        mobileWidth = MangaLayout.ListWidth, top = 12.dp, bottom = 12.dp, sideInset = 20.dp,
+        allowSplit = installed.isNotEmpty(), detailKey = selected?.id, overview = { wide ->
+            if (wide) {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("来源账号", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                        MotionIconButton(onClick = onSources, enabled = enabled, tooltip = "管理来源",
+                            modifier = Modifier.size(38.dp)) { Icon(Icons.Outlined.Tune, "管理来源", Modifier.size(17.dp)) }
+                    }
+                    installed.forEach { source ->
+                        val current = source.id == selected?.id
+                        MotionTextButton(onClick = { if (enabled) selectedId = source.id }, enabled = enabled,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).semantics { this.selected = current },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.onSurface,
+                                containerColor = if (current) MaterialTheme.colorScheme.surface else Color.Transparent),
+                        ) {
+                            ChapterSourceLogo(source.id, source.name, Modifier.size(22.dp))
+                            Text(source.name, Modifier.weight(1f).padding(horizontal = 8.dp),
+                                maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                            if (current) Icon(Icons.Outlined.Check, null, Modifier.size(15.dp))
+                        }
+                    }
+                }
+            } else if (installed.size > 1 || selected == null && installed.isNotEmpty()) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     BoxWithConstraints(Modifier.weight(1f)) {
                         val tabsWidth = maxWidth.coerceAtLeast(78.dp * densityScale * installed.size)
@@ -91,6 +117,7 @@ internal fun ContentProfileAccountScreen(
                         modifier = Modifier.size(44.dp)) { Icon(Icons.Outlined.Tune, "管理来源", Modifier.size(18.dp)) }
                 }
             }
+        }) {
             if (selected != null) key(selected.id, selected.revision) {
                 val source = selected
                 var capabilities by remember { mutableStateOf<SourceCapabilities?>(null) }
@@ -174,6 +201,5 @@ internal fun ContentProfileAccountScreen(
                 else EmptyMessage("原来源已不在当前账号列表", "可选择另一来源，或在来源管理中查看原来源。",
                     action = "管理来源", onAction = onSources)
             }
-        }
     }
 }

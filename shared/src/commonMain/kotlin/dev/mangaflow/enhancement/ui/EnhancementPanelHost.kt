@@ -61,6 +61,7 @@ internal fun EnhancementPanelHost(
     maximumWidth: Dp = 440.dp,
     playbackOverlay: Boolean = false,
     surface: (@Composable (Modifier, @Composable () -> Unit) -> Unit)? = null,
+    onWindowBack: () -> Unit = onDismiss,
     content: @Composable () -> Unit,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
@@ -77,7 +78,7 @@ internal fun EnhancementPanelHost(
     val reveal = transition.surfaceReveal(motion)
     if (presence.currentState || presence.targetState || !presence.isIdle) {
         Dialog(
-            onDismissRequest = { if (visible) onDismiss() },
+            onDismissRequest = { if (visible) onWindowBack() },
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
             MotionDialogWindowPolicy(visible, backgroundDim = 0f)
@@ -105,10 +106,17 @@ internal fun EnhancementPanelHost(
                         desktop -> maxHeight * .94f
                         else -> maxHeight * .88f
                     }
-                    val panelWidth = if (sidePanel) (maxWidth * .42f)
+                    val roomyPlayer = desktop && sidePanel && maxWidth >= 1200.dp * fontScale
+                    val sideFraction = if (roomyPlayer) .48f else .42f
+                    val panelWidth = if (sidePanel) (maxWidth * sideFraction)
                         .coerceAtLeast(280.dp * fontScale.coerceAtMost(1.3f))
                         .coerceAtMost(minOf(maxWidth * .55f, maximumWidth)) else minOf(maxWidth, maximumWidth)
-                    val alignment = if (sidePanel || desktop) Alignment.CenterEnd else Alignment.BottomCenter
+                    val centeredEditor = desktop && !playbackOverlay && panelWidth >= 580.dp * fontScale
+                    val alignment = when {
+                        centeredEditor -> Alignment.Center
+                        sidePanel || desktop -> Alignment.CenterEnd
+                        else -> Alignment.BottomCenter
+                    }
                     val window = MangaWindowSize(panelWidth, maximumHeight, fontScale)
                     CompositionLocalProvider(LocalMangaWindow provides window) {
                         val panelModifier = Modifier.align(alignment).widthIn(max = panelWidth).fillMaxWidth().heightIn(max = maximumHeight)
@@ -118,13 +126,15 @@ internal fun EnhancementPanelHost(
                                 val progress = reveal.value.coerceIn(0f, 1f)
                                 val rest = 1f - progress
                                 alpha = surfaceRevealAlpha(progress)
-                                if (sidePanel || desktop) {
-                                    translationX = endDirection * minOf(size.width * .14f, 48.dp.toPx()) * rest
-                                    translationY = 0f
-                                } else {
-                                    translationX = 0f
-                                    translationY = minOf(size.height * .15f, 40.dp.toPx()) * rest
+                                val fromSide = (sidePanel || desktop) && !centeredEditor
+                                translationX = if (fromSide) endDirection * minOf(size.width * .14f, 48.dp.toPx()) * rest else 0f
+                                translationY = when {
+                                    fromSide -> 0f
+                                    centeredEditor -> 6.dp.toPx() * rest
+                                    else -> minOf(size.height * .15f, 40.dp.toPx()) * rest
                                 }
+                                scaleX = if (centeredEditor) 1f - .015f * rest else 1f
+                                scaleY = scaleX
                             }
                         if (surface != null) surface(panelModifier, content)
                         else LiquidGlassSurface(

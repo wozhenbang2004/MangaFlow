@@ -3,7 +3,6 @@ package dev.mangaflow.anime.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectable
@@ -13,6 +12,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ExpandMore
@@ -165,33 +165,48 @@ private fun DirectorySheet(choices: List<DirectoryChoice>, current: DirectoryCho
         val terms = normalizeNfkc(query).trim().lowercase().split(' ').filter(String::isNotBlank)
         choices.filter { entry -> terms.all { it in entry.searchText } }.groupBy { it.group }
     }
+    var category by rememberSaveable { mutableStateOf<DirectoryGroup?>(null) }
     val list = rememberLazyListState()
-    LaunchedEffect(query) { if (list.firstVisibleItemIndex != 0 || list.firstVisibleItemScrollOffset != 0) list.scrollToItem(0) }
-    MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop) { dismiss ->
+    LaunchedEffect(query, category) { if (list.firstVisibleItemIndex != 0 || list.firstVisibleItemScrollOffset != 0) list.scrollToItem(0) }
+    MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop, desktopWidth = 784.dp) { dismiss ->
         val window = LocalMangaWindow.current
         val maxHeight = minOf(window.height * (if (window.shortHeight) .82f else .67f), 520.dp)
         Column(Modifier.fillMaxWidth().imePadding().heightIn(max = maxHeight)
             .semantics { paneTitle = "全部片源目录" }) {
-            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                DirectorySearch(query, onChange = { query = it }, modifier = Modifier.weight(1f))
+            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DirectorySearch(query, onChange = { query = it; category = null }, modifier = Modifier.weight(1f))
                 MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭目录选择") {
                     Icon(Icons.Outlined.Close, "关闭目录选择", Modifier.size(18.dp))
                 }
             }
-            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false).selectableGroup(), state = list,
-                contentPadding = PaddingValues(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 10.dp)) {
-                if (groups.isEmpty()) item(key = "empty") {
-                    AnimeQuietLabel("没有匹配的目录", Modifier.padding(12.dp))
-                }
-                DirectoryGroup.entries.forEach { group ->
-                    val matches = groups[group].orEmpty()
-                    if (matches.isNotEmpty()) {
-                        item(key = "heading-" + group.name) { DirectoryHeading(group.title) }
-                        items(matches, key = { it.source.id + ":" + it.source.revision }) { entry ->
-                            DirectoryRow(entry, selected = current == entry, detail = entry.variant) {
-                                onSelect(entry)
-                                dismiss()
+            AnimePaneLayout(modifier = Modifier.weight(1f, fill = false), minimumWidth = 606.dp,
+                sidebar = {
+                    AnimePaneChoice("全部目录", category == null, { category = null }, Icons.Outlined.FolderOpen,
+                        count = groups.values.sumOf { it.size }.toString())
+                    DirectoryGroup.entries.filter { group -> choices.any { it.group == group } }.forEach { group ->
+                        val count = groups[group]?.size ?: 0
+                        AnimePaneChoice(group.title, category == group, { category = group }, count = count.toString(),
+                            enabled = count > 0 || category == group)
+                    }
+                }) { wide ->
+                val shown = if (wide && category != null) groups.filterKeys { it == category } else groups
+                AnimeScrollableList(Modifier.fillMaxWidth().weight(1f, fill = false).selectableGroup(), state = list,
+                    contentPadding = PaddingValues(start = if (wide) 2.dp else 10.dp, end = 12.dp, bottom = 10.dp)) {
+                    if (shown.isEmpty()) item(key = "empty") {
+                        AnimeMessage(if (query.isBlank()) "暂无可用目录" else "没有匹配的目录",
+                            action = if (query.isNotBlank()) "清除关键词" else null,
+                            onAction = { query = ""; category = null })
+                    }
+                    DirectoryGroup.entries.forEach { group ->
+                        val matches = shown[group].orEmpty()
+                        if (matches.isNotEmpty()) {
+                            item(key = "heading-" + group.name) { DirectoryHeading(group.title) }
+                            items(matches, key = { it.source.id + ":" + it.source.revision }) { entry ->
+                                DirectoryRow(entry, selected = current == entry, detail = entry.variant) {
+                                    onSelect(entry)
+                                    dismiss()
+                                }
                             }
                         }
                     }

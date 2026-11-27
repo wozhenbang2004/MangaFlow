@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.ImageNotSupported
 import androidx.compose.material.icons.outlined.OpenInFull
 import androidx.compose.material.icons.outlined.Refresh
@@ -30,6 +31,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -51,8 +54,12 @@ import dev.mangaflow.experience.readerCacheOnly
 import dev.mangaflow.experience.readerPageRequest
 import dev.mangaflow.experience.readerPreviewSize
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.ui.ChapterSourceLogo
+import dev.mangaflow.ui.DesktopVerticalScrollbar
+import dev.mangaflow.ui.ExperienceReveal
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionDialog
@@ -100,6 +107,7 @@ internal fun ReaderPageRepairDialog(
         onClosed = { retained = null; controller.selectionClosed() }) {
         if (content != null) {
             val window = LocalMangaWindow.current
+            val desktop = platformKind == PlatformKind.DESKTOP
             val focus = LocalFocusManager.current
             val interactive = selection != null && content.phase != ReaderRepairPhase.SAVING
             var targetText by remember(content.variant.storageId, content.targetIndex) {
@@ -118,11 +126,13 @@ internal fun ReaderPageRepairDialog(
             }
             ReaderDialogSurface(Modifier.padding(horizontal = 12.dp).fillMaxWidth()
                 .height(window.panelHeight.coerceAtMost(860.dp)), backdrop) {
-                Column(Modifier.fillMaxSize().padding(horizontal = 14.dp)) {
+                BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = 14.dp)) {
+                val wideDesktop = desktop && maxWidth >= 660.dp * window.fontScale
+                Column(Modifier.fillMaxSize()) {
                     ReaderPanelHeading("对齐 · 原页 ${content.primaryIndex + 1}", "关闭单页对齐", controller::dismiss)
                     BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                         val wide = maxWidth >= 660.dp * window.fontScale
-                        val imageHeight = (maxHeight - (if (wide) 174.dp else 202.dp) * window.fontScale)
+                        val imageHeight = (maxHeight - (if (wideDesktop) 150.dp else if (wide) 174.dp else 202.dp) * window.fontScale)
                             .coerceIn(180.dp, 520.dp)
                         MotionTabContent(selected = inspecting, contentKey = { it }, order = { if (it) 1 else 0 },
                             modifier = Modifier.fillMaxSize()) { enlarged ->
@@ -147,7 +157,9 @@ internal fun ReaderPageRepairDialog(
                             } else {
                                 Column(Modifier.fillMaxSize().verticalScroll(comparisonScroll),
                                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Row(Modifier.fillMaxWidth().horizontalScroll(sourceScroll),
+                                    if (desktop) RepairSourcePicker(content, alternatives, interactive) { variant ->
+                                        controller.select(content.primaryIndex, variant)
+                                    } else Row(Modifier.fillMaxWidth().horizontalScroll(sourceScroll),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                                         alternatives.forEach { variant ->
@@ -177,6 +189,13 @@ internal fun ReaderPageRepairDialog(
                                                         state.primaryReferences, primaryPages, primaryHeaders, primarySource, referenceState, backupZoom,
                                                         false, interactive, Modifier.fillMaxWidth().height(imageHeight),
                                                         onInspect = { inspect(imageSide) })
+                                                    if (wideDesktop) {
+                                                        if (imageSide == RepairImageSide.REFERENCE)
+                                                            RepairReferenceStrip(content.primaryIndex, referenceIndex, state.primaryReferences,
+                                                                primaryPages, primaryHeaders, primarySource, interactive,
+                                                                onSelect = { referenceIndex = it; side = RepairImageSide.REFERENCE })
+                                                        else RepairTargetNavigation(content, targetText, { targetText = it }, interactive, controller)
+                                                    }
                                                 }
                                             }
                                         }
@@ -187,18 +206,19 @@ internal fun ReaderPageRepairDialog(
                                             primaryPages, primaryHeaders, primarySource, referenceState, backupZoom, false, interactive,
                                             Modifier.fillMaxWidth().height(imageHeight), onInspect = { inspect(side) })
                                     }
-                                    RepairReferenceStrip(content.primaryIndex, referenceIndex, state.primaryReferences,
+                                    if (!wideDesktop) RepairReferenceStrip(content.primaryIndex, referenceIndex, state.primaryReferences,
                                         primaryPages, primaryHeaders, primarySource, interactive,
                                         onSelect = { referenceIndex = it; side = RepairImageSide.REFERENCE })
                                 }
                             }
                         }
                     }
-                    if (!inspecting) RepairTargetNavigation(content, targetText, { targetText = it }, interactive, controller)
+                    if (!inspecting && !wideDesktop) RepairTargetNavigation(content, targetText, { targetText = it }, interactive, controller)
                     (content.reason ?: state.reason)?.let {
                         Text(it, Modifier.fillMaxWidth().heightIn(max = 64.dp).verticalScroll(rememberScrollState()),
                             color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
                     }
+                    val summary: @Composable () -> Unit = {
                     Text("${primarySource} · ${content.primaryIndex + 1} ← ${content.variant.sourceName} · ${content.targetIndex + 1}",
                         style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.padding(top = 4.dp).semantics {
@@ -208,7 +228,9 @@ internal fun ReaderPageRepairDialog(
                     Text(if (targetMatchesPreview) "确认相同画面；附近位置仅为估算。" else "先打开输入的备用页，再确认画面。",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.End,
+                    }
+                    val actions: @Composable () -> Unit = {
+                    Row(Modifier.padding(bottom = 8.dp), horizontalArrangement = Arrangement.End,
                         verticalAlignment = Alignment.CenterVertically) {
                         if (state.replacements.containsKey(content.primaryIndex)) MotionIconButton(
                             { controller.undo(content.primaryIndex) }, enabled = interactive, tooltip = "撤回这一页的替换") {
@@ -222,11 +244,71 @@ internal fun ReaderPageRepairDialog(
                         MotionTextButton(controller::confirm,
                             enabled = selection != null && content.phase == ReaderRepairPhase.READY && targetMatchesPreview) {
                             if (content.phase == ReaderRepairPhase.SAVING) MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
-                            else Icon(Icons.Outlined.Check, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.width(5.dp)); Text("补这一页", color = MaterialTheme.colorScheme.primary)
+                            else Icon(Icons.Outlined.Check, null, Modifier.size(17.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text(if (desktop) "确认替换此页" else "补这一页")
                         }
                     }
+                    }
+                    if (wideDesktop) Row(Modifier.fillMaxWidth().padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Column(Modifier.weight(1f)) { summary() }
+                        actions()
+                    } else {
+                        summary()
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) { actions() }
+                    }
                 }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RepairSourcePicker(content: ReaderRepairSelection, alternatives: List<ChapterVariant>,
+    enabled: Boolean, onChoose: (ChapterVariant) -> Unit) {
+    var expanded by remember(content.primaryIndex, content.variant.storageId) { mutableStateOf(false) }
+    val scroll = rememberScrollState()
+    val colors = MaterialTheme.colorScheme
+    val variant = content.variant
+    val summary = listOf(variant.sourceName, variant.edition, variant.scanlator).filter(String::isNotBlank).joinToString(" · ")
+    Column(Modifier.fillMaxWidth()) {
+        MotionTextButton({ expanded = !expanded }, enabled = enabled && alternatives.size > 1,
+            modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+            ChapterSourceLogo(variant.sourceId, variant.sourceName, Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(summary, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
+            if (alternatives.size > 1) {
+                Text(if (expanded) "收起" else "更换备用版本", style = MaterialTheme.typography.labelMedium)
+                Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(17.dp).graphicsLayer {
+                    rotationZ = if (expanded) 180f else 0f
+                })
+            }
+        }
+        ExperienceReveal(expanded) {
+            Box(Modifier.fillMaxWidth().heightIn(max = 176.dp)) {
+                Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(end = 8.dp)) {
+                    alternatives.forEach { choice -> key(choice.storageId) {
+                        val chosen = choice.storageId == variant.storageId
+                        MotionTextButton({
+                            expanded = false
+                            if (!chosen) onChoose(choice)
+                        }, enabled = enabled, modifier = Modifier.fillMaxWidth().semantics { selected = chosen },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                            ChapterSourceLogo(choice.sourceId, choice.sourceName, Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(choice.sourceName, color = colors.onSurface, style = MaterialTheme.typography.bodyMedium)
+                                Text(listOf(choice.language, choice.edition, choice.scanlator, choice.title)
+                                    .filter(String::isNotBlank).joinToString(" · "), color = colors.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelSmall)
+                            }
+                            if (chosen) Icon(Icons.Outlined.Check, "当前备用版本", Modifier.size(16.dp))
+                        }
+                    } }
+                }
+                DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
             }
         }
     }
@@ -287,9 +369,14 @@ private fun RepairComparisonImage(side: RepairImageSide, referenceIndex: Int, co
                 } else Image(painter, "备用来源 ${content.variant.sourceName} 第 ${content.targetIndex + 1} 页预览",
                     Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
             } }
-            if (content.phase == ReaderRepairPhase.DIRECTORY || content.phase == ReaderRepairPhase.IMAGE)
-                MotionBusyIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            else if (content.preview == null) Icon(Icons.Outlined.ImageNotSupported, "备用页尚不可用",
+            if (content.phase == ReaderRepairPhase.DIRECTORY || content.phase == ReaderRepairPhase.IMAGE) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MotionBusyIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    if (platformKind == PlatformKind.DESKTOP) Text(
+                        if (content.phase == ReaderRepairPhase.DIRECTORY) "正在读取备用目录" else "正在准备备用预览",
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else if (content.preview == null) Icon(Icons.Outlined.ImageNotSupported, "备用页尚不可用",
                 Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (onInspect != null) Icon(Icons.Outlined.OpenInFull, null,
@@ -376,19 +463,32 @@ private fun RepairReferenceStrip(primaryIndex: Int, selectedIndex: Int, referenc
 private fun RepairTargetNavigation(content: ReaderRepairSelection, targetText: String, onTargetText: (String) -> Unit,
     enabled: Boolean, controller: ReaderPageRepairController) {
     val target = targetText.toIntOrNull()?.takeIf { it > 0 && it <= content.pages.size }?.minus(1)
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val colors = MaterialTheme.colorScheme
+    val input = if (desktop) Modifier.width(58.dp).clip(RoundedCornerShape(9.dp))
+        .background(colors.onSurface.copy(alpha = .055f)).onPreviewKeyEvent { event ->
+            if (!enabled || (event.key != Key.Enter && event.key != Key.NumPadEnter)) false
+            else {
+                if (event.type == KeyEventType.KeyUp) target?.let(controller::moveTo)
+                true
+            }
+        } else Modifier.width(72.dp)
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center) {
+        horizontalArrangement = Arrangement.spacedBy(if (desktop) 4.dp else 0.dp, Alignment.CenterHorizontally)) {
         MotionIconButton({ controller.moveTo(content.targetIndex - 1) }, enabled = enabled && content.targetIndex > 0,
             tooltip = "前一张备用页") { Icon(Icons.Outlined.ArrowBack, "前一张备用页", Modifier.size(18.dp)) }
         BasicTextField(targetText, onTargetText, enabled = enabled, singleLine = true,
-            modifier = Modifier.width(72.dp).heightIn(min = 44.dp).padding(vertical = 12.dp, horizontal = 8.dp)
+            modifier = input.heightIn(min = 44.dp).padding(vertical = 12.dp, horizontal = 8.dp)
                 .semantics { contentDescription = "备用页码，共 ${content.pages.size} 页" },
             textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Go),
             keyboardActions = KeyboardActions(onGo = { if (enabled) target?.let(controller::moveTo) }))
         Text("/ ${content.pages.size.takeIf { it > 0 } ?: "—"}", style = MaterialTheme.typography.labelSmall)
-        MotionIconButton({ target?.let(controller::moveTo) }, enabled = enabled && target != null,
+        if (desktop) MotionTextButton({ target?.let(controller::moveTo) },
+            enabled = enabled && target != null && target != content.targetIndex,
+            contentPadding = PaddingValues(horizontal = 7.dp)) { Text("跳转") }
+        else MotionIconButton({ target?.let(controller::moveTo) }, enabled = enabled && target != null,
             tooltip = "打开输入的备用页") { Icon(Icons.Outlined.Refresh, "打开输入的备用页", Modifier.size(17.dp)) }
         MotionIconButton({ if (content.targetIndex < Int.MAX_VALUE) controller.moveTo(content.targetIndex + 1) },
             enabled = enabled && content.targetIndex < content.pages.lastIndex, tooltip = "后一张备用页") {

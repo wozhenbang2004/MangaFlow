@@ -1,5 +1,6 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.shape.CircleShape
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -25,7 +26,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -34,6 +34,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,6 +58,10 @@ import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.data.plugins.StarterSourceInstaller
 import dev.mangaflow.data.sources.*
+import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.ui.motion.*
 import kotlinx.coroutines.CancellationException
@@ -641,91 +647,145 @@ internal fun SourceCapabilityDetailsSheet(
             catch (_: Exception) { message = "站点收藏夹未能读取，请重新打开来源设置重试。" }
         }
     }
-    MotionBottomSheet(backdrop = backdrop, onDismissRequest = onDismiss) { dismiss ->
-        Column(Modifier.fillMaxWidth().heightIn(max = (LocalMangaWindow.current.height - 96.dp).coerceAtLeast(120.dp))
-            .imePadding().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                ChapterSourceLogo(source.id, source.name, Modifier.size(22.dp))
-                Text(source.name, Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.titleMedium)
-                MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭") {
-                    Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
-                }
-            }
-            val offered = capabilities
-            val accountReceipt = account
-            if (accountReadFailed) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("账号能力或状态暂未读取", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                MotionTextButton(onClick = { accountRead++ }, enabled = !busy) { Text("重试", fontSize = 12.sp) }
-            } else if (offered == null) SourceAccountLoading("正在读取来源信息…")
-            else if (offered.supports(SourceFeature.ACCOUNT) || offered.browserAccount != null) {
-                if (accountReceipt == null) SourceAccountLoading("正在读取账号状态…")
-                else SourceAccountControls(source, repository, offered, accountReceipt, enabled = !busy,
-                    onBusy = { busy = it }, onAccountChanged = {
-                        account = it; folders = emptyList(); accountRevision++; onSourceChanged()
-                    }, initiallyShowLogin = initiallyShowLogin || accountFailure != null || offered.loginRequired)
-                HorizontalDivider()
-            } else if (offered.websiteLoginDeclared) {
-                Text("此来源的网页登录暂未接入。", style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+    val offered = capabilities
+    val accountReceipt = account
+    val hasAccount = accountReadFailed || offered == null || offered.supports(SourceFeature.ACCOUNT) ||
+        offered.browserAccount != null || offered.websiteLoginDeclared
+    val hasSettings = settings.isNotEmpty() || settingsReadFailed || (source.id.startsWith("js_") && plugins != null)
+    val accountSection: @Composable () -> Unit = {
+        if (accountReadFailed) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("账号能力或状态暂未读取", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            MotionTextButton(onClick = { accountRead++ }, enabled = !busy) { Text("重试", fontSize = 12.sp) }
+        } else if (offered == null) SourceAccountLoading("正在读取来源信息…")
+        else if (offered.supports(SourceFeature.ACCOUNT) || offered.browserAccount != null) {
+            if (accountReceipt == null) SourceAccountLoading("正在读取账号状态…")
+            else SourceAccountControls(source, repository, offered, accountReceipt, enabled = !busy,
+                onBusy = { busy = it }, onAccountChanged = {
+                    account = it; folders = emptyList(); accountRevision++; onSourceChanged()
+                }, initiallyShowLogin = initiallyShowLogin || accountFailure != null || offered.loginRequired)
+        } else if (offered.websiteLoginDeclared) {
+            Text("此来源的网页登录暂未接入。", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+    val connectionSection: @Composable () -> Unit = {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             SourceHealthSummary(lastHealth)
             SourceNetworkSettingsControl(source.id, enabled = !busy)
             SourceConnectionChecks(repository, listOf(source), active = !busy)
-            if (source.id.startsWith("js_") && plugins != null) Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    MotionTextButton(onClick = { operate { updateAvailable = plugins.checkUpdate(source.id) != null
-                        message = if (updateAvailable) "有可用更新" else "已是当前仓库版本" } }, enabled = !busy) { Text("检查更新", fontSize = 12.sp) }
-                    if (updateAvailable) MotionTextButton(onClick = { operate { plugins.update(source.id); updateAvailable = false; message = "来源已更新"; onSourceChanged() } }, enabled = !busy) { Text("更新", fontSize = 12.sp) }
-                }
+        }
+    }
+    val settingsSection: @Composable () -> Unit = {
+        if (source.id.startsWith("js_") && plugins != null) Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MotionTextButton(onClick = { operate { updateAvailable = plugins.checkUpdate(source.id) != null
+                    message = if (updateAvailable) "有可用更新" else "已是当前仓库版本" } }, enabled = !busy) { Text("检查更新", fontSize = 12.sp) }
+                if (updateAvailable) MotionTextButton(onClick = { operate { plugins.update(source.id); updateAvailable = false; message = "来源已更新"; onSourceChanged() } }, enabled = !busy) { Text("更新", fontSize = 12.sp) }
             }
-            if (manga != null && accountReceipt?.signedIn == true && offered?.supports(SourceFeature.FAVORITES) == true) {
-                Column { Text("站点收藏", style = MaterialTheme.typography.titleSmall)
-                    Text("与本机书架分别保存", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                folders.forEach { folder -> key("favorite:" + folder.id) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(folder.title, Modifier.weight(1f), fontSize = 12.sp)
-                        MotionTextButton(onClick = { operate { repository.sourceSetFavorite(source.id, manga.id, folder.id, true); message = "已加入站点收藏" } }, enabled = !busy) { Text("加入", fontSize = 11.sp) }
-                        MotionTextButton(onClick = { operate { repository.sourceSetFavorite(source.id, manga.id, folder.id, false); message = "已移出站点收藏，本机书架保留" } }, enabled = !busy) { Text("移出", fontSize = 11.sp) }
-                    }
-                } }
-            }
-            if (settings.isNotEmpty()) Column { Text("来源设置", style = MaterialTheme.typography.titleSmall) }
-            if (settingsReadFailed) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("来源选项暂未读取", Modifier.weight(1f), fontSize = 11.sp)
-                MotionTextButton(onClick = { accountRead++ }, enabled = !busy) { Text("重试", fontSize = 12.sp) }
-            }
-            settings.forEach { setting -> key("setting:" + setting.key) {
-                var value by remember(source.id, setting.key, setting.value) { mutableStateOf(setting.value) }
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(setting.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (setting.type == "switch") {
-                        val interaction = remember { MutableInteractionSource() }
-                        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
-                            .toggleable(value == "true", enabled = !busy, role = Role.Switch,
-                                interactionSource = interaction, indication = null,
-                                onValueChange = { value = it.toString() }),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (value == "true") "已开启" else "已关闭", fontSize = 12.sp,
-                                modifier = Modifier.weight(1f))
-                            Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
-                                MotionSwitchThumb(value == "true", interaction)
-                            }
-                        }
-                    } else if (setting.choices.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState())) {
-                        setting.choices.forEach { choice -> MotionTextButton(onClick = { value = choice.id }, enabled = !busy) {
-                            Text(choice.title, fontSize = 12.sp, color = if (value == choice.id) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
-                        } }
-                    } else BasicTextField(value, { if (it.length <= 8192) value = it },
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = .045f)).padding(12.dp),
-                        singleLine = true, textStyle = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurface),
-                        visualTransformation = if (setting.type.lowercase() in setOf("password", "secret", "token", "apikey") || Regex("(?i)token|password|secret|api.?key|cookie|authorization|auth.?key|bearer").containsMatchIn(setting.key)) PasswordVisualTransformation() else VisualTransformation.None)
-                    if (value != setting.value) MotionTextButton(onClick = { operate {
-                        repository.saveSourceSetting(source.id, setting.key, value); settings = repository.sourceSettings(source.id); message = "设置已保存"; onSourceChanged() } }, enabled = !busy) { Text("保存", fontSize = 12.sp) }
+        }
+        if (manga != null && accountReceipt?.signedIn == true && offered?.supports(SourceFeature.FAVORITES) == true) {
+            Column { Text("站点收藏", style = MaterialTheme.typography.titleSmall)
+                Text("与本机书架分别保存", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            folders.forEach { folder -> key("favorite:" + folder.id) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(folder.title, Modifier.weight(1f), fontSize = 12.sp)
+                    MotionTextButton(onClick = { operate { repository.sourceSetFavorite(source.id, manga.id, folder.id, true); message = "已加入站点收藏" } }, enabled = !busy) { Text("加入", fontSize = 11.sp) }
+                    MotionTextButton(onClick = { operate { repository.sourceSetFavorite(source.id, manga.id, folder.id, false); message = "已移出站点收藏，本机书架保留" } }, enabled = !busy) { Text("移出", fontSize = 11.sp) }
                 }
             } }
-            message?.let { Column { Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         }
+        if (settings.isNotEmpty()) Column { Text("来源设置", style = MaterialTheme.typography.titleSmall) }
+        if (settingsReadFailed) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("来源选项暂未读取", Modifier.weight(1f), fontSize = 11.sp)
+            MotionTextButton(onClick = { accountRead++ }, enabled = !busy) { Text("重试", fontSize = 12.sp) }
+        }
+        settings.forEach { setting -> key("setting:" + setting.key) {
+            var value by remember(source.id, setting.key, setting.value) { mutableStateOf(setting.value) }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(setting.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (setting.type == "switch") {
+                    val interaction = remember { MutableInteractionSource() }
+                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                        .toggleable(value == "true", enabled = !busy, role = Role.Switch,
+                            interactionSource = interaction, indication = null,
+                            onValueChange = { value = it.toString() }),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (value == "true") "已开启" else "已关闭", fontSize = 12.sp,
+                            modifier = Modifier.weight(1f))
+                        Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                            MotionSwitchThumb(value == "true", interaction)
+                        }
+                    }
+                } else if (setting.choices.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()).selectableGroup()) {
+                    setting.choices.forEach { choice ->
+                        ManagementResultFilter(choice.title, value == choice.id, !busy) { value = choice.id }
+                    }
+                } else BasicTextField(value, { if (it.length <= 8192) value = it },
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = .045f)).padding(12.dp),
+                    singleLine = true, textStyle = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurface),
+                    visualTransformation = if (setting.type.lowercase() in setOf("password", "secret", "token", "apikey") || Regex("(?i)token|password|secret|api.?key|cookie|authorization|auth.?key|bearer").containsMatchIn(setting.key)) PasswordVisualTransformation() else VisualTransformation.None)
+                if (value != setting.value) MotionTextButton(onClick = { operate {
+                    repository.saveSourceSetting(source.id, setting.key, value); settings = repository.sourceSettings(source.id); message = "设置已保存"; onSourceChanged() } }, enabled = !busy) { Text("保存", fontSize = 12.sp) }
+            }
+        } }
+    }
+    val currentAccountSection by rememberUpdatedState(accountSection)
+    val currentConnectionSection by rememberUpdatedState(connectionSection)
+    val currentSettingsSection by rememberUpdatedState(settingsSection)
+    val showAccount = remember(source.id, source.revision) { movableContentOf { currentAccountSection() } }
+    val showConnection = remember(source.id, source.revision) { movableContentOf { currentConnectionSection() } }
+    val showSettings = remember(source.id, source.revision) { movableContentOf { currentSettingsSection() } }
+    MotionBottomSheet(backdrop = backdrop, onDismissRequest = onDismiss, desktopWidth = 860.dp) { dismiss ->
+        BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight).imePadding()) {
+            val desktop = platformKind == PlatformKind.DESKTOP
+            val font = LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
+            val split = desktop && maxWidth >= 680.dp * font && maxHeight >= 295.dp * font && (hasAccount || hasSettings)
+            val height = minOf(maxHeight, 620.dp)
+            val colors = MaterialTheme.colorScheme
+            val mainScroll = rememberScrollState()
+            val connectionScroll = rememberScrollState()
+            Column(Modifier.fillMaxWidth().then(if (split) Modifier.height(height) else Modifier.heightIn(max = height))) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = 18.dp, end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                    ChapterSourceLogo(source.id, source.name, Modifier.size(25.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(source.name, style = MaterialTheme.typography.titleMedium)
+                        val site = remember(source.homeUrl, source.language) {
+                            listOf(source.homeUrl.toHttpUrlOrNull()?.host.orEmpty(), source.language).filter(String::isNotBlank).joinToString(" · ")
+                        }
+                        if (site.isNotEmpty()) Text(site, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭来源设置") {
+                        Icon(Icons.Outlined.Close, "关闭来源设置", Modifier.size(20.dp))
+                    }
+                }
+                message?.let { result -> Text(result, Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
+                if (split) Row(Modifier.fillMaxWidth().weight(1f)) {
+                    SourceSettingsColumn(Modifier.weight(.91f).fillMaxHeight().background(colors.surfaceContainerLow), connectionScroll, desktop) {
+                        showConnection()
+                    }
+                    SourceSettingsColumn(Modifier.weight(1.09f).fillMaxHeight(), mainScroll, desktop) {
+                        if (hasAccount) showAccount()
+                        showSettings()
+                    }
+                } else SourceSettingsColumn(Modifier.weight(1f, fill = false).fillMaxWidth(), mainScroll, desktop) {
+                    if (hasAccount) showAccount()
+                    showConnection()
+                    showSettings()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceSettingsColumn(modifier: Modifier, scroll: ScrollState, desktop: Boolean, content: @Composable ColumnScope.() -> Unit) {
+    Box(modifier) {
+        Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(start = 16.dp, end = 18.dp, top = 9.dp, bottom = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+        if (desktop) DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd))
     }
 }
 
@@ -736,6 +796,14 @@ private fun SourceHealthSummary(health: SourceHealth?) {
         health.checking -> health.stage.label + " · 正在读取"
         else -> health.message.ifBlank { health.stage.label + " · 已读取" }
     }
-    Text(label, fontSize = 11.sp, color = if (health?.failure != null) MaterialTheme.colorScheme.error
-        else MaterialTheme.colorScheme.onSurfaceVariant)
+    val colors = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text("连接记录", style = MaterialTheme.typography.titleSmall)
+        Text(label, style = MaterialTheme.typography.bodyMedium,
+            color = if (health?.failure != null) colors.error else colors.onSurface)
+        health?.lastSuccessAt?.takeIf { it > 0 }?.let { stamp ->
+            Text("上次成功 · ${formatInstantMillis(stamp, "MM-dd HH:mm")}", style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant)
+        }
+    }
 }

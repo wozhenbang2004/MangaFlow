@@ -2,8 +2,8 @@ package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
@@ -22,6 +22,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
@@ -47,7 +49,7 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
             }
         }
     }
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 540.dp) {
+    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = animePanelWidth(816.dp, 540.dp), properties = animePanelDialogProperties) {
         val detail = state.detail
         val reviewBlock = detail?.let { trackingReviewBlock(it, state, provider) }
         AnimePanelSurface(backdrop) {
@@ -60,87 +62,107 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
                 }
-                LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    item {
-                        MotionTabs(providerIndex, listOf("Bangumi", "AniList"), onSelect = {
-                            providerIndex = it; requestedReview = false
-                        }, modifier = Modifier.fillMaxWidth().motionInputGate(!state.syncing), controlHeight = 44.dp)
+                val services = listOf("Bangumi", "AniList")
+                val selectService: (Int) -> Unit = { providerIndex = it; requestedReview = false }
+                AnimePaneLayout(Modifier.weight(1f, fill = false), compactHeader = {
+                    MotionTabs(providerIndex, services, onSelect = selectService,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).motionInputGate(!state.syncing),
+                        controlHeight = 44.dp)
+                }, sidebar = {
+                    services.forEachIndexed { index, name ->
+                        val id = if (index == 0) "anime-bangumi" else "anime-anilist"
+                        val identity = state.accounts.firstOrNull { it.providerId == id }
+                        AnimePaneChoice(name, providerIndex == index, { selectService(index) },
+                            detail = identity?.let { it.displayName.ifBlank { it.ownerId } } ?: "未连接", enabled = !state.syncing)
                     }
-                    item {
-                        Text("同步追番状态与看完的正片。看到第几分钟保存在这台设备。",
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    if (reviewBlock != null && account == null) item {
-                        AnimeSectionTitle(reviewBlock.first, reviewBlock.second)
-                    }
-                    if (account == null) {
-                        item {
-                            AnimeSectionTitle("连接 $accountName", if (detail == null)
-                                "连接后，可从支持的番剧详情核对进度" else null)
-                        }
-                        item {
-                            AnimeTextField(token, { token = it }, accountName + " 访问令牌", secret = true,
-                                enabled = !state.syncing)
-                        }
-                        item {
-                            AnimeQuietLabel("在 $accountName 生成访问令牌后，粘贴到这里。")
-                            MotionButton(onClick = {
-                                controller.connectTracking(provider, token.trim())
-                                token = ""
-                            }, enabled = token.isNotBlank() && !state.syncing,
-                                modifier = Modifier.fillMaxWidth().padding(top = 12.dp).heightIn(min = 48.dp)) {
-                                Text(if (state.syncing) "正在连接" else "连接 " + accountName)
-                            }
-                        }
-                    } else {
-                        item {
-                            Row(
-                                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                                    .padding(start = 14.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                Icon(Icons.Outlined.AccountCircle, null, Modifier.size(22.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Text(account.displayName.ifBlank { account.ownerId }, style = MaterialTheme.typography.titleMedium)
-                                    AnimeQuietLabel(accountName + " · 已连接")
+                }) { wide ->
+                    key(provider) {
+                        AnimeScrollableList(Modifier.fillMaxWidth().weight(1f, fill = false),
+                            contentPadding = PaddingValues(start = if (wide) 6.dp else 20.dp, end = 20.dp, top = 14.dp, bottom = 18.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            if (wide && detail != null) item(key = "subject") {
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    AnimePoster(detail.subject, Modifier.size(44.dp, 64.dp))
+                                    Text(detail.subject.title, style = animeWorkTitleStyle(), maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 }
-                                MotionTextButton(onClick = { controller.disconnectTracking(provider) },
-                                    enabled = !state.syncing, modifier = Modifier.heightIn(min = 44.dp)) { Text("断开") }
-                            }
-                        }
-                        if (detail == null) item {
-                            AnimeSectionTitle("同步在番剧详情中进行", "打开一部番剧，再选择核对进度。")
-                        } else if (reviewBlock != null) item {
-                            AnimeSectionTitle(reviewBlock.first, reviewBlock.second)
-                        } else if (state.detailLoading || detail.episodes.isEmpty()) item {
-                            AnimeSectionTitle(if (state.detailLoading) "正在载入剧集目录" else "还没有可核对的剧集",
-                                detail.subject.title)
-                        } else {
-                            item { AnimeSectionTitle("核对这部番剧", detail.subject.title) }
-                            if (providerIndex == 1) item {
-                                AnimeTextField(remoteId, { remoteId = it.filter(Char::isDigit) }, "AniList 动画条目 ID（首次关联必填）")
-                                AnimeQuietLabel("只关联你指定的动画条目。已关联后可留空沿用；请先核对季度和版本。",
-                                    Modifier.padding(top = 8.dp))
                             }
                             item {
-                                MotionButton(onClick = {
-                                    previousReviewIds = state.reviews.mapTo(mutableSetOf()) { it.id }
-                                    requestedReview = true
-                                    controller.reviewTracking(provider, remoteId.trim().takeIf { it.isNotBlank() })
-                                }, enabled = !state.syncing,
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                    Text(if (state.syncing) "正在读取远端进度" else "查看进度差异")
+                                Text("同步追番状态和已看集数。播放位置保存在这台设备。",
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            if (reviewBlock != null && account == null) item {
+                                AnimeSectionTitle(reviewBlock.first, reviewBlock.second)
+                            }
+                            if (account == null) {
+                                item {
+                                    AnimeSectionTitle("连接 $accountName", if (detail == null)
+                                        "连接后，可从支持的番剧详情核对进度" else null)
+                                }
+                                item {
+                                    AnimeTextField(token, { token = it }, accountName + " 访问令牌", secret = true,
+                                        enabled = !state.syncing)
+                                }
+                                item {
+                                    AnimeQuietLabel("在 $accountName 生成访问令牌后，粘贴到这里。")
+                                    MotionButton(onClick = {
+                                        controller.connectTracking(provider, token.trim())
+                                        token = ""
+                                    }, enabled = token.isNotBlank() && !state.syncing,
+                                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp).heightIn(min = 48.dp)) {
+                                        Text(if (state.syncing) "正在连接" else "连接 " + accountName)
+                                    }
+                                }
+                            } else {
+                                item {
+                                    Row(
+                                        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                                            .padding(start = 14.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    ) {
+                                        Icon(Icons.Outlined.AccountCircle, null, Modifier.size(22.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Text(account.displayName.ifBlank { account.ownerId }, style = MaterialTheme.typography.titleMedium)
+                                            AnimeQuietLabel(accountName + " · 已连接")
+                                        }
+                                        MotionTextButton(onClick = { controller.disconnectTracking(provider) },
+                                            enabled = !state.syncing, modifier = Modifier.heightIn(min = 44.dp)) { Text("断开") }
+                                    }
+                                }
+                                if (detail == null) item {
+                                    AnimeSectionTitle("同步在番剧详情中进行", "打开一部番剧，再选择核对进度。")
+                                } else if (reviewBlock != null) item {
+                                    AnimeSectionTitle(reviewBlock.first, reviewBlock.second)
+                                } else if (state.detailLoading || detail.episodes.isEmpty()) item {
+                                    AnimeSectionTitle(if (state.detailLoading) "正在载入剧集目录" else "还没有可核对的剧集",
+                                        detail.subject.title)
+                                } else {
+                                    item { AnimeSectionTitle("核对进度", if (wide) null else detail.subject.title) }
+                                    if (providerIndex == 1) item {
+                                        AnimeTextField(remoteId, { remoteId = it.filter(Char::isDigit) }, "AniList 动画条目 ID（首次关联必填）")
+                                        AnimeQuietLabel("只关联你指定的动画条目。已关联后可留空沿用；请先核对季度和版本。",
+                                            Modifier.padding(top = 8.dp))
+                                    }
+                                    item {
+                                        MotionButton(onClick = {
+                                            previousReviewIds = state.reviews.mapTo(mutableSetOf()) { it.id }
+                                            requestedReview = true
+                                            controller.reviewTracking(provider, remoteId.trim().takeIf { it.isNotBlank() })
+                                        }, enabled = !state.syncing,
+                                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                                            Text(if (state.syncing) "正在读取远端进度" else "查看进度差异")
+                                        }
+                                    }
                                 }
                             }
+                            if (state.notice != null) item {
+                                Text(state.notice, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
-                    }
-                    if (state.notice != null) item {
-                        Text(state.notice, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -168,7 +190,7 @@ private fun trackingReviewBlock(detail: AnimeDetail, state: AnimeScreenState, pr
 internal fun AnimeProgressReviewPanel(visible: Boolean, state: AnimeScreenState, controller: AnimeController,
     backdrop: HazeState, onDismiss: () -> Unit, onConnect: () -> Unit,
     onRecheck: (AnimeTrackingReview) -> Unit) {
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 760.dp) {
+    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = animePanelWidth(816.dp, 760.dp), properties = animePanelDialogProperties) {
         AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 8.dp),
@@ -184,7 +206,7 @@ internal fun AnimeProgressReviewPanel(visible: Boolean, state: AnimeScreenState,
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
                 }
-                LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(20.dp),
+                AnimeScrollableList(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(20.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp)) {
                     item {
                         Text("选择要保留的追番状态和已看集数，然后应用到本机或同时同步到远端。",
@@ -230,36 +252,54 @@ private fun AnimeReviewItem(review: AnimeTrackingReview, enabled: Boolean, onRec
             Text(review.subjectTitle, style = animeWorkTitleStyle(large = true))
             AnimeQuietLabel(animeProviderName(review.providerId) + " · 条目 " + review.remoteSubjectId)
         }
-        AnimeQuietLabel("追番状态")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.weight(1f)) {
-                AnimeSelection("本机 · " + animeStatusLabel(review.localStatus), selected = status == AnimeSyncChoice.LOCAL,
-                    onClick = { status = AnimeSyncChoice.LOCAL }, enabled = enabled)
-            }
-            Box(Modifier.weight(1f)) {
-                AnimeSelection("远端 · " + animeStatusLabel(review.remoteStatus), selected = status == AnimeSyncChoice.REMOTE,
-                    onClick = { status = AnimeSyncChoice.REMOTE }, enabled = enabled)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val scale = LocalMangaWindow.current.fontScale
+            val table = platformKind == PlatformKind.DESKTOP && maxWidth >= 558.dp * scale
+            val labelWidth = 92.dp * scale
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (table) Row(Modifier.fillMaxWidth().padding(bottom = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Spacer(Modifier.width(labelWidth))
+                    Text("本机", Modifier.weight(1f).padding(start = 12.dp), style = MaterialTheme.typography.titleSmall)
+                    Text(animeProviderName(review.providerId), Modifier.weight(1f).padding(start = 12.dp),
+                        style = MaterialTheme.typography.titleSmall)
+                } else AnimeQuietLabel("追番状态")
+                Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    if (table) AnimeQuietLabel("追番状态", Modifier.width(labelWidth))
+                    listOf(AnimeSyncChoice.LOCAL, AnimeSyncChoice.REMOTE).forEach { choice ->
+                        val local = choice == AnimeSyncChoice.LOCAL
+                        val label = animeStatusLabel(if (local) review.localStatus else review.remoteStatus)
+                        val origin = if (local) "本机" else "远端"
+                        Box(Modifier.weight(1f)) {
+                            AnimeSelection(if (table) label else "$origin · $label", selected = status == choice,
+                                onClick = { status = choice }, enabled = enabled)
+                        }
+                    }
+                }
+                if (!table) AnimeQuietLabel("正片已完成集")
+                Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    if (table) AnimeQuietLabel("已看正片", Modifier.width(labelWidth))
+                    listOf(AnimeSyncChoice.LOCAL, AnimeSyncChoice.REMOTE).forEach { choice ->
+                        val local = choice == AnimeSyncChoice.LOCAL
+                        val origin = if (local) "本机" else "远端"
+                        val numbers = if (local) review.localNumbers else review.remoteNumbers
+                        val other = if (local) review.remoteNumbers else review.localNumbers
+                        val count = "${numbers.size} 集"
+                        Box(Modifier.weight(1f)) {
+                            AnimeSelection(if (table) count else "$origin · $count", "$origin 独有 ${(numbers - other).size} 集",
+                                selected = episodes == choice, onClick = { episodes = choice }, enabled = enabled)
+                        }
+                    }
+                }
+                Box(if (table) Modifier.padding(start = labelWidth + 8.dp) else Modifier) {
+                    AnimeSelection("合并两边的已看正片", "合并后共 ${(review.localNumbers + review.remoteNumbers).size} 集",
+                        selected = episodes == AnimeSyncChoice.MERGE,
+                        onClick = { episodes = AnimeSyncChoice.MERGE }, enabled = enabled)
+                }
             }
         }
-        AnimeQuietLabel("正片已完成集")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.weight(1f)) {
-                AnimeSelection("本机 · " + review.localNumbers.size + " 集",
-                    "本机独有 " + (review.localNumbers - review.remoteNumbers).size + " 集",
-                    selected = episodes == AnimeSyncChoice.LOCAL,
-                    onClick = { episodes = AnimeSyncChoice.LOCAL }, enabled = enabled)
-            }
-            Box(Modifier.weight(1f)) {
-                AnimeSelection("远端 · " + review.remoteNumbers.size + " 集",
-                    "远端独有 " + (review.remoteNumbers - review.localNumbers).size + " 集",
-                    selected = episodes == AnimeSyncChoice.REMOTE,
-                    onClick = { episodes = AnimeSyncChoice.REMOTE }, enabled = enabled)
-            }
-        }
-        AnimeSelection("合并正片已完成集", "保留两边已完成的集数，共 " +
-            (review.localNumbers + review.remoteNumbers).size + " 集；这不会决定追番状态。",
-            selected = episodes == AnimeSyncChoice.MERGE,
-            onClick = { episodes = AnimeSyncChoice.MERGE }, enabled = enabled)
         MotionTextButton(onClick = { expandedNumbers = !expandedNumbers }, modifier = Modifier.heightIn(min = 44.dp)) {
             Text(if (expandedNumbers) "收起集号" else "查看具体集号")
         }

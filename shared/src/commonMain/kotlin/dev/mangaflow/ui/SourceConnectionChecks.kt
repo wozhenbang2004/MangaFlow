@@ -3,6 +3,10 @@ package dev.mangaflow.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
@@ -26,6 +30,8 @@ import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.sources.BodySourceInfo
 import dev.mangaflow.net.*
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.ui.motion.*
 import kotlinx.coroutines.CancellationException
@@ -81,6 +87,8 @@ internal fun SourceConnectionChecks(
     var generation by remember(repository) { mutableIntStateOf(0) }
     var expanded by remember(repository) { mutableStateOf(false) }
     var showAll by remember(repository) { mutableStateOf(false) }
+    var failedOnly by remember(repository) { mutableStateOf(false) }
+    val desktop = platformKind == PlatformKind.DESKTOP
     var notice by remember(repository) { mutableStateOf<String?>(null) }
     val motion = LocalMotionEnabled.current
     val detailsAngle by animateFloatAsState(if (expanded) 180f else 0f,
@@ -92,7 +100,7 @@ internal fun SourceConnectionChecks(
         job?.cancel()
         job = null
         rows = if (clear) emptyList() else rows.map { if (it.complete) it else it.copy(running = false, stopped = true, message = "已取消") }
-        if (clear) { checkedSettings = null; checkedSources = null; checkedConfiguration = null; showAll = false }
+        if (clear) { checkedSettings = null; checkedSources = null; checkedConfiguration = null; showAll = false; failedOnly = false }
     }
     LaunchedEffect(settings, sourceKey, configuration) {
         if (checkedSettings != null && (checkedSettings !== store.state.value ||
@@ -112,6 +120,7 @@ internal fun SourceConnectionChecks(
         val sameEvidence = checkedSettings === capturedSettings && checkedSources == capturedSources &&
             checkedConfiguration == capturedConfiguration
         cancel(clear = replace || !sameEvidence)
+        if (desktop) expanded = true
         val run = generation
         val queued = selected.map { source ->
             SourceConnectionResult(source, runCatching { store.sourceSnapshot(source.id) }.getOrNull())
@@ -172,7 +181,10 @@ internal fun SourceConnectionChecks(
     val shown = if (valid) rows.sortedBy { row -> targets.indexOfFirst { it.id == row.source.id }.let { if (it < 0) Int.MAX_VALUE else it } } else emptyList()
     val completed = shown.count { it.complete }
     val succeeded = shown.count { it.complete && it.usable }
-    val failed = shown.count { it.complete && !it.usable }
+    val failures = shown.filter { it.complete && !it.usable }
+    val failed = failures.size
+    val filtered = if (desktop && failedOnly) shown.filter { !it.usable && (it.complete || it.running || !it.stopped && job != null) }
+        else shown
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -204,7 +216,22 @@ internal fun SourceConnectionChecks(
         }
         val detailsContent: @Composable () -> Unit = {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            (if (showAll) shown else shown.take(4)).forEach { row -> key(row.source.id) {
+            if (desktop && shown.size > 1) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    ManagementResultFilter("全部 ${shown.size}", !failedOnly, active) { failedOnly = false; showAll = false }
+                    ManagementResultFilter("失败 $failed", failedOnly, active) { failedOnly = true; showAll = false }
+                    if (failed > 0) MotionTextButton(onClick = { start(failures.map { it.source }, replace = false) },
+                        enabled = active && job == null, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.Outlined.Refresh, null, Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("重查失败项", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+                if (failedOnly && filtered.isEmpty()) Text("当前没有失败的来源", Modifier.padding(8.dp),
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            }
+            (if (showAll) filtered else filtered.take(4)).forEach { row -> key(row.source.id) {
                 val signal = when {
                     row.running -> SourceCheckSignal.RUNNING
                     row.usable -> SourceCheckSignal.USABLE
@@ -212,8 +239,10 @@ internal fun SourceConnectionChecks(
                     row.stopped -> SourceCheckSignal.STOPPED
                     else -> SourceCheckSignal.WAITING
                 }
-                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                Row(Modifier.fillMaxWidth().then(if (desktop && signal == SourceCheckSignal.FAILED)
+                    Modifier.background(colors.errorContainer.copy(alpha = .46f), RoundedCornerShape(8.dp))
+                    else Modifier).heightIn(min = 44.dp).padding(start = if (desktop) 8.dp else 0.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     MotionSwap(signal, Modifier.size(18.dp)) { visual ->
                         when (visual) {
                             SourceCheckSignal.RUNNING -> MotionBusyIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp)
@@ -225,10 +254,15 @@ internal fun SourceConnectionChecks(
                     }
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(row.source.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(listOfNotNull(row.route?.let { downloadRouteLabel(it.mode) }, row.message,
+                        if (desktop) {
+                            Text(row.message, style = MaterialTheme.typography.bodySmall,
+                                color = if (signal == SourceCheckSignal.FAILED) colors.onErrorContainer else colors.onSurfaceVariant)
+                            val route = listOfNotNull(row.route?.let { downloadRouteLabel(it.mode) },
+                                row.millis?.let { "${it} ms" }).joinToString(" · ")
+                            if (route.isNotEmpty()) Text(route, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        } else Text(listOfNotNull(row.route?.let { downloadRouteLabel(it.mode) }, row.message,
                             row.millis?.let { it.toString() + " ms" }).joinToString(" · "),
-                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                            maxLines = 3, overflow = TextOverflow.Ellipsis)
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     }
                     if (!row.running) MotionIconButton(onClick = { start(listOf(row.source), replace = false) },
                         enabled = active && job == null, modifier = Modifier.size(44.dp), tooltip = "重新检查" + row.source.name) {
@@ -236,8 +270,8 @@ internal fun SourceConnectionChecks(
                     } else Spacer(Modifier.size(44.dp))
                 }
             } }
-            if (shown.size > 4) MotionTextButton(onClick = { showAll = !showAll }, enabled = active) {
-                Text(if (showAll) "收起其余结果" else "其余 " + (shown.size - 4) + " 个来源", style = MaterialTheme.typography.labelSmall)
+            if (filtered.size > 4) MotionTextButton(onClick = { showAll = !showAll }, enabled = active) {
+                Text(if (showAll) "收起其余结果" else "其余 " + (filtered.size - 4) + " 个来源", style = MaterialTheme.typography.labelSmall)
             }
             Text("目录结果不证明图片 CDN 可用，也不代表下载速度。", style = MaterialTheme.typography.labelSmall,
                 color = colors.onSurfaceVariant)

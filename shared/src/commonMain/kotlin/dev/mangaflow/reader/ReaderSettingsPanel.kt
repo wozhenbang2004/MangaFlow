@@ -13,10 +13,12 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -44,7 +47,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -66,10 +73,13 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MotionDialog
+import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.motionPress
 import kotlin.math.roundToInt
+
+private enum class DesktopReaderSettings(val title: String) { READING("翻页"), APPEARANCE("显示"), INPUT("操作") }
 
 /** Keep related choices together; each filled segment represents its complete hit region. */
 @Composable
@@ -90,6 +100,8 @@ internal fun ReaderSettingsDialog(
     val colors = MaterialTheme.colorScheme
     val motion = LocalMotionEnabled.current
     val desktop = platformKind == PlatformKind.DESKTOP
+    var desktopPage by rememberSaveable { mutableStateOf(DesktopReaderSettings.READING) }
+    val pageScrolls = remember { mutableMapOf<DesktopReaderSettings, ScrollState>() }
     val modes = listOf(ReadingMode.VERTICAL to "纵向",
         ReadingMode.RIGHT_TO_LEFT to "右至左", ReadingMode.LEFT_TO_RIGHT to "左至右")
     val vertical = preferences.mode == ReadingMode.VERTICAL
@@ -108,24 +120,30 @@ internal fun ReaderSettingsDialog(
             Column((if (embedded) Modifier.fillMaxSize() else Modifier.heightIn(max = availableHeight))
                 .padding(horizontal = if (embedded) 14.dp else 18.dp)) {
                 ReaderPanelHeading("阅读设置", "关闭设置", onDismiss)
-                val scroll = rememberScrollState()
-                Box(Modifier.weight(1f, fill = false)) {
+                if (desktop) {
+                    MotionTabs(desktopPage.ordinal, DesktopReaderSettings.entries.map { it.title },
+                        onSelect = { desktopPage = DesktopReaderSettings.entries[it] },
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), controlHeight = 40.dp,
+                        treatment = MotionTabTreatment.Underline)
+                }
+                val body: @Composable (DesktopReaderSettings) -> Unit = { page ->
+                val scroll = if (desktop) remember(page) { pageScrolls.getOrPut(page) { ScrollState(0) } }
+                    else rememberScrollState()
+                Box(Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth().verticalScroll(scroll)
                     .padding(end = if (desktop) 10.dp else 0.dp, bottom = 14.dp),
                     verticalArrangement = Arrangement.spacedBy(22.dp)) {
-                    ReaderSettingsSection(if (desktop) "阅读布局" else "阅读顺序") {
-                        MotionTabs(
-                            selected = if (desktop) layout else modes.indexOfFirst { it.first == preferences.mode },
-                            labels = if (desktop) listOf("条漫", "单页", "双页") else modes.map { it.second },
-                            onSelect = { index ->
-                                if (desktop) {
-                                    val pagedMode = if (vertical) preferences.lastPagedMode else preferences.mode
-                                    update(preferences.copy(
-                                        mode = if (index == 0) ReadingMode.VERTICAL else pagedMode,
-                                        doublePage = if (index == 0) preferences.doublePage else index == 2,
-                                    ))
-                                } else update(preferences.copy(mode = modes[index].first))
-                            },
+                    if (!desktop || page == DesktopReaderSettings.READING) ReaderSettingsSection(if (desktop) "阅读布局" else "阅读顺序") {
+                        if (desktop) DesktopReadingLayoutChoice(layout) { index ->
+                            val pagedMode = if (vertical) preferences.lastPagedMode else preferences.mode
+                            update(preferences.copy(
+                                mode = if (index == 0) ReadingMode.VERTICAL else pagedMode,
+                                doublePage = if (index == 0) preferences.doublePage else index == 2,
+                            ))
+                        } else MotionTabs(
+                            selected = modes.indexOfFirst { it.first == preferences.mode },
+                            labels = modes.map { it.second },
+                            onSelect = { update(preferences.copy(mode = modes[it].first)) },
                             foreground = colors.onSurface,
                             muted = colors.onSurfaceVariant,
                             track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
@@ -179,7 +197,7 @@ internal fun ReaderSettingsDialog(
                         }
                     }
 
-                    Column(Modifier.fillMaxWidth()) {
+                    if (!desktop || page == DesktopReaderSettings.INPUT) Column(Modifier.fillMaxWidth()) {
                         val resumePolicies = listOf("ask", "source_record", "same_page")
                         val resumeLabels = listOf("每次询问", "本源记录", "尝试同页")
                         val selectedPolicy = resumePolicies.indexOf(sourceResumePolicy).coerceAtLeast(0)
@@ -229,19 +247,19 @@ internal fun ReaderSettingsDialog(
                         }
                     }
 
-                    if (PanelReadingAvailable) ReaderSettingsSection("分镜") {
+                    if (PanelReadingAvailable && (!desktop || page == DesktopReaderSettings.READING)) ReaderSettingsSection("分镜") {
                         PanelSettings(preferences, update, onModels)
                     }
 
-                    ReaderSettingsSection("外观") {
+                    if (!desktop || page == DesktopReaderSettings.APPEARANCE) ReaderSettingsSection("外观") {
                         Text("阅读底色", color = colors.onSurface, fontSize = 14.sp,
                             modifier = Modifier.padding(top = 4.dp, bottom = 4.dp))
                         PaperThemePicker(preferences.theme) { update(preferences.copy(theme = it)) }
                     }
 
-                    LocalReaderKeyboard.current?.settings?.invoke(!vertical && preferences.swipeRightForNext(desktop = true))
+                    if (!desktop || page == DesktopReaderSettings.INPUT) LocalReaderKeyboard.current?.settings?.invoke(!vertical && preferences.swipeRightForNext(desktop = true))
 
-                    ReaderSettingsSection("屏幕") {
+                    if (!desktop || page == DesktopReaderSettings.APPEARANCE) ReaderSettingsSection("屏幕") {
                         ReaderToggle("保持常亮", preferences.keepScreenOn) { update(preferences.copy(keepScreenOn = it)) }
                         Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
@@ -261,6 +279,10 @@ internal fun ReaderSettingsDialog(
                 }
                 DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
                 }
+                }
+                if (desktop) MotionTabContent(desktopPage, modifier = Modifier.weight(1f),
+                    contentKey = { it }, order = { it.ordinal }, content = body)
+                else Box(Modifier.weight(1f, fill = false)) { body(DesktopReaderSettings.READING) }
             }
         }
     }
@@ -275,5 +297,49 @@ private fun ReaderSettingsSection(title: String, content: @Composable ColumnScop
         Text(title, Modifier.semantics { heading() }, color = MaterialTheme.colorScheme.onSurface,
             style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
         content()
+    }
+}
+
+@Composable
+private fun DesktopReadingLayoutChoice(layout: Int, onSelect: (Int) -> Unit) {
+    val labels = listOf("条漫", "单页", "双页")
+    val colors = MaterialTheme.colorScheme
+    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val illustrate = maxWidth >= 206.dp * scale && scale <= 1.65f
+        MotionTabs(layout, labels, onSelect, modifier = Modifier.fillMaxWidth(),
+            foreground = colors.onSurface, muted = colors.onSurfaceVariant, track = colors.onSurface.copy(alpha = .04f),
+            indicator = colors.primary.copy(alpha = .10f), fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+            controlHeight = if (illustrate) 76.dp else 44.dp, role = Role.RadioButton,
+            tooltips = listOf("连续纵向阅读", "一次显示一页", "两页并排阅读")) { index, selected, ink ->
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                if (illustrate) Canvas(Modifier.size(38.dp, 30.dp)) {
+                    val paper = if (selected) colors.primary else ink
+                    val radius = CornerRadius(2.dp.toPx())
+                    fun page(x: Float, y: Float, width: Float, height: Float) {
+                        drawRoundRect(paper.copy(alpha = if (selected) .22f else .14f),
+                            Offset(size.width * x, size.height * y),
+                            Size(size.width * width, size.height * height), radius)
+                        drawRoundRect(paper.copy(alpha = .65f),
+                            Offset(size.width * (x + .045f), size.height * (y + .08f)),
+                            Size(size.width * (width - .09f), size.height * minOf(.13f, height * .34f)), radius)
+                    }
+                    when (index) {
+                        0 -> {
+                            page(.24f, 0f, .52f, .17f)
+                            page(.24f, .23f, .52f, .52f)
+                            page(.24f, .81f, .52f, .19f)
+                        }
+                        1 -> page(.26f, .03f, .48f, .94f)
+                        else -> {
+                            page(.02f, .10f, .45f, .80f)
+                            page(.53f, .10f, .45f, .80f)
+                        }
+                    }
+                }
+                Text(labels[index], color = ink, style = MaterialTheme.typography.labelMedium,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+            }
+        }
     }
 }
