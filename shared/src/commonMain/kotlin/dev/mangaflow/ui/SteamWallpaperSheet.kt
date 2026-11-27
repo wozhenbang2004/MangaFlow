@@ -454,13 +454,12 @@ internal fun SteamWallpaperSheet(
                             Spacer(Modifier.width(10.dp))
                         }
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                            Text(when (pane) {
+                            PreferenceHeading(when (pane) {
                                 WorkshopPane.LOGIN -> "Steam 登录"
                                 WorkshopPane.ACCOUNT -> "Steam 账号"
                                 WorkshopPane.PREVIEW -> "壁纸预览"
                                 else -> "创意工坊"
-                            }, style = MaterialTheme.typography.titleMedium, maxLines = 1,
-                                overflow = TextOverflow.Ellipsis)
+                            })
                             if (panelHeight >= 340.dp) Text("Wallpaper Engine",
                                 style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, maxLines = 1)
                         }
@@ -974,7 +973,7 @@ private fun SteamWallpaperBrowser(
             if (!requested && !state.loading) MotionTextButton(onClick = onSearch) { Text("浏览壁纸") }
         } else LazyVerticalGrid(columns = GridCells.Adaptive(tileWidth), state = grid,
             modifier = Modifier.weight(1f).fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             items(state.items, key = { it.id }) { item ->
                 val interaction = remember(item.id) { MutableInteractionSource() }
@@ -983,15 +982,16 @@ private fun SteamWallpaperBrowser(
                         role = Role.Button, onClickLabel = "预览 " + item.title) { onPreview(item) }
                     .motionPress(interaction),
                     verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Box(Modifier.fillMaxWidth().aspectRatio(1.5f).clip(RoundedCornerShape(12.dp))
+                    Box(Modifier.fillMaxWidth().aspectRatio(16f / 10f).clip(RoundedCornerShape(12.dp))
                         .background(colors.onSurface.copy(alpha = .045f))) {
                         AsyncImage(model = item.previewUrl, contentDescription = item.title,
                             contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     }
-                    Text(item.title, style = MaterialTheme.typography.bodySmall, minLines = 2,
+                    Text(item.title, style = MaterialTheme.typography.titleSmall, minLines = 2,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Text(item.sizeBytes?.takeIf { it > 0L }?.let(::steamWallpaperByteLabel).orEmpty(),
-                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    item.sizeBytes?.takeIf { it > 0L }?.let { bytes ->
+                        Text(steamWallpaperByteLabel(bytes), style = mangaMetricValueStyle(), color = colors.onSurfaceVariant)
+                    }
                 }
             }
         }

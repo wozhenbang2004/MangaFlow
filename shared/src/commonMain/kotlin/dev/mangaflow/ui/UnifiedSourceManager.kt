@@ -184,7 +184,7 @@ internal fun UnifiedSourceManager(
         BackHandler(enabled = sourcePage != null && !state.connecting, onBack = showOverview)
         Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height * .72f)) {
             Row(Modifier.fillMaxWidth().padding(start = if (sourcePage == null) 20.dp else 4.dp, end = 8.dp)
-                .heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
+                .heightIn(min = 60.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (sourcePage != null) MotionIconButton(enabled = !state.connecting, onClick = showOverview) {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回来源列表", Modifier.size(20.dp))
                 }
@@ -205,9 +205,7 @@ internal fun UnifiedSourceManager(
                             else -> state.sources.firstOrNull { it.first == source }?.second
                                 ?: selectedOverview?.name ?: sourceDisplayName(source)
                         }
-                        Text(heading,
-                            fontSize = 16.sp, fontWeight = FontWeight.Medium,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                        PreferenceHeading(heading, Modifier.weight(1f, fill = false))
                         if (canSwitchSource) Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp),
                             tint = colors.onSurfaceVariant)
                     }
@@ -308,7 +306,7 @@ internal fun UnifiedSourceManager(
                             val canChoose = row.status !in runningStates && (row.status != "DISABLED" || removable.isNotEmpty()) &&
                                 !state.connecting && pageActive
                             val interaction = remember(row.id) { MutableInteractionSource() }
-                            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
+                            Row(Modifier.fillMaxWidth().heightIn(min = 54.dp).clip(RoundedCornerShape(12.dp))
                                 .clickable(interactionSource = interaction, indication = null, enabled = canChoose,
                                     role = Role.Button, onClickLabel = if (row.status == "NEEDS_CONFIRMATION")
                                         "查看${row.name}的待确认版本" else "查找${row.name}的版本") {
@@ -323,10 +321,10 @@ internal fun UnifiedSourceManager(
                                     }
                                 }.motionPress(interaction, enabled = canChoose).padding(horizontal = 6.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                ChapterSourceLogo(row.id, row.name, Modifier.size(21.dp))
+                                ChapterSourceLogo(row.id, row.name, Modifier.size(28.dp), muted = row.status == "DISABLED")
                                 Spacer(Modifier.width(12.dp))
-                                Text(row.name, Modifier.weight(1f), fontSize = 14.sp,
-                                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(row.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 Spacer(Modifier.width(8.dp))
                                 Row(Modifier.widthIn(max = 140.dp).semantics(mergeDescendants = true) {
                                     stateDescription = listOfNotNull(
@@ -343,7 +341,7 @@ internal fun UnifiedSourceManager(
                                         row.status == "NEEDS_CONFIRMATION" -> "${row.candidates.size}个候选"
                                         else -> ""
                                     }
-                                    if (count.isNotBlank()) Text(count, fontSize = 11.sp,
+                                    if (count.isNotBlank()) Text(count, style = MaterialTheme.typography.labelMedium,
                                         color = colors.onSurfaceVariant, maxLines = 1)
                                     if (row.status == "SEARCHING") MotionBusyIndicator(Modifier.size(13.dp),
                                         strokeWidth = 1.3.dp, color = colors.onSurfaceVariant)
@@ -369,7 +367,7 @@ internal fun UnifiedSourceManager(
                                 }
                             }
                             if (errorDetailsSource == row.id) Column(Modifier.fillMaxWidth()
-                                .padding(start = 39.dp, bottom = 6.dp)) {
+                                .padding(start = 46.dp, bottom = 8.dp)) {
                                 Text(listOfNotNull(
                                     row.checkedAt.takeIf { it > 0L }?.let { "检查于${sourceCheckAge(it, now)}" },
                                     row.lastSuccessAt.takeIf { it > 0L }?.let { "上次成功${sourceCheckAge(it, now)}" },

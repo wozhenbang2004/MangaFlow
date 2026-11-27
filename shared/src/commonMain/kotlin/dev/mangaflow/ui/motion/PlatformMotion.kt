@@ -22,4 +22,4 @@ internal expect fun rememberNativeFeelFeedback(): (FeelEvent) -> Boolean
 
 /** Android disables its separate native window animation; other hosts animate the same Compose layer. */
 @Composable
-internal expect fun MotionDialogWindowPolicy(visible: Boolean)
+internal expect fun MotionDialogWindowPolicy(visible: Boolean, backgroundDim: Float)

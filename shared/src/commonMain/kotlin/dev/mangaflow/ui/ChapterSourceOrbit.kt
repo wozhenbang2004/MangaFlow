@@ -188,7 +188,7 @@ internal fun ChapterSourceOrbit(
                 val height = with(density) { maxHeight.toPx() }
                 val edge = with(density) { 8.dp.toPx() }
                 val availableHeight = (maxHeight - 16.dp).coerceAtLeast(1.dp)
-                val rowHeight = 44.dp * density.fontScale.coerceAtLeast(1f)
+                val rowHeight = 48.dp * density.fontScale.coerceAtLeast(1f)
                 val railWidth = minOf(152.dp * density.fontScale.coerceIn(1f, 1.3f),
                     (maxWidth - 16.dp).coerceAtLeast(1.dp))
                 val railWidthPx = with(density) { railWidth.toPx() }
@@ -337,6 +337,7 @@ internal fun ChapterSourceDisc(
     val colors = MaterialTheme.colorScheme
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     Row(modifier.clip(RoundedCornerShape(10.dp))
+        .then(if (selected) Modifier.background(colors.primary.copy(alpha = .08f)) else Modifier)
         .combinedClickable(enabled = enabled || onInspect != null,
             interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = actionLabel, onClick = { if (enabled) onClick() },
@@ -354,8 +355,8 @@ internal fun ChapterSourceDisc(
             if (busy) MotionBusyIndicator(Modifier.align(Alignment.TopEnd).size(12.dp),
                 color = colors.onSurface, strokeWidth = 1.4.dp)
             else if (selected) Box(Modifier.align(Alignment.TopEnd).size(12.dp)
-                .background(colors.surface, CircleShape), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Check, null, Modifier.size(10.dp), tint = colors.onSurface)
+                .background(colors.primary, CircleShape), contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.Check, null, Modifier.size(10.dp), tint = colors.onPrimary)
             }
             if (entry != null) Box(Modifier.align(Alignment.BottomEnd).size(12.dp)
                 .background(colors.surface, CircleShape), contentAlignment = Alignment.Center) {
@@ -364,11 +365,11 @@ internal fun ChapterSourceDisc(
         }
         Column(Modifier.weight(1f).padding(start = 6.dp)
             .graphicsLayer { alpha = ((revealProgress() - .3f) / .7f).coerceIn(0f, 1f) }) {
-            Text(variant.sourceName, color = colors.onSurface, fontSize = 13.sp, lineHeight = 16.sp,
+            Text(variant.sourceName, color = colors.onSurface, fontSize = 14.sp, lineHeight = 18.sp,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (secondary.isNotBlank()) Text(secondary, color = colors.onSurfaceVariant,
-                fontSize = 10.sp, lineHeight = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (secondary.isNotBlank()) Text(mangaNumberText(secondary), color = colors.onSurfaceVariant,
+                fontSize = 12.sp, lineHeight = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             resolution?.let { sample ->
                 val resolutionInteraction = remember(variant.storageId) { MutableInteractionSource() }
                 val configuration = LocalViewConfiguration.current

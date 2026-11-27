@@ -257,20 +257,21 @@ private fun LazyListScope.sourceManagerRows(sources: List<LanercSourceListing>, 
         val colors = MaterialTheme.colorScheme
         val interaction = remember { MutableInteractionSource() }
         Row(
-            Modifier.fillMaxWidth().heightIn(min = 57.dp)
-                .clip(RoundedCornerShape(12.dp)).background(colors.onSurface.copy(alpha = .045f))
+            Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                .clip(RoundedCornerShape(12.dp))
                 .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                     onClickLabel = "管理 $title", onClick = { onSelect(source) })
                 .motionPress(interaction, pressedScale = .99f)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 6.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Box(Modifier.width(34.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(34.dp).background(colors.surfaceContainerLow, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center) {
                 AnimeSourceMark(source.id, source.displayName, size = 18.dp)
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall,
+                Text(title, style = MaterialTheme.typography.titleMedium,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 AnimeQuietLabel(animeSourceManagerLabel(source, state, native))
             }

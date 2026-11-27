@@ -3,7 +3,6 @@ package dev.mangaflow.anime.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -27,14 +26,11 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -42,7 +38,6 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.downloads.*
 import dev.mangaflow.anime.sources.isRetiredAnimeSource
-import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
@@ -190,16 +185,15 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                         }
                         downloadGroups.forEach { (subjectId, episodes) ->
                             item(key = "work:$subjectId") {
-                                Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
+                                Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 3.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                     val subject = episodes.first().subject
-                                    AnimePoster(subject, Modifier.width(42.dp).height(62.dp))
+                                    AnimePoster(subject, Modifier.size(48.dp, 72.dp))
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                         Text(subject.title, Modifier.semantics { heading() },
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                                            fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                            style = animeWorkTitleStyle(),
+                                            maxLines = 2, overflow = TextOverflow.Ellipsis)
                                         val readyCount = episodes.count { it.status == AnimeDownloadStatus.COMPLETED }
                                         AnimeQuietLabel(when (filter) {
                                             1 -> "${episodes.size} 集待完成"
@@ -260,8 +254,8 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
     val titleAction = if (completed) Modifier.motionPress(interaction, !menuPresent)
         .clickable(enabled = !menuPresent, interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = actionLabel, onClick = action) else Modifier
-    Column(Modifier.fillMaxWidth().clip(shape).background(colors.surfaceContainerLow).padding(start = 10.dp, end = 3.dp)
-        .padding(vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.fillMaxWidth().clip(shape).padding(start = 14.dp, end = 3.dp)
+        .padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(Modifier.weight(1f).heightIn(min = 44.dp).then(titleAction),
@@ -272,14 +266,25 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
                         style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     val source = entry.sourceName.ifBlank { animeSourceName(entry.sourceId, screen) }
                     val status = if (!completed && retired) "原来源已下架" else animeDownloadStatus(entry.status)
-                    Text(listOf(status, source, entry.edition)
-                        .filter { it.isNotBlank() }.distinct().joinToString(" · "), style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    val palette = mangaStatusColors()
+                    val indicator = when (entry.status) {
+                        AnimeDownloadStatus.COMPLETED -> palette.success
+                        AnimeDownloadStatus.DOWNLOADING -> palette.activity
+                        AnimeDownloadStatus.FAILED -> palette.error
+                        AnimeDownloadStatus.QUEUED, AnimeDownloadStatus.WAITING -> palette.waiting
+                        AnimeDownloadStatus.PAUSED -> palette.neutral
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Spacer(Modifier.size(5.dp).background(indicator, CircleShape))
+                        Text(listOf(status, source, entry.edition).filter { it.isNotBlank() }.distinct().joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
                 }
                 if (completed) Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
-                    Box(Modifier.size(32.dp).background(colors.onSurface, CircleShape),
+                    Box(Modifier.size(32.dp).background(colors.primaryContainer, CircleShape),
                         contentAlignment = Alignment.Center) {
-                        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(20.dp), tint = colors.surface)
+                        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(20.dp), tint = colors.onPrimaryContainer)
                     }
                 }
             }
@@ -404,14 +409,9 @@ private fun AnimeDownloadProgress(fraction: Float, modifier: Modifier = Modifier
     val motion = LocalMotionEnabled.current
     val progress by animateFloatAsState(fraction,
         if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(), label = "anime-download-progress")
-    val color = MaterialTheme.colorScheme.onSurface
-    Canvas(modifier.fillMaxWidth().height(3.dp).semantics {
+    AnimeProgressTrack(progress, modifier.semantics {
         progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
-    }) {
-        val start = Offset(0f, center.y)
-        drawLine(color.copy(alpha = .12f), start, Offset(size.width, center.y), 3.dp.toPx(), StrokeCap.Round)
-        drawLine(color.copy(alpha = .70f), start, Offset(size.width * progress, center.y), 3.dp.toPx(), StrokeCap.Round)
-    }
+    })
 }
 
 private fun animeDownloadStatus(status: AnimeDownloadStatus): String = when (status) {

@@ -46,6 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -111,7 +112,7 @@ internal fun ReaderSettingsDialog(
                 Box(Modifier.weight(1f, fill = false)) {
                 Column(Modifier.fillMaxWidth().verticalScroll(scroll)
                     .padding(end = if (desktop) 10.dp else 0.dp, bottom = 14.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    verticalArrangement = Arrangement.spacedBy(22.dp)) {
                     ReaderSettingsSection(if (desktop) "阅读布局" else "阅读顺序") {
                         MotionTabs(
                             selected = if (desktop) layout else modes.indexOfFirst { it.first == preferences.mode },
@@ -270,9 +271,9 @@ internal fun ReaderSettingsDialog(
 
 @Composable
 private fun ReaderSettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .8f),
-            fontSize = 12.sp, fontWeight = FontWeight.Medium)
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(title, Modifier.semantics { heading() }, color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
         content()
     }
 }

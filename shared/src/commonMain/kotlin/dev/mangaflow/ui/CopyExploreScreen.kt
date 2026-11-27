@@ -44,13 +44,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -204,14 +204,17 @@ internal fun CopyExploreScreen(
                     positions.remove(oldest)
                 }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
-                    val columns = if (maxWidth >= 600.dp) 4 else 3
-                    val listColumns = if (topicList) 1 else columns
+                    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+                    val columns = MangaLayout.columns(maxWidth, if (maxWidth >= 600.dp) 4 else 3,
+                        83.dp * scale, 10.dp, 16.dp)
+                    val listColumns = if (topicList) MangaLayout.columns(maxWidth, 3, 280.dp * scale, 10.dp, 16.dp)
+                        else columns
                     LazyVerticalGrid(columns = GridCells.Fixed(listColumns), state = grid,
                         modifier = Modifier.fillMaxSize().motionInputGate(paneActive),
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp,
                             bottom = 28.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(if (topicList) 12.dp else 16.dp)) {
+                        verticalArrangement = Arrangement.spacedBy(if (topicList) 24.dp else 18.dp)) {
                         pane.topic?.let { topic ->
                             item(key = "topic-heading", span = { GridItemSpan(maxLineSpan) }) {
                                 CopyTopicHeading(topic, repository, paneActive)
@@ -306,11 +309,11 @@ private fun CopyCatalogControls(
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), colors = controlColors) {
                 Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(16.dp))
                 Column(Modifier.weight(1f).padding(start = 6.dp)) {
-                    Text("题材与展会", style = MaterialTheme.typography.labelMedium)
-                    selection.theme?.name?.let { theme ->
-                        Text(theme, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                    }
+                    val selectedTheme = selection.theme?.name
+                    if (selectedTheme != null) Text("题材与展会", style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant)
+                    Text(selectedTheme ?: "题材与展会", style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
             MotionTextButton(onClick = {
@@ -321,10 +324,9 @@ private fun CopyCatalogControls(
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), colors = controlColors) {
                 Icon(Icons.Outlined.Tune, null, Modifier.size(16.dp))
                 Column(Modifier.weight(1f).padding(start = 6.dp)) {
-                    Text("筛选与排序", style = MaterialTheme.typography.labelMedium)
+                    Text("筛选与排序", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     Text(listOfNotNull(selection.scope?.name ?: "全部范围", ordering?.name).joinToString(" · "),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall,
-                        color = colors.onSurfaceVariant)
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
                 }
             }
             if (canReset) MotionIconButton(onClick = controller::resetFilters, enabled = active && !optionsOpen,
@@ -508,14 +510,14 @@ private fun CopyDirectoryChoice(
             contentDescription = name + (count?.let { "，$it 部" } ?: "")
         },
         colors = ButtonDefaults.textButtonColors(
-            containerColor = if (chosen) colors.onSurface.copy(alpha = .08f) else Color.Transparent,
-            contentColor = if (chosen) colors.onSurface else colors.onSurfaceVariant),
+            containerColor = if (chosen) colors.primary.copy(alpha = .10f) else Color.Transparent,
+            contentColor = if (chosen) colors.primary else colors.onSurface),
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
         if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp))
         Text(name, Modifier.weight(1f).padding(start = if (chosen) 4.dp else 0.dp),
-            maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+            maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
         if (count != null) Text(count.toString(), Modifier.padding(start = 5.dp),
-            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            style = mangaMetricValueStyle(), color = colors.onSurfaceVariant)
     }
 }
 
@@ -562,23 +564,20 @@ private fun CopyTopicRow(topic: CopyTopic, repository: MangaRepository, active: 
         modifier = Modifier.fillMaxWidth(), enabled = active,
         colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface),
         contentPadding = PaddingValues(0.dp), shape = RoundedCornerShape(12.dp)) {
-        if (topic.coverUrl.isNotBlank()) {
-            CopyTopicCover(topic, repository,
-                Modifier.width(102.dp).height(72.dp).mangaCoverCard(10.dp))
-            Spacer(Modifier.width(12.dp))
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (topic.coverUrl.isNotBlank()) CopyTopicCover(topic, repository,
+                Modifier.fillMaxWidth().aspectRatio(3.1f).mangaCoverCard(12.dp, shadowRadius = 8.dp))
+            Column(Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(topic.title, style = browseTitleStyle(19.sp, 25.sp), color = colors.onSurface,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                val caption = topic.brief.ifBlank { topic.period }
+                if (caption.isNotBlank()) Text(copyTopicPlainText(caption), style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (topic.date.isNotBlank()) Text(topic.date.substringBefore('T').substringBefore(' '),
+                    style = mangaMetricValueStyle(), color = colors.onSurfaceVariant)
+            }
         }
-        Column(Modifier.weight(1f).padding(vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(topic.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
-            val caption = topic.brief.ifBlank { topic.period }
-            if (caption.isNotBlank()) Text(copyTopicPlainText(caption), style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (topic.date.isNotBlank()) Text(topic.date.substringBefore('T').substringBefore(' '),
-                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-        }
-        Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.padding(start = 8.dp).size(16.dp),
-            tint = colors.onSurfaceVariant)
     }
 }
 
@@ -590,10 +589,10 @@ private fun CopyTopicHeading(topic: CopyTopic, repository: MangaRepository, acti
     var descriptionOverflows by remember(description) { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (topic.coverUrl.isNotBlank()) CopyTopicCover(topic, repository,
-            Modifier.fillMaxWidth().heightIn(max = 210.dp).aspectRatio(2.6f).mangaCoverCard(14.dp))
+            Modifier.fillMaxWidth().heightIn(max = 236.dp).aspectRatio(2.65f).mangaCoverCard(14.dp, shadowRadius = 9.dp))
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(topic.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium)
+                Text(topic.title, style = browseTitleStyle(25.sp, 32.sp))
                 if (description.isNotBlank()) Text(description, style = MaterialTheme.typography.bodyMedium,
                     color = colors.onSurfaceVariant, maxLines = if (expanded) Int.MAX_VALUE else 3,
                     overflow = TextOverflow.Ellipsis,

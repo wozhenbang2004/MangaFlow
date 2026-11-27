@@ -47,7 +47,6 @@ import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.VisibilityOff
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import dev.mangaflow.ui.motion.MotionIconButton as IconButton
 import androidx.compose.material3.MaterialTheme
@@ -113,7 +112,6 @@ import kotlinx.coroutines.launch
 
 private val CommunityWhite: Color @Composable get() = MaterialTheme.colorScheme.onSurface
 private val CommunityMuted: Color @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
-private val CommunityLine: Color @Composable get() = MaterialTheme.colorScheme.onSurface.copy(alpha = .07f)
 private val CommunityProviders = dev.mangaflow.data.ReviewProviders.displayOrder
 
 /** Mix only confirmed reviews, keeping each source's native ID and pagination. */
@@ -271,7 +269,6 @@ internal fun CommunityPanel(
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomPadding)) {
                 items(clusters, key = { it.key }) { cluster ->
                     CuratedReviewCluster(mangaId, cluster, sourcesById, hidePromotions, loadReplies)
-                    HorizontalDivider(Modifier.padding(start = 38.dp), color = CommunityLine.copy(alpha = .035f), thickness = .5.dp)
                 }
                 item("mixed-footer") {
                     Column(Modifier.fillMaxWidth()) {
@@ -323,7 +320,7 @@ private fun CuratedReviewCluster(
                     CommunityDiscussionComment(source, row.review, loadReplies, comfortable = true)
                 }
             } }
-            Row(Modifier.padding(start = 38.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(Modifier.padding(start = ComfortableCommentInset), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 if (cluster.rows.size > 1) Text(
                     if (showSimilar) "收起相似内容" else "相似内容 ${cluster.rows.size} 条",
                     color = CommunityMuted, fontSize = 11.sp, lineHeight = 16.sp,
@@ -501,6 +498,8 @@ fun CommunityComment(
 
 private enum class CommentPresentation { HIDDEN, PREVIEW, EXPANDED }
 
+private val ComfortableCommentInset = 42.dp
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CommentContent(
@@ -543,24 +542,25 @@ private fun CommentContent(
         .then(if (expandable) Modifier.clickable(interactionSource = contentInteraction, indication = null,
             role = Role.Button, onClickLabel = if (expanded) "收起评论" else "展开评论", onClick = toggleContent)
             .motionPress(contentInteraction, pressedScale = .99f) else Modifier),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        CommentAvatar(review, foreground, size = if (compactReply) 24.dp else if (comfortable) 30.dp else 28.dp)
+        horizontalArrangement = Arrangement.spacedBy(if (comfortable) 10.dp else 8.dp)) {
+        CommentAvatar(review, foreground, size = if (compactReply) 24.dp else if (comfortable) 32.dp else 28.dp)
         Column(Modifier.weight(1f)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 18.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(review.author, color = foreground.copy(alpha = .87f), fontSize = if (comfortable) 14.sp else 12.sp,
-                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                Text(review.author, color = foreground, fontSize = if (comfortable) 14.sp else 13.sp,
+                    fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f))
                 if (sourceId != null) CommentSourceBadge(sourceId)
-                if (review.date.isNotBlank()) Text(compactCommentDate(review.date), color = muted, fontSize = if (comfortable) 11.sp else 10.sp,
-                    modifier = Modifier.widthIn(max = 76.dp).semantics { contentDescription = review.date },
+                if (review.date.isNotBlank()) Text(compactCommentDate(review.date), color = muted,
+                    style = mangaMetricValueStyle(12.sp, 16.sp), fontWeight = FontWeight.Normal,
+                    modifier = Modifier.widthIn(max = 90.dp).semantics { contentDescription = review.date },
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (canTranslate) CommentTranslationAction(translationText, muted)
                 if (expandable) Icon(
                     if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
                     null, tint = muted, modifier = Modifier.size(14.dp))
             }
-            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(if (compactReply) 2.dp else 5.dp))
             if (review.replyTo.isNotBlank()) {
                 Text("回复 ${review.replyTo}", color = muted, fontSize = 11.sp, maxLines = 1,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 3.dp))
@@ -579,12 +579,12 @@ private fun CommentContent(
             } else {
                 if (reviewHeading != null) {
                     Text(reviewHeading, fontFamily = mangaFontFamily(MangaFontScene.READING), color = foreground,
-                        fontSize = if (comfortable) 16.sp else 14.sp, lineHeight = if (comfortable) 24.sp else 22.sp,
-                        fontWeight = FontWeight.Medium, maxLines = if (expanded) Int.MAX_VALUE else 2,
+                        fontSize = if (comfortable) 18.sp else 15.sp, lineHeight = if (comfortable) 25.sp else 22.sp,
+                        fontWeight = FontWeight.SemiBold, maxLines = if (expanded) Int.MAX_VALUE else 2,
                         overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 5.dp))
                 }
                 Text(text, fontFamily = mangaFontFamily(MangaFontScene.READING), color = foreground.copy(alpha = .92f),
-                    fontSize = if (comfortable) 16.sp else 14.sp, lineHeight = if (comfortable) 26.sp else 22.sp,
+                    fontSize = if (comfortable) 16.sp else 14.sp, lineHeight = if (comfortable) 27.sp else 22.sp,
                     maxLines = if (expanded) Int.MAX_VALUE else if (comfortable) {
                         if (review.kind == ReviewKind.REVIEW) 5 else 4
                     } else 3, overflow = TextOverflow.Ellipsis,
@@ -601,11 +601,11 @@ private fun CommentContent(
                         Text(if (review.kind == ReviewKind.REVIEW) "收起长评" else "隐藏剧透", color = muted, fontSize = 11.sp)
                     }
                     review.upVotes?.takeIf { it > 0 }?.let {
-                        Text("${review.positiveVoteLabel} $it", color = muted, fontSize = 10.sp,
+                        Text(mangaNumberText("${review.positiveVoteLabel} $it"), color = muted, fontSize = 12.sp,
                             modifier = Modifier.align(Alignment.CenterVertically).padding(end = 4.dp))
                     }
                     review.downVotes?.takeIf { it > 0 }?.let {
-                        Text("踩 $it", color = muted, fontSize = 10.sp,
+                        Text(mangaNumberText("踩 $it"), color = muted, fontSize = 12.sp,
                             modifier = Modifier.align(Alignment.CenterVertically).padding(end = 4.dp))
                     }
                     if (showReplyCount && (review.replyCount ?: 0) > 0) {
@@ -651,13 +651,14 @@ internal fun CommunityDiscussionComment(
 ) {
     val hasReplies = ((source.id == "copy" && review.kind == ReviewKind.COMMENT) || source.supportsReplies) &&
         source.subjectId.isNotBlank() && (review.replyCount ?: if (review.canLoadReplies) 1 else 0) > 0
-    Column(Modifier.fillMaxWidth().padding(vertical = if (comfortable) 7.dp else 6.dp)) {
+    Column(Modifier.widthIn(max = if (comfortable) 684.dp else Dp.Infinity)
+        .fillMaxWidth().padding(vertical = if (comfortable) 11.dp else 7.dp)) {
         CommentContent(review, Modifier, foreground, muted,
             showReplyCount = !hasReplies, sourceId = source.id, comfortable = comfortable)
         if (hasReplies) {
             key(source.id, source.subjectId, review.id, source.externalIds) {
                 CommentReplies(source, review, loadReplies, foreground, muted,
-                    leadingInset = if (comfortable) 38.dp else 36.dp)
+                    leadingInset = if (comfortable) ComfortableCommentInset else 36.dp)
             }
         }
     }
@@ -742,8 +743,10 @@ private fun CommentReplies(
         exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0), shrinkTowards = Alignment.Top) +
             fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
         Column(Modifier.fillMaxWidth().motionInputGate(expanded)
-            .padding(start = leadingInset, top = 3.dp, bottom = 2.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            .padding(start = leadingInset, top = 4.dp, bottom = 2.dp)
+            .background(foreground.copy(alpha = .042f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp)) {
             rows.forEach { reply ->
                 key(source.subjectId, review.id, reply.id) {
                     CommentContent(reply, Modifier, foreground, muted, showReplyCount = true,

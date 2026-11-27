@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.widthIn
 import dev.mangaflow.ui.MangaWindowSize
 import dev.mangaflow.ui.MangaLayout
 import dev.mangaflow.ui.LocalMangaWindow
+import dev.mangaflow.ui.mangaOverlayScrim
 import dev.mangaflow.platform.monotonicTimeMillis
 
 import androidx.compose.animation.AnimatedContent
@@ -412,7 +413,7 @@ internal fun MotionDialog(
     ) { if (it) 0f else 1f }
     if (state.currentState || state.targetState || !state.isIdle) {
         Dialog(onDismissRequest = { if (visible) onDismissRequest() }, properties = properties) {
-            MotionDialogWindowPolicy(visible)
+            MotionDialogWindowPolicy(visible, backgroundDim = mangaOverlayScrim().alpha)
             val focus = LocalFocusManager.current
             SideEffect { if (!visible) focus.clearFocus(force = true) }
             // Read the dialog's own constraints: split-screen and the IME can be smaller
@@ -471,6 +472,8 @@ internal fun MotionBottomSheet(
         // The sheet's anchor must see the whole dialog; cap only its inner content.
         modifier = modifier,
         sheetMaxWidth = MangaLayout.PanelWidth,
+        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+        scrimColor = mangaOverlayScrim(),
         containerColor = if (backdrop != null) Color.Transparent else containerColor,
         contentColor = contentColor, tonalElevation = 0.dp,
         // Insets outside a transparent Surface leave an unpainted strip below the frosting.
@@ -496,9 +499,10 @@ internal fun MotionBottomSheet(
 
 @Composable
 private fun MotionSheetHandle(color: Color) {
-    Box(Modifier.fillMaxWidth().height(26.dp), contentAlignment = Alignment.Center) {
-        Box(Modifier.size(width = 32.dp, height = 4.dp).clip(RoundedCornerShape(2.dp))
-            .background(color.copy(alpha = .42f)))
+    val contrast = LocalPlatformAccessibilityPreferences.current.increaseContrast
+    Box(Modifier.fillMaxWidth().height(24.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(width = 30.dp, height = 3.dp).clip(RoundedCornerShape(2.dp))
+            .background(color.copy(alpha = if (contrast) .68f else .30f)))
     }
 }
 
@@ -534,15 +538,15 @@ private fun DesktopSheet(
         val foreground: @Composable () -> Unit = {
             CompositionLocalProvider(LocalContentColor provides contentColor) {
                 Column(Modifier.fillMaxWidth().motionInputGate(visible)) {
-                    if (closeButton) Row(Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 6.dp),
+                    if (closeButton) Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 6.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.weight(1f))
-                        MotionIconButton(onClick = dismiss, modifier = Modifier.size(32.dp), tooltip = "关闭") {
+                        MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭") {
                             Icon(Icons.Outlined.Close, "关闭", Modifier.size(18.dp), tint = contentColor)
                         }
                     }
                     // The optional close row is part of the content height budget.
-                    val clearance = if (closeButton) 64.dp else 24.dp
+                    val clearance = if (closeButton) 68.dp else 24.dp
                     Box(Modifier.heightIn(max = (panelWindow.height - clearance).coerceAtLeast(1.dp))) {
                         Column(Modifier.fillMaxWidth(), content = { content(dismiss) })
                     }
@@ -553,9 +557,9 @@ private fun DesktopSheet(
             .widthIn(max = 760.dp).fillMaxWidth()
             .heightIn(max = (panelWindow.height - 24.dp).coerceAtLeast(1.dp))
         if (backdrop != null) LiquidGlassSurface(backdrop, bounds.then(modifier),
-            cornerRadius = 22.dp, role = GlassSurfaceRole.PANEL, surfaceColor = containerColor,
+            cornerRadius = 24.dp, role = GlassSurfaceRole.PANEL, surfaceColor = containerColor,
             elevation = 0.dp, softCard = true) { foreground() }
-        else Surface(modifier = bounds.then(modifier), shape = RoundedCornerShape(22.dp),
+        else Surface(modifier = bounds.then(modifier), shape = RoundedCornerShape(24.dp),
             color = containerColor, contentColor = contentColor, tonalElevation = 0.dp,
             shadowElevation = 4.dp) { foreground() }
     }

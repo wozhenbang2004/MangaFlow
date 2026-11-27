@@ -13,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -64,6 +65,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dev.chrisbanes.haze.HazeState
@@ -164,33 +166,36 @@ internal fun WallpaperSettings(
     }
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         val preview = if (selected.kind == WallpaperKind.VIDEO) selected.posterPath else selected.mediaPath
-        val previewModifier = Modifier.fillMaxWidth().height(112.dp).clip(RoundedCornerShape(14.dp))
-            .background(colors.onSurface.copy(alpha = .045f))
-        Box(if (current == null) previewModifier
-            .clickable(enabled = !importing, interactionSource = emptyInteraction, indication = null,
-                role = Role.Button, onClickLabel = "添加壁纸") {
-                picker.launch(arrayOf("image/*", "video/*"))
-            }.motionPress(emptyInteraction, !importing)
-            else previewModifier,
-            contentAlignment = Alignment.Center) {
-            if (current == null) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Icon(Icons.Outlined.AddPhotoAlternate, null, Modifier.size(28.dp), tint = colors.onSurfaceVariant)
-                    Text("添加壁纸", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val previewHeight = if (current == null) 96.dp else (maxWidth / 2.4f).coerceIn(100.dp, 184.dp)
+            val previewModifier = Modifier.fillMaxWidth().height(previewHeight).clip(RoundedCornerShape(16.dp))
+                .background(colors.onSurface.copy(alpha = .045f))
+            Box(if (current == null) previewModifier
+                .clickable(enabled = !importing, interactionSource = emptyInteraction, indication = null,
+                    role = Role.Button, onClickLabel = "添加壁纸") {
+                    picker.launch(arrayOf("image/*", "video/*"))
+                }.motionPress(emptyInteraction, !importing)
+                else previewModifier,
+                contentAlignment = Alignment.Center) {
+                if (current == null) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(Icons.Outlined.AddPhotoAlternate, null, Modifier.size(28.dp), tint = colors.onSurfaceVariant)
+                        Text("添加壁纸", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                    }
+                } else {
+                    WallpaperPreview(preview, selected.kind, selected.adjustment, Modifier.fillMaxSize())
+                    if (selected.kind == WallpaperKind.VIDEO) Icon(Icons.Outlined.VideoFile, "视频壁纸",
+                        Modifier.align(Alignment.BottomStart).padding(8.dp).size(22.dp)
+                            .background(colors.surface.copy(alpha = .85f), RoundedCornerShape(6.dp)).padding(3.dp),
+                        tint = colors.onSurface)
                 }
-            } else {
-                WallpaperPreview(preview, selected.kind, selected.adjustment, Modifier.fillMaxSize())
-                if (selected.kind == WallpaperKind.VIDEO) Icon(Icons.Outlined.VideoFile, "视频壁纸",
-                    Modifier.align(Alignment.BottomStart).padding(8.dp).size(22.dp)
-                        .background(colors.surface.copy(alpha = .85f), RoundedCornerShape(6.dp)).padding(3.dp),
-                    tint = colors.onSurface)
             }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(if (importing) "正在添加…" else current?.name ?: "图片 · 静音视频",
-                    style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (selected.items.isNotEmpty()) Text("${selected.items.size} 张",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
@@ -220,27 +225,23 @@ internal fun WallpaperSettings(
                 items(selected.items, key = { it.mediaPath }) { item ->
                     val isCurrent = selected.mediaPath == item.mediaPath
                     val interaction = remember(item.mediaPath) { MutableInteractionSource() }
-                    Column(Modifier.width(72.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Box(Modifier.fillMaxWidth().height(56.dp).clip(RoundedCornerShape(10.dp))
-                            .background(colors.onSurface.copy(alpha = .045f))
-                            .semantics { stateDescription = if (isCurrent) "当前壁纸" else "未使用" }
-                            .selectable(selected = isCurrent, enabled = !importing, role = Role.RadioButton,
-                                interactionSource = interaction, indication = null,
-                                onClick = { if (!isCurrent) { finishAdjustment(); change { store.select(item.mediaPath) } } })
-                            .motionPress(interaction, !importing, pressedScale = .96f)) {
-                            AsyncImage(model = if (item.kind == WallpaperKind.VIDEO) item.posterPath else item.mediaPath,
-                                contentDescription = item.name, contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize())
-                            if (isCurrent) Icon(Icons.Outlined.CheckCircle, null,
-                                Modifier.align(Alignment.BottomEnd).padding(4.dp).size(18.dp)
-                                    .background(colors.surface, RoundedCornerShape(9.dp)), tint = colors.onSurface)
-                            if (item.kind == WallpaperKind.VIDEO) Icon(Icons.Outlined.VideoFile, null,
-                                Modifier.align(Alignment.TopStart).padding(4.dp).size(16.dp)
-                                    .background(colors.surface.copy(alpha = .8f), RoundedCornerShape(4.dp)).padding(2.dp),
-                                tint = colors.onSurface)
-                        }
-                        Box(Modifier.fillMaxWidth().height(2.dp).clip(RoundedCornerShape(1.dp))
-                            .background(if (isCurrent) colors.onSurface.copy(alpha = .65f) else colors.onSurface.copy(alpha = .04f)))
+                    Box(Modifier.width(76.dp).height(52.dp).clip(RoundedCornerShape(10.dp))
+                        .background(colors.onSurface.copy(alpha = .045f))
+                        .semantics { stateDescription = if (isCurrent) "当前壁纸" else "未使用" }
+                        .selectable(selected = isCurrent, enabled = !importing, role = Role.RadioButton,
+                            interactionSource = interaction, indication = null,
+                            onClick = { if (!isCurrent) { finishAdjustment(); change { store.select(item.mediaPath) } } })
+                        .motionPress(interaction, !importing, pressedScale = .96f)) {
+                        AsyncImage(model = if (item.kind == WallpaperKind.VIDEO) item.posterPath else item.mediaPath,
+                            contentDescription = item.name, contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize())
+                        if (isCurrent) Icon(Icons.Outlined.CheckCircle, null,
+                            Modifier.align(Alignment.BottomEnd).padding(4.dp).size(18.dp)
+                                .background(colors.surface, RoundedCornerShape(9.dp)), tint = colors.primary)
+                        if (item.kind == WallpaperKind.VIDEO) Icon(Icons.Outlined.VideoFile, null,
+                            Modifier.align(Alignment.TopStart).padding(4.dp).size(16.dp)
+                                .background(colors.surface.copy(alpha = .8f), RoundedCornerShape(4.dp)).padding(2.dp),
+                            tint = colors.onSurface)
                     }
                 }
             }
@@ -412,7 +413,7 @@ private fun WallpaperAdjustmentSlider(
     Column(Modifier.fillMaxWidth().graphicsLayer { alpha = if (enabled) 1f else .45f }) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            Text(valueText, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+            Text(valueText, style = mangaMetricValueStyle(14.sp, 20.sp), color = colors.onSurface)
         }
         MotionSlider(value = value, valueRange = range, enabled = enabled, onValueChange = onChange,
             onValueChangeFinished = onCommit, formatValue = { valueText },

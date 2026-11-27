@@ -14,6 +14,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
@@ -78,7 +80,7 @@ internal fun EnhancementCenterPanel(
     }) {
         MotionBackHandler(visible && navigation.parent != null, state = null, onBack = { navigation.back() })
         Column(Modifier.fillMaxWidth().heightIn(max = minOf(LocalMangaWindow.current.panelHeight, 560.dp))) {
-            Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 6.dp),
+            Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 10.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 navigation.parent?.let { parent ->
                     val backLabel = "返回${parent.titleFor(sessionKey != null)}"
@@ -93,7 +95,7 @@ internal fun EnhancementCenterPanel(
                             navigation.page == EnhancementPage.CACHE -> "缓存预算"
                         else -> navigation.page.title
                     }
-                    Text(title, style = MaterialTheme.typography.titleMedium)
+                    Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.headlineSmall)
                     if (!canSwitchMedia || !navigation.page.isPrimary)
                         Text(content.settingsLabel, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -110,7 +112,7 @@ internal fun EnhancementCenterPanel(
                 MotionTabs(primaryPages.indexOf(navigation.page), primaryPages.map { it.titleFor(sessionKey != null) },
                     onSelect = { navigate(primaryPages[it]) },
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
-                    controlHeight = 44.dp, treatment = MotionTabTreatment.Soft)
+                    controlHeight = 44.dp, treatment = MotionTabTreatment.Underline)
             }
             Column(Modifier.weight(1f, fill = false).verticalScroll(scroll)
                 .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp)) {

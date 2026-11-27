@@ -77,7 +77,7 @@ internal actual fun rememberNativeFeelFeedback(): (FeelEvent) -> Boolean = remem
 }
 
 @Composable
-internal actual fun MotionDialogWindowPolicy(visible: Boolean) {
+internal actual fun MotionDialogWindowPolicy(visible: Boolean, backgroundDim: Float) {
     // Compose's desktop dialog uses the shared drawing/focus/input presence policy;
     // there is no Android window animation to disable.
 }

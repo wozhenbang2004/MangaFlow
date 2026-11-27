@@ -12,6 +12,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -46,12 +47,15 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -62,6 +66,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.glass.softSurfaceShadow
@@ -178,10 +183,13 @@ internal fun ReaderSeekBar(
     label: String,
     interactions: MutableInteractionSource = remember { MutableInteractionSource() },
     valueLabel: ((Float) -> String)? = null,
+    pageCount: Int? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val pressed by interactions.collectIsPressedAsState()
     val dragged by interactions.collectIsDraggedAsState()
+    val focused by interactions.collectIsFocusedAsState()
+    val contrast = LocalGlassAccessibilitySettings.current.increaseContrast
     val engaged = enabled && (pressed || dragged)
     val motion = LocalMotionEnabled.current
     val engagement = animateFloatAsState(
@@ -190,23 +198,20 @@ internal fun ReaderSeekBar(
     )
     val fraction = ((value - valueRange.start) /
         (valueRange.endInclusive - valueRange.start).coerceAtLeast(.001f)).coerceIn(0f, 1f)
-    val foreground = colors.primary.copy(alpha = if (enabled) .86f else .24f)
-    val pageCount = remember(label) {
-        Regex("""共\s*(\d+)\s*页""").find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
-    }
+    val foreground = if (enabled) colors.primary else colors.onSurface.copy(alpha = .30f)
     val previewText = valueLabel?.invoke(value.coerceIn(valueRange)) ?: pageCount?.let { count ->
         "${value.roundToInt().coerceIn(0, (count - 1).coerceAtLeast(0)) + 1} / $count"
     } ?: "${(fraction * 100f).roundToInt()}%"
     // Continuous reading/scrubbing is silent; the preview and release commit are the feedback.
     val layoutDirection = LocalLayoutDirection.current
-    val visualFraction = if (layoutDirection == LayoutDirection.Rtl) 1f - fraction else fraction
+    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     BoxWithConstraints(modifier.height(48.dp)) {
-        val bubbleWidth = 68.dp
+        val bubbleWidth = minOf(76.dp * fontScale, maxWidth)
         val travel = (maxWidth - 24.dp).coerceAtLeast(0.dp)
         val bubbleLimit = (maxWidth - bubbleWidth).coerceAtLeast(0.dp)
-        val bubbleX = (12.dp + travel * visualFraction - bubbleWidth / 2f).coerceIn(0.dp, bubbleLimit)
+        val bubbleX = (12.dp + travel * fraction - bubbleWidth / 2f).coerceIn(0.dp, bubbleLimit)
         Surface(
-            modifier = Modifier.width(bubbleWidth).height(24.dp).align(Alignment.TopStart)
+            modifier = Modifier.width(bubbleWidth).heightIn(min = 24.dp).align(Alignment.TopStart)
                 .offset(x = bubbleX, y = (-16).dp)
                 .graphicsLayer {
                     alpha = engagement.value
@@ -216,15 +221,15 @@ internal fun ReaderSeekBar(
                     translationY = (1f - engagement.value) * 4.dp.toPx()
                 }
                 .clearAndSetSemantics { },
-            shape = RoundedCornerShape(9.dp),
-            color = colors.surface.copy(alpha = .96f),
+            shape = RoundedCornerShape(50),
+            color = colors.surface,
             contentColor = colors.onSurface,
             shadowElevation = if (engaged) 2.dp else 0.dp,
             tonalElevation = 0.dp,
         ) {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text(mangaNumberText(previewText), color = colors.onSurface.copy(alpha = .86f),
-                    fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1)
+                    fontSize = 12.sp, lineHeight = 17.sp, maxLines = 1)
             }
         }
         Slider(
@@ -240,12 +245,16 @@ internal fun ReaderSeekBar(
                     valueLabel?.let { stateDescription = it(value.coerceIn(valueRange)) }
                 },
             thumb = {
-                // A stable hit slot surrounds a small solid thumb; the track has no glass optics.
                 Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-                    Canvas(Modifier.size(20.dp)) {
-                        drawCircle(foreground.copy(alpha = .10f * engagement.value), radius = 10.dp.toPx())
-                        drawCircle(colors.surface, radius = 7.dp.toPx())
-                        drawCircle(foreground, radius = (4.5f + engagement.value).dp.toPx())
+                    Canvas(Modifier.size(24.dp)) {
+                        val width = (11f + 7f * engagement.value).dp.toPx()
+                        val height = (11f - engagement.value).dp.toPx()
+                        if (focused) drawCircle(foreground.copy(alpha = .25f), radius = 11.dp.toPx())
+                        val inset = 1.5.dp.toPx()
+                        drawRoundRect(colors.surface, Offset(center.x - width / 2f - inset, center.y - height / 2f - inset),
+                            Size(width + 2 * inset, height + 2 * inset), CornerRadius(height / 2f + inset))
+                        drawRoundRect(foreground, Offset(center.x - width / 2f, center.y - height / 2f),
+                            Size(width, height), CornerRadius(height / 2f))
                     }
                 }
             },
@@ -254,9 +263,23 @@ internal fun ReaderSeekBar(
                     val middle = size.height / 2f
                     val start = if (layoutDirection == LayoutDirection.Rtl) size.width else 0f
                     val end = if (layoutDirection == LayoutDirection.Rtl) 0f else size.width
-                    val width = (2f + engagement.value * .5f).dp.toPx()
-                    drawLine(colors.onSurface.copy(alpha = .12f), Offset(start, middle),
+                    val width = (2.5f + engagement.value).dp.toPx()
+                    drawLine(colors.onSurface.copy(alpha = if (contrast) .48f else .16f), Offset(start, middle),
                         Offset(end, middle), width, StrokeCap.Round)
+                    // Use real page boundaries. Keep even a long chapter's rail quiet.
+                    if (pageCount != null && pageCount >= 12 && size.width >= 104.dp.toPx()) {
+                        val interval = when {
+                            pageCount <= 40 -> 5
+                            pageCount <= 80 -> 10
+                            else -> ((pageCount + 79) / 80) * 10
+                        }
+                        for (page in interval until pageCount step interval) {
+                            val at = (page - 1f) / (pageCount - 1)
+                            if (at <= fraction) continue
+                            drawCircle(colors.onSurface.copy(alpha = if (contrast) .68f else .34f),
+                                radius = 1.35.dp.toPx(), center = Offset(start + (end - start) * at, middle))
+                        }
+                    }
                     if (fraction > 0f) drawLine(foreground, Offset(start, middle),
                         Offset(start + (end - start) * fraction, middle), width, StrokeCap.Round)
                 }
@@ -282,9 +305,9 @@ internal fun ReaderToggle(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f).padding(end = 16.dp)) {
-            Text(label, color = colors.onSurface, fontSize = 14.sp)
-            if (description != null) Text(description, color = colors.onSurfaceVariant, fontSize = 11.sp,
-                lineHeight = 16.sp, modifier = Modifier.padding(top = 2.dp))
+            Text(label, color = colors.onSurface, style = MaterialTheme.typography.bodyMedium)
+            if (description != null) Text(description, color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 3.dp))
         }
         Box(Modifier.width(44.dp).height(32.dp), contentAlignment = Alignment.Center) {
             MotionSwitchThumb(value, interaction)

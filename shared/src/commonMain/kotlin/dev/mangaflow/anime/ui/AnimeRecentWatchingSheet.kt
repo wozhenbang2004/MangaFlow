@@ -19,15 +19,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.AnimeLibraryEntry
 import dev.mangaflow.anime.AnimeSubject
-import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.CompactMenuAction
-import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
@@ -51,7 +48,7 @@ internal fun AnimeRecentWatchingSheet(
         backdrop = backdrop) { dismiss ->
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("最近观看", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+            Text("最近观看", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge)
             if (!unavailable && recent.isNotEmpty()) Text("${recent.size} 部", style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭最近观看") {
@@ -97,9 +94,8 @@ internal fun AnimeWorkActionsSheet(
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 16.dp)) {
             Row(Modifier.padding(bottom = 12.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                AnimePoster(subject, Modifier.width(48.dp).height(72.dp))
-                Text(subject.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                    style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                AnimePoster(subject, Modifier.size(56.dp, 84.dp))
+                Text(subject.title, style = animeWorkTitleStyle(large = true),
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             CompactMenuAction(Icons.Outlined.Info, "查看详情", onClick = {

@@ -17,18 +17,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.mangaflow.anime.AnimeEpisode
+import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimeEpisodeAvailability
 import dev.mangaflow.anime.AnimeWatchProgress
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.DesktopContextMenuArea
 import dev.mangaflow.ui.DesktopMenuAction
+import dev.mangaflow.ui.mangaMetricValueStyle
 import dev.mangaflow.ui.motion.motionPress
 
 internal fun animeEpisodeGridColumns(available: Dp, fontScale: Float, wide: Boolean = false): Int {
@@ -56,6 +60,7 @@ internal fun AnimeEpisodeTile(
     val interaction = remember(episode.id) { MutableInteractionSource() }
     val selectedEpisode = selectionLabel != null
     val label = animeEpisodeLabel(episode)
+    val showNumber = !listRow && episode.kind == AnimeEpisodeKind.MAIN && !episode.subjectId.startsWith("native:")
     val subtitle = animeEpisodeSubtitle(episode)
     val sourceState = when (availability) {
         AnimeEpisodeAvailability.UPCOMING -> "尚未放送"
@@ -76,12 +81,16 @@ internal fun AnimeEpisodeTile(
         AnimeEpisodeAvailability.RECENTLY_FAILED -> "尝试播放 $label"
         AnimeEpisodeAvailability.MATCHED -> "播放 $label"
     }
-    val ink = if (watched && !selectedEpisode) colors.onSurfaceVariant else colors.onSurface
-    val shape = RoundedCornerShape(14.dp)
+    val ink = when {
+        selectedEpisode -> colors.onPrimaryContainer
+        watched -> colors.onSurfaceVariant
+        else -> colors.onSurface
+    }
+    val shape = RoundedCornerShape(12.dp)
     val surface = when {
-        selectedEpisode -> colors.onSurface.copy(alpha = .105f)
+        selectedEpisode -> colors.primaryContainer
         listRow -> Color.Transparent
-        else -> colors.surfaceContainerLow
+        else -> lerp(colors.surface, colors.onSurface, .035f)
     }
     val sourcesLabel = "选择本集线路"
     Box(modifier) {
@@ -110,8 +119,9 @@ internal fun AnimeEpisodeTile(
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                         if (listRow && selectedEpisode) Icon(Icons.Filled.PlayArrow, null, Modifier.size(12.dp), tint = ink)
-                        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum",
-                            fontWeight = if (selectedEpisode) FontWeight.Bold else FontWeight.Medium),
+                        Text(if (showNumber) animeEpisodeNumber(episode.number) else label, Modifier.weight(1f),
+                            style = if (showNumber) mangaMetricValueStyle(19.sp, 24.sp) else MaterialTheme.typography.labelLarge,
+                            fontWeight = if (selectedEpisode) FontWeight.SemiBold else FontWeight.Medium,
                             maxLines = if (episode.subjectId.startsWith("native:")) 2 else 1,
                             color = ink, overflow = TextOverflow.Ellipsis)
                         if (listRow && hasProgress) AnimeWatchProgressMark(progress, watched,
@@ -121,7 +131,8 @@ internal fun AnimeEpisodeTile(
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                         if (!listRow && selectedEpisode) Icon(Icons.Filled.PlayArrow, null, Modifier.size(10.dp), tint = ink)
                         if (caption != null) Text(caption, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
-                            color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            color = if (selectedEpisode) colors.onPrimaryContainer else colors.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
                         else Spacer(Modifier.weight(1f))
                         if (!listRow && hasProgress) AnimeWatchProgressMark(progress, watched,
                             Modifier.clearAndSetSemantics { }, size = 11.dp)

@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
@@ -197,8 +198,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                             if (autoState.historyOnly) "上次检测" else if (autoState.complete || autoState.applied) "检测结果"
                             else "网络检测" else "网络与代理"
                         MotionSwap(title, Modifier.weight(1f)) { heading ->
-                            Text(heading, style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            PreferenceHeading(heading)
                         }
                         MotionIconButton(onClick = { autoInfoRow = null; showInfo = !showInfo }, enabled = active,
                             modifier = Modifier.size(44.dp), tooltip = "连接与识别说明") {
@@ -434,14 +434,13 @@ private fun RelayLinkDetails(state: RelayLinkState, controller: RelayLinkControl
 @Composable
 private fun RelayEvidenceRow(label: String, value: String, confirmed: Boolean) {
     val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 7.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Icon(if (confirmed) Icons.Outlined.Check else Icons.Outlined.Info, null, Modifier.size(14.dp),
-            tint = colors.onSurfaceVariant)
-        Text(label, style = MaterialTheme.typography.bodySmall)
-        Spacer(Modifier.weight(1f))
-        Text(value, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.labelSmall,
-            color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            tint = if (confirmed) mangaStatusColors().success else colors.onSurfaceVariant)
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        Text(value, Modifier.weight(1.4f), style = MaterialTheme.typography.labelMedium,
+            color = colors.onSurface, textAlign = TextAlign.End)
     }
 }
 

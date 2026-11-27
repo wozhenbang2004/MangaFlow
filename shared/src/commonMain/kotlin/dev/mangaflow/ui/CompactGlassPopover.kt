@@ -50,7 +50,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
@@ -146,13 +145,13 @@ internal fun CompactGlassPopover(
                     scaleX = scale.value; scaleY = scale.value
                     transformOrigin = origin
                     translationY = (if (origin.pivotFractionY >= .5f) 6.dp.toPx() else -6.dp.toPx()) * (1f - alpha.value)
-                }, cornerRadius = 18.dp, role = GlassSurfaceRole.POPOVER, softCard = true, preferSource = true,
+                }, cornerRadius = 20.dp, role = GlassSurfaceRole.POPOVER, softCard = true, preferSource = true,
             materialExpansion = { alpha.value }) {
             val windowHeight = (LocalMangaWindow.current.height - 64.dp).coerceAtLeast(1.dp)
             val height = if (scrollContent) minOf(windowHeight, maximumHeight, with(density) { anchorRoom.toDp() })
                 else minOf(windowHeight, maximumHeight)
             val scroll = if (scrollContent) Modifier.verticalScroll(rememberScrollState()) else Modifier
-            Column(Modifier.heightIn(max = height.coerceAtLeast(1.dp)).then(scroll).padding(6.dp),
+            Column(Modifier.heightIn(max = height.coerceAtLeast(1.dp)).then(scroll).padding(7.dp),
                 content = content)
         }
     }
@@ -161,15 +160,18 @@ internal fun CompactGlassPopover(
 @Composable
 internal fun CompactMenuAction(icon: ImageVector, label: String, enabled: Boolean = true, destructive: Boolean = false, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
-    val color = (if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
-        .copy(alpha = if (enabled) .86f else .30f)
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+    val colors = MaterialTheme.colorScheme
+    val ink = if (destructive) colors.error else colors.onSurface
+    val iconTint = if (destructive) colors.error else colors.primary
+    val alpha = if (enabled) 1f else .40f
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp))
         .clickable(enabled = enabled, interactionSource = interaction, indication = null,
             role = Role.Button, onClick = onClick)
         .motionPress(interaction, enabled, pressedScale = .98f)
         .heightIn(min = 48.dp).padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, null, Modifier.size(19.dp), tint = color)
-        Text(label, Modifier.padding(start = 12.dp), color = color, fontSize = 13.sp, lineHeight = 19.sp)
+        Icon(icon, null, Modifier.size(18.dp), tint = iconTint.copy(alpha = alpha))
+        Text(label, Modifier.padding(start = 14.dp), color = ink.copy(alpha = alpha),
+            style = MaterialTheme.typography.bodyMedium)
     }
 }

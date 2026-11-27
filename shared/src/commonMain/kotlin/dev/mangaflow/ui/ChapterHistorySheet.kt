@@ -146,11 +146,13 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
             if (onBack != null) MotionIconButton(onClick = onBack, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回最近阅读", Modifier.size(20.dp))
             }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("章节记录", fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
-                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 12.sp, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("章节记录", style = MaterialTheme.typography.labelMedium, color = secondary)
+                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                    style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            records?.let { Text(it.size.toString(), color = secondary, fontSize = 12.sp) }
+            records?.let { Text(it.size.toString(), color = secondary, style = mangaMetricValueStyle(),
+                modifier = Modifier.padding(start = 8.dp)) }
         }
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
@@ -171,9 +173,11 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
                     interactionSource = interaction, indication = null,
                     onClickLabel = "从保存的位置继续阅读", onClick = { onContinue(progress) })
                     .motionPress(interaction, pressedScale = .985f)
-                    .padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(progress.chapterTitle.ifBlank { "已保存的章节" }, fontSize = 14.sp, lineHeight = 20.sp,
+                    .padding(vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ChapterReadMark(progress, size = 18.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(progress.chapterTitle.ifBlank { "已保存的章节" }, fontSize = 16.sp, lineHeight = 21.sp,
                             fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         val pageLabel = if (progress.pageCount > 0) "${progress.pageIndex + 1}/${progress.pageCount} 页"
                             else "第 ${progress.pageIndex + 1} 页"
@@ -182,7 +186,7 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
                             fontSize = 12.sp, lineHeight = 16.sp, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Spacer(Modifier.width(12.dp))
-                    Icon(Icons.Outlined.PlayArrow, null, Modifier.size(18.dp), tint = secondary)
+                    Icon(Icons.Outlined.PlayArrow, null, Modifier.size(17.dp), tint = secondary)
                 }
             }
         }

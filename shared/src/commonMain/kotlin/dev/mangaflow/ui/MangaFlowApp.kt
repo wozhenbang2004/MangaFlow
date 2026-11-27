@@ -170,6 +170,7 @@ import dev.mangaflow.ReadingSession
 import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.reader.ReaderScreen
 import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.HistoryActionIcon
@@ -236,6 +237,10 @@ private val animeSidebarGroups = listOf(
     animeSidebarGroup("管理", AnimeWorkspaceDestination.TRACKING),
 )
 private val animeSidebarHeadings = animeSidebarGroups.associate { it.destinations.first() to it.title }
+private val mangaSidebarHeadings = mapOf(
+    SidebarDestination(Section.DISCOVER) to "浏览",
+    SidebarDestination(Section.LIBRARY) to "我的漫画",
+)
 
 // Saved/programmatic destinations can outlive their individual sidebar entries.
 private fun AnimeWorkspaceDestination.sidebarEntry(): AnimeWorkspaceDestination? = when (this) {
@@ -252,22 +257,25 @@ private fun DrawerDestinationLink(
 ) {
     val interactions = remember(destination) { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
+    val selectedInk = if (LocalPlatformAccessibilityPreferences.current.increaseContrast) colors.onSurface else colors.primary
     val shape = RoundedCornerShape(14.dp)
-    val fill = if (compact && selected) colors.onSurface.copy(alpha = .08f) else Color.Transparent
-    Row(modifier.heightIn(min = 48.dp).background(fill, shape)
+    val fill = if (compact && selected) colors.surface else Color.Transparent
+    Row(modifier.heightIn(min = if (compact) 48.dp else 50.dp).background(fill, shape)
         .selectable(selected = selected, enabled = enabled, role = Role.Tab,
             interactionSource = interactions, indication = null, onClick = { onSelect(destination) })
         .motionPress(interactions, enabled = enabled, pressedScale = .985f)
-        .padding(horizontal = if (compact) 6.dp else 14.dp, vertical = 6.dp),
+        .padding(horizontal = if (compact) 5.dp else 14.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = if (compact) Arrangement.Center else Arrangement.Start) {
-        Icon(destination.icon, null, Modifier.size(if (compact) 18.dp else 21.dp),
-            tint = if (selected) colors.onSurface else colors.onSurfaceVariant)
-        Spacer(Modifier.width(if (compact) 6.dp else 14.dp))
+        Box(Modifier.width(if (compact) 19.dp else 26.dp), contentAlignment = Alignment.Center) {
+            Icon(destination.icon, null, Modifier.size(if (compact) 17.dp else 22.dp),
+                tint = if (selected) selectedInk else colors.onSurfaceVariant)
+        }
+        Spacer(Modifier.width(if (compact) 5.dp else 11.dp))
         Text(destination.title(profile),
             style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.bodyLarge,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            color = if (selected) colors.onSurface else colors.onSurfaceVariant,
+            color = if (compact && !selected) colors.onSurfaceVariant else colors.onSurface,
             maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
@@ -836,9 +844,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             action.animeDestination?.sidebarEntry() ?: animeDestination
             else null)
     }
-    val sidebarHeadings = if (animeMode) animeSidebarHeadings else emptyMap()
+    val sidebarHeadings = if (animeMode) animeSidebarHeadings else mangaSidebarHeadings
     val desktopDestinations = remember(profileSections, contentProfile) {
-        profileSections.map { DesktopDestination(it.title(contentProfile), it.icon, sidebarHeadings[it]) }
+        profileSections.map { DesktopDestination(it.title(contentProfile), it.icon, sidebarHeadings[it],
+            utility = it.section == Section.SETTINGS) }
     }
     CopyShelfSyncOverlay(
         model = model, snapshot = copyShelfSyncSnapshot,
@@ -1193,7 +1202,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 }),
         drawerState = drawer,
         gesturesEnabled = frame is Frame.Root && !desktopNavigationVisible && section != Section.ANIME,
-        scrimColor = MaterialTheme.colorScheme.scrim.copy(alpha = .22f),
+        scrimColor = MaterialTheme.colorScheme.scrim.copy(alpha = when {
+            LocalPlatformAccessibilityPreferences.current.increaseContrast -> .32f
+            darkSystem -> .20f
+            else -> .13f
+        }),
         drawerContent = {
             ModalDrawerSheet(
                 modifier = Modifier.width(drawerWidth).onSizeChanged { measuredDrawerWidth = it.width.toFloat() }
@@ -1219,28 +1232,28 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             .semantics { paneTitle = "${contentProfile.title}导航" }
                             .then(if (drawerCanSelect) Modifier else Modifier.clearAndSetSemantics { }
                                 .focusProperties { canFocus = false })
-                            .padding(horizontal = 12.dp, vertical = 6.dp)) {
-                            Row(Modifier.fillMaxWidth().padding(start = 12.dp),
+                            .padding(horizontal = 12.dp, vertical = 8.dp)) {
+                            Row(Modifier.fillMaxWidth().padding(start = 14.dp, bottom = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                Text("MangaFlow", style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.SemiBold)
-                                Spacer(Modifier.width(8.dp))
-                                Text(appVersion, Modifier.weight(1f),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Column(Modifier.weight(1f)) {
+                                    Text("MangaFlow", style = MaterialTheme.typography.titleLarge,
+                                        fontSize = 24.sp, lineHeight = 29.sp, letterSpacing = (-.6f).sp,
+                                        fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(appVersion, style = mangaMetricValueStyle(), color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
                                 MotionIconButton(modifier = Modifier.size(48.dp), enabled = drawerCanSelect,
                                     onClick = { drawerAction = DrawerAction(DrawerValue.Closed) }, tooltip = "关闭导航") {
                                     Icon(Icons.Outlined.Close, "关闭导航", Modifier.size(18.dp))
                                 }
                             }
                             ContentProfileSwitch(contentProfile, requestProfile, manageProfileSources,
-                                modifier = Modifier.padding(bottom = 6.dp),
+                                modifier = Modifier.padding(bottom = 3.dp),
                                 enabled = drawerCanSelect && !rootHandoff)
                             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(drawerScroll)) {
                                 val selectedRow = rows.indexOf(SidebarNavigationRow.Destination(destinations.indexOf(selection)))
                                 MotionNavigationColumn(selected = selectedRow, itemCount = rows.size,
-                                    selectionVisible = selectedRow >= 0) { index, itemModifier ->
+                                    selectionVisible = selectedRow >= 0, routeMarker = true) { index, itemModifier ->
                                     when (val row = rows[index]) {
                                         is SidebarNavigationRow.Heading -> SidebarGroupLabel(row.title, itemModifier)
                                         is SidebarNavigationRow.Destination -> {
@@ -1254,7 +1267,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 }
                             }
                             Row(Modifier.fillMaxWidth().padding(top = 6.dp)
-                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .045f), RoundedCornerShape(14.dp))) {
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = .065f), RoundedCornerShape(16.dp))
+                                .padding(horizontal = 3.dp, vertical = 2.dp)) {
                                 tools.forEach { destination ->
                                     DrawerDestinationLink(destination, contentProfile, destination == selection,
                                         drawerCanSelect, Modifier.weight(1f).onGloballyPositioned {
@@ -2004,7 +2018,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         .padding(horizontal = 8.dp, vertical = 2.dp))
                             } else if (current.section == Section.DISCOVER && desktop) {
                                 DesktopDiscoveryHeader(
-                                    searching = desktopSearchContent, backdrop = searchBackdrop,
+                                    searching = desktopSearchContent, backdrop = searchBackdrop, tabLabels = discoveryLabels,
                                     onLeaveSearch = closeSearch, navigation = navigation,
                                     tabs = { tabModifier ->
                                         BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryLabels, searchBackdrop,
@@ -2058,7 +2072,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 SegmentedGlassHeader(searchBackdrop, navigation,
                                     controlsWidth = discoveryTabsWidth,
                                     actionsWidth = discoveryActionsWidth,
-                                    discoveryTabLabels = discoveryLabels,
+                                    tabInk = rememberBrowseTabInk(discoveryLabels), actionInset = 8.dp,
                                     quietShadow = platformKind == PlatformKind.ANDROID && !restrictedMode,
                                     modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { chromeHeightPx = it.height }
                                         .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))

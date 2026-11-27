@@ -54,12 +54,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onPlaced
@@ -72,6 +76,7 @@ import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
@@ -258,7 +263,7 @@ internal fun ExpandingSearchBar(
                     compositingStrategy = CompositingStrategy.ModulateAlpha
                 },
             surfaceShape = SearchShellShape,
-            role = GlassSurfaceRole.NAVIGATION,
+            role = GlassSurfaceRole.SEARCH,
             interactionSource = if (expanded && active) searchInteraction else null,
             softCard = true,
             materialExpansion = { progress.value },
@@ -288,7 +293,19 @@ internal fun ExpandingSearchBar(
                 Column(Modifier.width(panelWidth).heightIn(max = 44.dp + resultsRoom)
                     .onSizeChanged { foregroundHeight = with(density) { it.height.toDp() } }
                     .semantics { paneTitle = placeholder }.pointerInput(Unit) {}) {
-                    Row(Modifier.width(panelWidth).height(44.dp).padding(start = 16.dp, end = inputEndInset),
+                    val colors = MaterialTheme.colorScheme
+                    val hasResults = !inputOnly && foregroundHeight > 44.dp
+                    Row(Modifier.width(panelWidth).height(44.dp).drawWithCache {
+                        val edge = Brush.verticalGradient(listOf(colors.onSurface.copy(alpha = 0f),
+                            colors.onSurface.copy(alpha = .055f)), startY = size.height - 3.dp.toPx(), endY = size.height)
+                        onDrawBehind {
+                            if (hasResults) {
+                                val gutter = minOf(16.dp.toPx(), size.width / 2f)
+                                drawRect(edge, Offset(gutter, size.height - 3.dp.toPx()),
+                                    Size(size.width - 2f * gutter, 3.dp.toPx()))
+                            }
+                        }
+                    }.padding(start = 16.dp, end = inputEndInset),
                         verticalAlignment = Alignment.CenterVertically) {
                         BasicTextField(
                             value = displayedQuery,
@@ -296,8 +313,8 @@ internal fun ExpandingSearchBar(
                             enabled = expanded && active && !scopeExpanded,
                             interactionSource = searchInteraction,
                             singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
-                            cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
+                            textStyle = MaterialTheme.typography.titleMedium.copy(color = colors.onSurface, fontWeight = FontWeight.Medium),
+                            cursorBrush = SolidColor(colors.primary),
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                             keyboardActions = KeyboardActions(onSearch = {
                                 keyboard?.hide()
@@ -315,7 +332,7 @@ internal fun ExpandingSearchBar(
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
                                     if (displayedQuery.isEmpty()) Text(placeholder,
                                         style = MaterialTheme.typography.bodyLarge,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        color = colors.onSurfaceVariant,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     input()
                                 }

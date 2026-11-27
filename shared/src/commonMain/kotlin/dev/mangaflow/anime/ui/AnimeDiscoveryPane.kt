@@ -38,7 +38,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -69,7 +69,6 @@ import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.glass.mangaHazeSource
-import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.*
 import dev.mangaflow.ui.platform.localDateAt
 import dev.mangaflow.ui.platform.localToday
@@ -313,16 +312,15 @@ private fun AnimeDiscoveryResumeRow(entry: AnimeLibraryEntry, action: String, ac
     val interaction = remember(entry.subject.id) { MutableInteractionSource() }
     Row(modifier
         .motionPress(interaction, enabled = active, pressedScale = .99f)
-        .softSurfaceShadow(shape, light = colors.surface.luminance() > .5f, strength = .68f, radius = 14.dp)
-        .clip(shape).background(colors.surfaceContainerHigh)
+        .clip(shape).background(colors.surfaceContainerLow)
         .clickable(interactionSource = interaction, indication = null, enabled = active,
             role = Role.Button, onClickLabel = action, onClick = { onResume(entry) })
-        .heightIn(min = 80.dp).padding(horizontal = 9.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-        AnimePoster(entry.subject, Modifier.width(35.dp).height(52.dp).clearAndSetSemantics { })
+        .heightIn(min = 84.dp).padding(start = 6.dp, end = 9.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+        AnimePoster(entry.subject, Modifier.size(44.dp, 66.dp).clearAndSetSemantics { })
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(entry.subject.title, style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(entry.subject.title, style = animeWorkTitleStyle().copy(fontSize = 15.sp, lineHeight = 20.sp),
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(animeWatchedEpisodeName(entry, progress), color = colors.onSurfaceVariant,
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -334,7 +332,7 @@ private fun AnimeDiscoveryResumeRow(entry: AnimeLibraryEntry, action: String, ac
                 AnimeWatchProgressLine(fraction, Modifier.widthIn(max = 164.dp).padding(top = 2.dp))
             }
         }
-        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(21.dp), tint = colors.onSurface)
+        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = colors.primary)
     }
 }
 
@@ -362,7 +360,7 @@ private fun AnimeHomeCatalogueHeader(query: AnimeDiscoveryQuery, backdrop: HazeS
                     .heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(title(query.order), Modifier.weight(1f, fill = false),
-                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
                 }
@@ -476,7 +474,7 @@ internal fun AnimeDiscoverySectionHeading(title: String, caption: String, refres
     onMore: (() -> Unit)? = null, moreLabel: String = "查看全部$title", expanded: Boolean? = null) {
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(title, Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleMedium,
+        Text(title, Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
         if (caption.isNotBlank()) Text(caption, Modifier.widthIn(max = 112.dp), style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -604,7 +602,12 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
             userScrollEnabled = active,
             contentPadding = PaddingValues(start = inset, end = inset, top = contentTopPadding + 4.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(animeDiscoveryGap(columns)),
-            verticalArrangement = Arrangement.spacedBy(if (columns == 1) 10.dp else 12.dp)) {
+            verticalArrangement = Arrangement.spacedBy(when {
+                columns == 1 -> 9.dp
+                desktop -> 20.dp
+                columns >= 4 -> 13.dp
+                else -> 16.dp
+            })) {
             if (featured.isNotEmpty()) item(key = "featured", span = { GridItemSpan(maxLineSpan) }) {
                 AnimeFeaturedCarousel(featured, active = active, visible = active && galleryInView,
                     selectedKey = scrolls.featuredKey, onSelected = { scrolls.featuredKey = it },
@@ -1036,8 +1039,7 @@ private fun AnimeWeeklyDays(today: LocalDate, selectedDay: Int?, active: Boolean
                     Text(labels[index], style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
                         color = if (isToday) colors.onSurface else color, maxLines = 1,
                         fontWeight = if (isSelected || isToday) FontWeight.SemiBold else FontWeight.Normal)
-                    if (isToday) Text("今", color = colors.onSurface,
-                        style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    if (isToday) Spacer(Modifier.size(5.dp).background(colors.primary, RoundedCornerShape(50)))
                 }
             }
         }

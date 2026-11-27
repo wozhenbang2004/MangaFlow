@@ -18,7 +18,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.platform.LocalUriHandler
@@ -470,15 +473,18 @@ internal fun SourceAccountField(
     modifier: Modifier = Modifier, onChange: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    var focused by remember { mutableStateOf(false) }
     BasicTextField(value, onChange, modifier = modifier.fillMaxWidth().semantics { contentDescription = label }
-        .clip(RoundedCornerShape(11.dp))
-        .background(colors.onSurface.copy(alpha = .045f)).padding(12.dp), singleLine = singleLine,
+        .onFocusChanged { focused = it.isFocused }.clip(RoundedCornerShape(14.dp))
+        .background(lerp(colors.surface, if (focused) colors.primary else colors.onSurface, if (focused) .095f else .045f))
+        .heightIn(min = 50.dp).padding(horizontal = 14.dp, vertical = 8.dp), singleLine = singleLine,
         maxLines = if (singleLine) 1 else 6, enabled = enabled,
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text,
             imeAction = if (singleLine) ImeAction.Next else ImeAction.Default),
-        textStyle = MaterialTheme.typography.bodySmall.copy(color = colors.onSurface),
-        decorationBox = { inner -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(label, fontSize = 11.sp, color = colors.onSurfaceVariant); inner()
+        cursorBrush = SolidColor(colors.primary), textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
+        decorationBox = { inner -> Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = if (focused) colors.primary else colors.onSurfaceVariant)
+            inner()
         } })
 }

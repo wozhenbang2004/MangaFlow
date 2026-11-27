@@ -101,11 +101,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.lerp
@@ -117,6 +120,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -128,6 +132,8 @@ import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.LayoutDirection
+import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -317,14 +323,16 @@ fun DetailScreen(
         if (color != null) extractedCoverColor = color
     }
     val coverColor = extractedCoverColor ?: DetailSurface
-    val atmosphereColor by animateColorAsState(lerp(DetailBackground, coverColor, .36f),
+    val atmosphereColor by animateColorAsState(lerp(DetailBackground, coverColor, .48f),
         animationSpec = if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(),
         label = "detail-artwork-atmosphere")
     val informationTone by animateColorAsState(lerp(DetailBackground, coverColor,
-        if (DetailBackground.luminance() > .5f) .08f else .12f),
+        if (DetailBackground.luminance() > .5f) .035f else .07f),
         animationSpec = if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(),
         label = "detail-information-tone")
     val lightDetail = DetailBackground.luminance() > .5f
+    val accessibility = LocalPlatformAccessibilityPreferences.current
+    val opaqueInformation = accessibility.reduceTransparency || accessibility.increaseContrast
     val dockDensity = LocalDensity.current
     var measuredDockHeight by remember(current.id, dockDensity) { mutableIntStateOf(0) }
     val window = LocalMangaWindow.current
@@ -500,6 +508,7 @@ fun DetailScreen(
             else -> 16.dp
         }
         val naturalHeroHeight = remember(current.id, viewportWidth, density) { mutableIntStateOf(0) }
+        val posterHeightPx = remember(current.id, viewportWidth, density) { mutableIntStateOf(0) }
         // Foreground measurement publishes this frame's actual height. Background layers
         // measure afterwards and draw behind it, without a zero-height first-frame handoff.
         val header = key(current.id) { rememberTopAppBarState(initialHeightOffsetLimit = 0f) }
@@ -590,16 +599,17 @@ fun DetailScreen(
         val toolbarWidth = if (desktopDetail) Modifier.width(desktopWidth)
             else Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxWidth()
         Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(informationTone)) {
+            val summaryScroll = rememberScrollState()
             if (desktopDetail) {
                 Row(Modifier.width(desktopWidth).fillMaxHeight().align(Alignment.TopCenter)
                     .padding(start = 20.dp, end = 20.dp, top = toolbarClearance + 8.dp, bottom = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(18.dp)) {
                     Box(Modifier.width(summaryWidth).fillMaxHeight()) {
-                        val summaryScroll = rememberScrollState()
                         Column(Modifier.fillMaxSize().verticalScroll(summaryScroll)
                             .padding(end = 12.dp, bottom = readingInset)) {
                             HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
                                 compact = true, artworkHeadroom = 0.dp, adultProfile = adultProfile, desktopSummary = true,
+                                onPosterHeight = { posterHeightPx.intValue = it },
                                 onIntroduction = { fullIntroduction = true },
                                 onRatings = if (adultProfile) null else ({ fullRatings = true }),
                                 onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
@@ -661,6 +671,7 @@ fun DetailScreen(
                             key(current.id, viewportWidth, density) {
                                 HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
                                     compact = compactHero, artworkHeadroom = artworkHeadroom, adultProfile = adultProfile,
+                                    onPosterHeight = { posterHeightPx.intValue = it },
                                     onIntroduction = { fullIntroduction = true },
                                     onRatings = if (adultProfile) null else ({ fullRatings = true }),
                                     onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
@@ -715,11 +726,11 @@ fun DetailScreen(
                     .mangaHazeSource(artworkBackdrop).background(atmosphereColor),
                 contentAlignment = Alignment.TopCenter,
             ) {
-                if (!androidEditorial || coverBitmap == null) {
+                if (!opaqueInformation && coverBitmap == null) {
                     Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
                         modifier = Modifier.align(Alignment.Center).size(48.dp))
                 }
-                if (current.coverUrl.isNotBlank()) Image(
+                if (!opaqueInformation && current.coverUrl.isNotBlank()) Image(
                     painter = coverPainter, contentDescription = null,
                     modifier = Modifier.fillMaxSize().graphicsLayer {
                         scaleX = 1.12f; scaleY = 1.12f
@@ -728,25 +739,42 @@ fun DetailScreen(
                         Modifier.hazeBlur(input = HazeInput.Content, style = atmosphereBlur) else Modifier),
                     contentScale = ContentScale.Crop,
                 )
-                Box(Modifier.matchParentSize().drawBehind {
-                    val height = size.height.coerceAtLeast(1f)
-                    val fadeEnd = (1f - 24.dp.toPx() / height).coerceIn(.65f, .96f)
-                    val fadeStart = (fadeEnd - 104.dp.toPx() / height).coerceIn(.25f, .84f)
-                    val veil = when {
-                        androidEditorial && lightDetail -> .65f
-                        androidEditorial -> .70f
-                        lightDetail -> .44f
-                        else -> .52f
+                Box(Modifier.matchParentSize().drawWithCache {
+                    // The sharp poster keeps the colour of its surroundings. The copy sits on paper.
+                    val sceneWidth = if (desktopDetail) desktopWidth.toPx() else viewportWidth.toPx()
+                    val bookWidth = if (desktopDetail) summaryWidth.toPx() else sceneWidth
+                    val start = (size.width - sceneWidth) / 2f
+                    fun absoluteX(fraction: Float): Float {
+                        val x = start + bookWidth * fraction
+                        return if (layoutDirection == LayoutDirection.Rtl) size.width - x else x
                     }
-                    val fadeVeil = if (androidEditorial) .87f else if (lightDetail) .72f else .78f
-                    val bottomTone = if (desktopDetail) informationTone.copy(alpha = fadeVeil) else informationTone
-                    drawRect(Brush.verticalGradient(
-                        0f to informationTone.copy(alpha = veil),
-                        fadeStart to informationTone.copy(alpha = veil),
-                        (fadeStart + (fadeEnd - fadeStart) * .55f) to informationTone.copy(alpha = fadeVeil),
-                        fadeEnd to bottomTone,
-                        1f to bottomTone,
-                    ))
+                    val side = Brush.linearGradient(
+                        0f to informationTone.copy(alpha = if (lightDetail) .14f else .23f),
+                        .48f to informationTone.copy(alpha = if (lightDetail) .46f else .55f),
+                        1f to informationTone.copy(alpha = if (lightDetail) .86f else .90f),
+                        start = Offset(absoluteX(.15f), 0f), end = Offset(absoluteX(.59f), 0f),
+                    )
+                    val height = size.height.coerceAtLeast(1f)
+                    val posterTop = if (desktopDetail) toolbarClearance + 20.dp
+                        else artworkHeadroom + if (androidEditorial) 8.dp else 12.dp
+                    val fadeEnd = if (posterHeightPx.intValue > 0)
+                        (posterTop.toPx() + posterHeightPx.intValue).coerceIn(1f, height) else height
+                    val foot = Brush.verticalGradient(
+                        colors = listOf(informationTone.copy(alpha = .06f), informationTone),
+                        startY = (fadeEnd - 80.dp.toPx()).coerceAtLeast(0f), endY = fadeEnd,
+                    )
+                    onDrawBehind {
+                        if (opaqueInformation || bookWidth <= 0f) drawRect(informationTone) else {
+                            drawRect(side)
+                            val travel = if (desktopDetail) summaryScroll.value.toFloat() else -header.heightOffset
+                            val shift = travel.coerceIn(0f, fadeEnd)
+                            if (shift >= fadeEnd) drawRect(informationTone) else {
+                                translate(top = -shift) { drawRect(foot) }
+                                if (shift > 0f) drawRect(informationTone, topLeft = Offset(0f, size.height - shift),
+                                    size = Size(size.width, shift))
+                            }
+                        }
+                    }
                 })
             }
             // The catalogue's surface rises over the stationary atmosphere, including wide-window gutters.
@@ -754,7 +782,7 @@ fun DetailScreen(
                 val chapterTop = maxOf(toolbarPixels.toFloat(),
                     naturalHeroHeight.intValue + header.heightOffset).coerceIn(0f, size.height)
                 drawRect(informationTone, topLeft = Offset(0f, chapterTop),
-                    size = androidx.compose.ui.geometry.Size(size.width, size.height - chapterTop))
+                    size = Size(size.width, size.height - chapterTop))
             })
         }
         // Both overlays sample the artwork, poster and moving content; neither is part of its own source.
@@ -908,6 +936,7 @@ private fun HeroBookInformation(
     informationTone: Color,
     compact: Boolean,
     artworkHeadroom: Dp,
+    onPosterHeight: (Int) -> Unit,
     onIntroduction: () -> Unit,
     onRatings: (() -> Unit)?,
     onAuthor: ((String) -> Unit)?,
@@ -921,7 +950,7 @@ private fun HeroBookInformation(
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     val coverSize = cover.intrinsicSize
-    val actualAspect = if (coverSize.width.isFinite() && coverSize.height.isFinite() &&
+    val actualAspect = if (coverSize != Size.Unspecified && coverSize.width.isFinite() && coverSize.height.isFinite() &&
         coverSize.width > 0f && coverSize.height > 0f) coverSize.width / coverSize.height else null
     val route = LocalMangaCoverTransition.current?.visibility?.transition
     val arrived = route == null || route.currentState == EnterExitState.Visible &&
@@ -935,16 +964,11 @@ private fun HeroBookInformation(
     val posterAspect by animateFloatAsState(targetAspect,
         if (LocalMotionEnabled.current) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap(),
         label = "detail-poster-aspect")
-    val ink = if (informationTone.luminance() > .5f) Color(0xFF242426) else Color.White
+    val ink = DetailForeground
     val titleInteraction = remember(manga.id) { MutableInteractionSource() }
     val editorial = platformKind == PlatformKind.ANDROID && !adultProfile
-    val titleStyle = MaterialTheme.typography.headlineSmall.copy(
-        fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-        fontSize = if (compact) 20.sp else if (editorial) 23.sp else 24.sp,
-        lineHeight = if (compact) 28.sp else if (editorial) 30.sp else 32.sp,
-        fontWeight = FontWeight.SemiBold,
-    )
-    val contentGap = if (editorial) 14.dp else 16.dp
+    val titleStyle = if (compact) browseTitleStyle(23.sp, 30.sp) else browseTitleStyle(27.sp, 34.sp)
+    val contentGap = if (compact) 14.dp else 18.dp
     val headerGap = if (editorial) 8.dp else 12.dp
     BoxWithConstraints(modifier.fillMaxWidth().wrapContentHeight(unbounded = true)
         .padding(horizontal = 20.dp).padding(top = headerGap + artworkHeadroom, bottom = if (editorial) 6.dp else 2.dp)
@@ -963,24 +987,24 @@ private fun HeroBookInformation(
         val stacked = infoWidth < 112.dp || titleLayout.lineCount > maximumInlineLines
         // Measure the content independently of the display-height floor so long text
         // can expand through the existing scroll without a size-feedback loop.
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = if (stacked) 1 else 2,
                 horizontalArrangement = Arrangement.spacedBy(contentGap),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Box(Modifier.width(posterWidth).mangaSharedCover(manga.id)) {
+                Box(Modifier.width(posterWidth).onSizeChanged { onPosterHeight(it.height) }.mangaSharedCover(manga.id)) {
                     LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 12.dp,
                         role = GlassSurfaceRole.ARTWORK, elevation = 0.dp, softCard = false) {
-                        Box(Modifier.fillMaxWidth().padding(2.dp), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxWidth().padding(1.dp), contentAlignment = Alignment.Center) {
                             Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                                 tint = ink.copy(alpha = .16f), modifier = Modifier.size(36.dp))
                             Image(cover, contentDescription = null, contentScale = ContentScale.Fit,
                                 modifier = Modifier.fillMaxWidth().aspectRatio(posterAspect)
-                                    .clip(RoundedCornerShape(10.dp)))
+                                    .clip(RoundedCornerShape(11.dp)))
                         }
                     }
                 }
-                Column(Modifier.width(if (stacked) contentWidth else infoWidth),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(Modifier.width(if (stacked) contentWidth else infoWidth).align(Alignment.CenterVertically),
+                    verticalArrangement = Arrangement.spacedBy(9.dp)) {
                     if (adultProfile) MangaBrowseSource(manga, foreground = ink.copy(alpha = .75f))
                     Text(manga.title, color = ink, style = titleStyle,
                         modifier = Modifier.fillMaxWidth().clickable(enabled = infoVisible,
@@ -991,15 +1015,14 @@ private fun HeroBookInformation(
                         ?.let { "更新 · $it" }.orEmpty()).filter(String::isNotBlank).joinToString(" · ")
                     if (manga.authors.any(String::isNotBlank) || state.isNotBlank()) {
                         Column(verticalArrangement = Arrangement.spacedBy(if (editorial) 2.dp else 6.dp)) {
-                            AuthorNames(manga.authors, ink.copy(alpha = .82f), enabled = infoVisible, onAuthor = onAuthor)
-                            if (state.isNotBlank()) Text(state, color = ink.copy(alpha = .80f),
+                            AuthorNames(manga.authors, ink, enabled = infoVisible, onAuthor = onAuthor)
+                            if (state.isNotBlank()) Text(mangaNumberText(state), color = lerp(ink, informationTone, .24f),
                                 fontSize = 12.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                    if (!desktopSummary) HeroSynopsis(manga, ink, infoVisible, onIntroduction)
                 }
             }
-            if (desktopSummary) HeroSynopsis(manga, ink, infoVisible, onIntroduction, lines = 4)
+            HeroSynopsis(manga, ink, infoVisible, onIntroduction, lines = if (desktopSummary) 4 else 2)
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
                 DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag,
                     largeTouchTarget = adultProfile,
@@ -1073,15 +1096,17 @@ private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: ((St
                     .padding(horizontal = 24.dp).padding(bottom = 28.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 20.sp, lineHeight = 28.sp,
-                    color = DetailForeground, fontWeight = FontWeight.SemiBold)
-                AuthorNames(manga.authors, DetailSecondary, onAuthor = onAuthor)
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(manga.title, style = browseTitleStyle(24.sp, 31.sp), color = DetailForeground)
+                    AuthorNames(manga.authors, DetailSecondary, onAuthor = onAuthor)
+                }
+                Text(manga.description.ifBlank { "来源暂无简介" },
+                    fontFamily = mangaFontFamily(MangaFontScene.READING), fontSize = 16.sp, lineHeight = 27.sp,
+                    color = if (manga.description.isBlank()) DetailSecondary else DetailForeground)
                 if (adultProfile) MangaBrowseSource(manga)
                 DetailTags(manga, onTag = onTag, largeTouchTarget = adultProfile)
                 DetailSourceMetadata(manga, onOriginal)
-                if (!adultProfile) MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailForeground)
-                Text(manga.description.ifBlank { "来源暂无简介" },
-                    fontFamily = mangaFontFamily(MangaFontScene.READING), fontSize = 16.sp, lineHeight = 26.sp, color = DetailSecondary)
+                if (!adultProfile) MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailSecondary, plain = true)
             }
         }
     }
@@ -1185,7 +1210,7 @@ private fun AuthorNames(authors: List<String>, color: Color, enabled: Boolean = 
     FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         authors.filter(String::isNotBlank).distinct().forEach { name ->
             val interaction = remember(name) { MutableInteractionSource() }
-            Text(name, color = color, fontSize = 12.sp, lineHeight = 18.sp,
+            Text(name, color = color, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
                 modifier = Modifier.clip(RoundedCornerShape(6.dp))
                     .then(if (onAuthor != null) Modifier.clickable(enabled = enabled, role = Role.Button,
                         interactionSource = interaction, indication = null,
@@ -1245,11 +1270,11 @@ private fun DetailSections(
                     Row(Modifier.semantics(mergeDescendants = true) {
                         contentDescription = listOfNotNull(labels[index], count).joinToString("，")
                     }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(labels[index], color = color, fontSize = 13.sp,
+                        Text(labels[index], color = color, fontSize = 15.sp,
                             fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         count?.let { Text(it, Modifier.weight(1f, fill = false),
-                            color = color.copy(alpha = .65f), fontSize = 10.sp,
+                            color = color.copy(alpha = .80f), style = mangaMetricValueStyle(12.sp, 16.sp),
                             maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
                 })

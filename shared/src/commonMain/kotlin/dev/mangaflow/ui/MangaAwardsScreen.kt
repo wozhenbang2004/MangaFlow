@@ -194,8 +194,14 @@ internal fun MangaAwardsScreen(
                     verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     rows.groupBy { it.year }.forEach { (announcementYear, yearRows) ->
                         if (pane.year == null) item(key = "award-year:$announcementYear", contentType = "award-year") {
-                            Text("${announcementYear} 年公布", Modifier.padding(top = 10.dp, bottom = 4.dp)
-                                .semantics { heading() }, style = MaterialTheme.typography.titleLarge)
+                            Row(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 5.dp)
+                                .semantics(mergeDescendants = true) { heading() },
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(announcementYear.toString(), Modifier.alignByBaseline(),
+                                    style = mangaMetricValueStyle(27.sp, 33.sp), fontWeight = FontWeight.SemiBold)
+                                Text("年公布", Modifier.alignByBaseline(), style = MaterialTheme.typography.labelMedium,
+                                    color = colors.onSurfaceVariant)
+                            }
                         }
                         yearRows.groupBy { it.award to it.edition }.forEach { (group, works) ->
                             val (source, edition) = group
@@ -334,7 +340,7 @@ private fun MangaAwardGroupHeading(award: MangaAward?, edition: Int?) {
     Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(award?.title ?: editionLabel.orEmpty(), Modifier.weight(1f).semantics { heading() },
-            style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         if (award != null && editionLabel != null) Text(editionLabel,
             style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
@@ -345,16 +351,16 @@ private fun MangaAwardRow(entry: MangaAwardEntry, enabled: Boolean, onClick: () 
     val interaction = remember { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
     val category = entry.category.takeUnless { it == "获奖作品" || entry.award == MangaAward.MANGA_TAISHO && it == "大赏" }
-    val summary = listOfNotNull(category, entry.authors.joinToString(" / ").takeIf { it.isNotBlank() })
-        .joinToString(" · ")
     Row(Modifier.fillMaxWidth().clickable(enabled = enabled, role = Role.Button, interactionSource = interaction,
         indication = null, onClickLabel = "查找作品", onClick = onClick).motionPress(interaction, enabled, pressedScale = .985f)
         .heightIn(min = 48.dp).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(entry.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            if (!category.isNullOrBlank()) Text(category, style = MaterialTheme.typography.labelSmall,
+                color = colors.primary)
+            Text(entry.title, style = browseTitleStyle(17.sp, 23.sp),
                 maxLines = 3, overflow = TextOverflow.Ellipsis)
-            if (summary.isNotBlank()) Text(summary, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+            if (entry.authors.isNotEmpty()) Text(entry.authors.joinToString(" / "),
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
         Icon(Icons.Outlined.ChevronRight, null, Modifier.padding(start = 8.dp).size(18.dp),

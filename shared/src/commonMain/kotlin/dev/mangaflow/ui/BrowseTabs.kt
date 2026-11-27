@@ -14,7 +14,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
@@ -24,18 +26,18 @@ import dev.mangaflow.ui.motion.MotionTabTreatment
 private val BrowseTabSize = 14.sp
 
 @Composable
-internal fun rememberBrowseTabInk(labels: List<String>): HeaderInkCells {
+internal fun rememberBrowseTabInk(labels: List<String>, fontSize: TextUnit = BrowseTabSize, inset: Dp = 4.dp): HeaderInkCells {
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
-    val style = LocalTextStyle.current.copy(fontSize = BrowseTabSize)
-    val cells by remember(labels, density, measurer, style) {
+    val style = LocalTextStyle.current.copy(fontSize = fontSize)
+    val cells by remember(labels, density, measurer, style, inset) {
         derivedStateOf {
             val sizes = labels.map { label ->
                 val normal = measurer.measure(label, style.copy(fontWeight = FontWeight.Normal), maxLines = 1).size
                 val bold = measurer.measure(label, style.copy(fontWeight = FontWeight.SemiBold), maxLines = 1).size
                 with(density) { DpSize(maxOf(normal.width, bold.width).toDp(), maxOf(normal.height, bold.height).toDp()) }
             }
-            HeaderInkCells(4.dp, sizes, wraps = density.fontScale > 1.3f)
+            HeaderInkCells(inset, sizes, wraps = density.fontScale > 1.3f)
         }
     }
     return cells

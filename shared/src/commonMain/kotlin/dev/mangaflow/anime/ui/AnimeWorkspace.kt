@@ -30,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
@@ -80,6 +81,9 @@ internal enum class AnimeWorkspaceDestination(val label: String, val icon: Image
     DOWNLOADS("离线下载", Icons.Outlined.DownloadForOffline), TRACKING("追番账号", Icons.Outlined.AccountCircle),
     SOURCES("管理片源", Icons.Outlined.Tune),
 }
+private val animePrimaryLabels = listOf(AnimeWorkspaceDestination.HOME.label, AnimeWorkspaceDestination.CALENDAR.label)
+private val animePrimaryTypeSize = 13.sp
+
 private enum class AnimeWorkspacePage(val discovery: AnimeDiscoveryTab? = null) {
     HOME(AnimeDiscoveryTab.HOME), SEASON(AnimeDiscoveryTab.SEASON),
     CALENDAR(AnimeDiscoveryTab.CALENDAR), RANKING(AnimeDiscoveryTab.RANKING),
@@ -825,7 +829,7 @@ private fun AnimeWorkspaceContent(
                                 else -> "返回${baseDestination.label}"
                             }
                             val primaryTabs: @Composable () -> Unit = {
-                                MotionTabs(if (fromBroadcast) 1 else 0, listOf("发现", "放送"),
+                                MotionTabs(if (fromBroadcast) 1 else 0, animePrimaryLabels,
                                     onSelect = { if (rootActive) when (it) {
                                         0 -> selectDiscovery(AnimeDiscoveryTab.HOME)
                                         1 -> selectBroadcast()
@@ -835,7 +839,7 @@ private fun AnimeWorkspaceContent(
                                     treatment = MotionTabTreatment.Capsule,
                                     selectionBackdrop = backdrop,
                                     selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
-                                    controlHeight = 44.dp)
+                                    controlHeight = 44.dp, fontSize = animePrimaryTypeSize)
                             }
                             Column {
                                 AnimeWorkspaceHeader(root = shown.depth == 0 && !directoryDetailOpen && !rankingPage,
@@ -879,7 +883,9 @@ private fun AnimeWorkspaceContent(
                                 if (stackDesktopTabs) HeaderGlassSurface(backdrop,
                                     Modifier.fillMaxWidth().padding(horizontal = 8.dp)
                                         .graphicsLayer { alpha = controlsAlpha() },
-                                    quietShadow = true) { primaryTabs() }
+                                    quietShadow = true, ink = rememberBrowseTabInk(animePrimaryLabels, animePrimaryTypeSize, 0.dp)) {
+                                    primaryTabs()
+                                }
                             }
                         }
                     }) { headerInset ->
@@ -1199,13 +1205,14 @@ private fun AnimeWorkspaceHeader(root: Boolean, title: String, backdrop: HazeSta
     val headerModifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
         .padding(horizontal = 8.dp, vertical = 2.dp)
     if (root && primary != null && actions != null) {
+        val tabInk = rememberBrowseTabInk(animePrimaryLabels, animePrimaryTypeSize, 0.dp)
         if (navigationVisible) {
             SegmentedGlassHeader(backdrop, navigation, headerModifier.semantics { paneTitle = title },
                 controlsWidth = tabsWidth, actionsWidth = actionsWidth, controlsAlpha = controlsAlpha,
-                quietShadow = true, actions = actions) { primary() }
+                quietShadow = true, actions = actions, tabInk = tabInk) { primary() }
         } else Box(headerModifier.semantics { paneTitle = title }) {
             GlassControlGroup(backdrop, tabsWidth, actionsWidth, controlsAlpha, actions,
-                content = { primary() }, quietShadow = true)
+                content = { primary() }, quietShadow = true, tabInk = tabInk, actionInk = rememberHeaderActionInk(actionsWidth))
         }
         return
     }

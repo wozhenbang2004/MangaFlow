@@ -77,7 +77,7 @@ internal actual fun rememberNativeFeelFeedback(): (FeelEvent) -> Boolean {
 }
 
 @Composable
-internal actual fun MotionDialogWindowPolicy(visible: Boolean) {
+internal actual fun MotionDialogWindowPolicy(visible: Boolean, backgroundDim: Float) {
     // Compose's iOS dialog has no second native-window entrance animation. The shared
     // presence gate/focus policy owns outgoing content until its actual disposal.
 }

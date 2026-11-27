@@ -56,7 +56,6 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -159,11 +158,11 @@ internal fun BodySourceSettingsSheet(
         containerColor = colors.surface.copy(alpha = .97f)) { dismiss ->
         Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height * .78f)
             .navigationBarsPadding()) {
-            Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+            Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("漫画源", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                    Text("已启用 ${added.count { it.enabled }} · 已添加 ${added.size}", fontSize = 11.sp,
+                    PreferenceHeading("漫画源")
+                    Text("已启用 ${added.count { it.enabled }} · 已添加 ${added.size}", style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant)
                 }
                 MotionIconButton(onClick = { showHelp = !showHelp }) {
@@ -342,16 +341,18 @@ private fun BodySourceSettingsRow(
     val interaction = remember(entry.source.id) { MutableInteractionSource() }
     Row(modifier.fillMaxWidth().heightIn(min = 64.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        ChapterSourceLogo(entry.source.id, entry.source.name, Modifier.size(24.dp))
+        ChapterSourceLogo(entry.source.id, entry.source.name, Modifier.size(32.dp), muted = !entry.enabled)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(entry.source.name, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(entry.source.name, style = MaterialTheme.typography.titleMedium,
+                color = if (entry.enabled) colors.onSurface else colors.onSurfaceVariant,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(listOfNotNull(entry.source.language, kind ?: "内置", networkLabel)
                 .filter { it.isNotBlank() }.joinToString(" · "),
-                fontSize = 11.sp, color = colors.onSurfaceVariant,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
         if (onDetails != null) MotionIconButton(onClick = onDetails, enabled = enabled,
-            modifier = Modifier.size(40.dp), tooltip = "来源状态与设置") {
+            modifier = Modifier.size(44.dp), tooltip = "来源状态与设置") {
             androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Outlined.Tune, "来源状态与设置", Modifier.size(18.dp))
         }
         Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp))

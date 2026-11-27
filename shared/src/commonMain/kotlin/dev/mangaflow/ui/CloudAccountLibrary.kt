@@ -561,14 +561,15 @@ private fun CloudAccountItem(
                         transition?.select?.invoke(MangaCoverKey(manga.id, placement)); onClick()
                     }).motionPress(interaction)) {
                 MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(2f / 3f)
-                    .mangaSharedCover(manga.id, placement).mangaCoverCard(12.dp))
+                    .mangaSharedCover(manga.id, placement).mangaCoverCard(12.dp, shadowRadius = 8.dp))
                 Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                    modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
-                    style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(top = 8.dp, start = 1.dp, end = 1.dp),
+                    style = MaterialTheme.typography.titleSmall, fontSize = 15.sp, lineHeight = 20.sp,
+                    fontWeight = FontWeight.SemiBold,
                     minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 2.dp, start = 2.dp, end = 2.dp),
+                CloudChapterCaption(metadata, Modifier.fillMaxWidth().padding(start = 1.dp, end = 1.dp, top = 4.dp))
+                MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 3.dp, start = 1.dp, end = 1.dp),
                     compact = true, showMore = false, plain = true, valueSize = 12.sp, onExpand = onRatings)
-                CloudChapterCaption(metadata, Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp, top = 1.dp))
             }
             Box(Modifier.align(Alignment.TopEnd)) { itemMenu(platformKind == PlatformKind.DESKTOP) }
             Box(Modifier.align(if (platformKind == PlatformKind.DESKTOP) Alignment.TopStart else Alignment.TopEnd).padding(6.dp)) {
@@ -591,12 +592,12 @@ private fun CloudAccountItem(
                         transition?.select?.invoke(MangaCoverKey(manga.id, placement)); onClick()
                     }).motionPress(interaction, pressedScale = .988f)
                 .heightIn(min = 76.dp).padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                MangaCover(manga, repository, Modifier.width(42.dp).height(60.dp)
-                    .mangaSharedCover(manga.id, placement).mangaCoverCard(8.dp))
+                MangaCover(manga, repository, Modifier.width(46.dp).height(66.dp)
+                    .mangaSharedCover(manga.id, placement).mangaCoverCard(8.dp, shadowRadius = 6.dp))
                 Column(Modifier.weight(1f).padding(start = 12.dp, end = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                        style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
+                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                     CloudChapterCaption(metadata, Modifier.fillMaxWidth())
                 }

@@ -80,9 +80,9 @@ internal fun PageCollectionsSheet(
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background) { dismiss ->
         Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Text("画面收藏", style = MaterialTheme.typography.titleMedium)
+            Text("画面收藏", style = MaterialTheme.typography.titleLarge)
             Text(collections.size.toString(), modifier = Modifier.padding(start = 8.dp).weight(1f),
-                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                style = mangaMetricValueStyle(), color = colors.onSurfaceVariant)
             MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.Close, "关闭画面收藏", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
             }
@@ -120,27 +120,28 @@ private fun PageCollectionRow(collection: PageCollection, repository: MangaRepos
     val pages = if (collection.spread) "第 ${collection.firstPage + 1}–${collection.lastPage + 1} 页 · 跨页"
         else "第 ${collection.firstPage + 1} 页"
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val previewWidth = (maxWidth * .28f).coerceIn(72.dp, 104.dp)
+        val previewWidth = (maxWidth * .38f).coerceIn(64.dp, 164.dp)
+        val previewHeight = (previewWidth * .80f).coerceIn(60.dp, 112.dp)
         Row(Modifier.fillMaxWidth()
             .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = "阅读收藏画面", onClick = onClick)
             .motionPress(interaction, pressedScale = .99f)
-            .padding(horizontal = 4.dp, vertical = 7.dp),
+            .padding(horizontal = 4.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically) {
             CollectionPreview(collection, repository,
-                Modifier.width(previewWidth).height(76.dp).mangaCoverCard(6.dp)
-                    .background(colors.onSurface.copy(alpha = .035f)))
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Modifier.width(previewWidth).height(previewHeight).mangaCoverCard(9.dp, shadowRadius = 5.dp)
+                    .background(colors.surfaceContainerLow))
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(collection.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface,
-                    style = MaterialTheme.typography.titleSmall, fontSize = 13.sp, lineHeight = 18.sp,
-                    fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    style = MaterialTheme.typography.titleMedium, fontSize = 16.sp, lineHeight = 21.sp,
+                    fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(collection.chapter.title, color = colors.onSurfaceVariant,
                     fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(mangaNumberText(pages), color = colors.onSurfaceVariant,
+                Text(mangaNumberText(pages), color = colors.primary,
                     fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (savedAt != null) Text(savedAt, color = colors.onSurfaceVariant.copy(alpha = .75f),
-                    fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (savedAt != null) Text(mangaNumberText(savedAt), color = colors.onSurfaceVariant,
+                    fontSize = 11.sp, lineHeight = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }

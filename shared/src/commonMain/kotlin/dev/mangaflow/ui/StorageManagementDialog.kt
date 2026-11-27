@@ -8,6 +8,8 @@ import dev.mangaflow.background.StorageCleanupFailure
 import dev.mangaflow.background.clearStorageCache
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -25,6 +27,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.SingletonImageLoader
@@ -214,9 +217,8 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                             modifier = Modifier.size(44.dp), tooltip = "返回") {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                         }
-                        Text(if (plan != null) "清理预览" else bookTitle
-                            ?: area?.label ?: "存储管理", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        PreferenceHeading(if (plan != null) "清理预览" else bookTitle
+                            ?: area?.label ?: "存储管理", Modifier.weight(1f))
                         MotionIconButton({ revision++ }, enabled = !busy && !loading && plan == null, modifier = Modifier.size(44.dp), tooltip = "刷新用量") {
                             MotionSwap(loading, Modifier.size(18.dp)) { working ->
                                 if (working) MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
@@ -237,21 +239,35 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                     }
                     val review = plan
                     if (review == null) {
-                        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(when {
-                                    hasSelection -> scopeLabel
-                                    area == null && book == null -> "本机已用"
-                                    else -> "已用"
-                                }, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                                Text(occupiedBytes?.let(::storageBytes) ?: "—", style = MaterialTheme.typography.headlineSmall)
-                                Text(if (snapshot == null) if (loading) "正在统计…" else "用量未就绪"
-                                    else "可释放 ${storageBytes(scopeBytes)}",
-                                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 12.dp)
+                            .background(colors.surfaceContainerLow, RoundedCornerShape(16.dp))
+                            .padding(horizontal = 14.dp, vertical = 10.dp)) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text(when {
+                                        hasSelection -> scopeLabel
+                                        area == null && book == null -> "本机已用"
+                                        else -> "已用"
+                                    }, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                                    Text(occupiedBytes?.let(::storageBytes) ?: "—", style = mangaMetricValueStyle(28.sp, 34.sp),
+                                        color = colors.onSurface)
+                                    Text(if (snapshot == null) if (loading) "正在统计…" else "用量未就绪"
+                                        else "可释放 ${storageBytes(scopeBytes)}",
+                                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                }
+                                MotionButton(::previewClear, enabled = !busy && !loading && scopeBytes > 0L) {
+                                    Text(if (hasSelection) "清理所选" else "清理缓存")
+                                }
                             }
-                            MotionButton(::previewClear, enabled = !busy && !loading && scopeBytes > 0L) {
-                                Text(if (hasSelection) "清理所选" else "清理缓存")
+                            if (occupiedBytes != null && occupiedBytes > 0L) {
+                                val share = (scopeBytes.toDouble() / occupiedBytes).coerceIn(0.0, 1.0).toFloat()
+                                Spacer(Modifier.height(8.dp))
+                                Box(Modifier.fillMaxWidth().height(4.dp).clip(CircleShape)
+                                    .background(colors.onSurface.copy(alpha = .12f))) {
+                                    if (share > 0f) Spacer(Modifier.fillMaxWidth(share).fillMaxHeight()
+                                        .background(colors.primary, CircleShape))
+                                }
                             }
                         }
                     }
@@ -469,12 +485,12 @@ private fun StorageNavigationRow(title: String, detail: String, size: String, ic
         indication = null, onClick = onClick).motionPress(interaction, enabled)
         .padding(vertical = 10.dp, horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        SettingsRowIcon(icon)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(title, style = MaterialTheme.typography.titleSmall)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(size, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(size, style = mangaMetricValueStyle(), color = MaterialTheme.colorScheme.onSurface)
         Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -487,7 +503,7 @@ private fun StorageLine(title: String, detail: String, size: String) {
             Text(title, style = MaterialTheme.typography.bodyMedium)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(size, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(size, style = mangaMetricValueStyle(), color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
@@ -506,7 +522,7 @@ private fun StorageBookRow(manga: Manga?, repository: dev.mangaflow.data.Unified
                 Text(title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text(size, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(size, style = mangaMetricValueStyle(), color = MaterialTheme.colorScheme.onSurface)
             Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp))
         }
     }

@@ -17,7 +17,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -184,14 +183,14 @@ private fun AnimeSourcePreview(title: AnimeSourceTitle, sourceName: String, vide
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        AnimePoster(title.coverUrl, Modifier.width(86.dp).height(124.dp), title.sourceId)
+                        AnimePoster(title.coverUrl, Modifier.size(88.dp, 132.dp), title.sourceId)
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 AnimeSourceMark(title.sourceId, sourceName, size = 18.dp)
                                 AnimeQuietLabel(sourceName)
                             }
-                            Text(title.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold,
+                            Text(title.title, style = animeWorkTitleStyle(large = true),
                                 maxLines = 3, overflow = TextOverflow.Ellipsis)
                             listOfNotNull(title.year?.toString(), title.updateText.takeIf(String::isNotBlank),
                                 title.ratingText.takeIf(String::isNotBlank)).joinToString(" · ").takeIf(String::isNotBlank)

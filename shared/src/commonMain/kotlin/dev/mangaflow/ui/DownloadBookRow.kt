@@ -54,12 +54,15 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -127,19 +130,19 @@ internal fun DownloadBookRow(
             onClickLabel = if (managing) "选择这部作品的章节" else "继续阅读 ${manga.title}",
             onClick = if (managing) onSelect else onRead,
             onLongClickLabel = "管理这部作品的下载", onLongClick = onManage,
-        ).motionPress(interaction, pressedScale = .99f).padding(vertical = 4.dp),
+        ).motionPress(interaction, pressedScale = .99f).padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             if (manga.sourceUrl == LOCAL_SOURCE_URL) {
                 AsyncImage(manga.coverUrl, null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(48.dp, 68.dp).mangaCoverCard(8.dp)
+                    modifier = Modifier.size(52.dp, 74.dp).mangaCoverCard(9.dp, shadowRadius = 6.dp)
                         .background(colors.surfaceVariant))
             } else {
-                MangaCover(manga, repository, Modifier.size(48.dp, 68.dp).mangaCoverCard(8.dp),
+                MangaCover(manga, repository, Modifier.size(52.dp, 74.dp).mangaCoverCard(9.dp, shadowRadius = 6.dp),
                     scale = ContentScale.Crop)
             }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium,
+            Spacer(Modifier.width(13.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 17.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold,
                     color = colors.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 DownloadInlineTransferSummary(entries, active, if (managing) null else onInspect)
                 DownloadProgressLine(entries)
@@ -163,7 +166,7 @@ internal fun DownloadBookRow(
         // Multi-chapter failures belong to their disclosed chapter rows; do not copy every
         // complete error into the collapsed book or grow one failure row per work.
         if (!managing && onInspect == null && entries.size == 1 && entries.first().error.isNotBlank())
-            DownloadFailureDetails(entries.first().error, Modifier.padding(start = 60.dp))
+            DownloadFailureDetails(entries.first().error, Modifier.padding(start = 65.dp))
 
     }
     }
@@ -202,11 +205,11 @@ internal fun DownloadChapterRow(
         onLongClickLabel = "管理这一话", onLongClick = onManage)
         .motionPress(interaction, pressedScale = .99f)
         .clip(RoundedCornerShape(10.dp))
-        .background(if (selected) colors.primary.copy(alpha = .10f) else colors.onSurface.copy(alpha = .025f))
-        .padding(start = 10.dp, end = 2.dp, top = 3.dp, bottom = 3.dp)) {
+        .background(if (selected) colors.primaryContainer else colors.surfaceContainerLow)
+        .padding(start = 13.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(entry.chapter.title, fontSize = 14.sp, lineHeight = 19.sp, fontWeight = FontWeight.Medium,
+                Text(entry.chapter.title, fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
                     color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val source = dev.mangaflow.data.sourceDisplayName(
                     dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id).sourceId)
@@ -287,6 +290,14 @@ private fun DownloadInlineTransferSummary(
     val interaction = remember { MutableInteractionSource() }
     val saved = entries.count { it.status == DownloadStatus.COMPLETED }
     val allSaved = saved == entries.size
+    val status = mangaStatusColors()
+    val signal = when (entry.status) {
+        DownloadStatus.COMPLETED -> status.success
+        DownloadStatus.RUNNING -> status.activity
+        DownloadStatus.FAILED -> status.error
+        DownloadStatus.WAITING, DownloadStatus.QUEUED -> status.waiting
+        DownloadStatus.PAUSED -> status.neutral
+    }
     val title = when {
         source != null -> source + " · " + downloadPageProgress(entries)
         entries.size == 1 -> entry.chapter.title + " · " + downloadPageProgress(entries)
@@ -309,9 +320,13 @@ private fun DownloadInlineTransferSummary(
             if (onInspect != null) Icon(Icons.Outlined.Info, null, Modifier.size(12.dp),
                 tint = colors.onSurfaceVariant.copy(alpha = .7f))
         }
-        Text(mangaNumberText(detail), style = MaterialTheme.typography.labelSmall,
-            color = if (entry.status == DownloadStatus.FAILED) colors.error else colors.onSurfaceVariant,
-            maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            Box(Modifier.size(5.dp).background(signal, RoundedCornerShape(50)))
+            Text(mangaNumberText(detail), style = MaterialTheme.typography.labelSmall,
+                color = if (entry.status == DownloadStatus.FAILED) colors.error else colors.onSurfaceVariant,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 
@@ -415,23 +430,19 @@ private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: 
 
 @Composable
 private fun DownloadProgressLine(entries: List<DownloadEntry>) {
-    val knownProgress = downloadCurrentPageFraction(entries)
-    val target = knownProgress ?: 0f
-    val progress by animateFloatAsState(target, tween(if (LocalMotionEnabled.current) MangaMotion.Quick else 0), label = "download-real-progress")
-    val color = MaterialTheme.colorScheme.primary
-    val visible = knownProgress != null && entries.any { it.status != DownloadStatus.COMPLETED }
-    Box(Modifier.fillMaxWidth().height(6.dp).semantics {
-        if (visible) {
+    val knownProgress = downloadCurrentPageFraction(entries) ?: return
+    val progress by animateFloatAsState(knownProgress, tween(if (LocalMotionEnabled.current) MangaMotion.Quick else 0),
+        label = "download-real-progress")
+    val color = mangaStatusColors().activity
+    Box(Modifier.fillMaxWidth().padding(bottom = 3.dp).height(3.dp).clip(RoundedCornerShape(2.dp))
+        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)).semantics {
             contentDescription = "当前图片接收进度"
-            progressBarRangeInfo = ProgressBarRangeInfo(knownProgress!!, 0f..1f)
-        }
-    }.drawBehind {
-        if (visible) {
-            val y = size.height / 2f
-            drawLine(color.copy(alpha = .12f), Offset(0f, y), Offset(size.width, y), 2.dp.toPx(), StrokeCap.Round)
-            if (progress > 0f) drawLine(color.copy(alpha = .8f), Offset(0f, y), Offset(size.width * progress, y), 2.dp.toPx(), StrokeCap.Round)
-        }
-    })
+            progressBarRangeInfo = ProgressBarRangeInfo(knownProgress, 0f..1f)
+        }.drawBehind {
+            val fill = size.width * progress
+            val x = if (layoutDirection == LayoutDirection.Rtl) size.width - fill else 0f
+            if (fill > 0f) drawRoundRect(color, Offset(x, 0f), Size(fill, size.height), CornerRadius(size.height / 2f))
+        })
 }
 
 private fun downloadKnownProgress(entries: List<DownloadEntry>): Float? {

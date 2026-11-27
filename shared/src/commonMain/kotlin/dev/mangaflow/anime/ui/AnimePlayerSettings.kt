@@ -23,6 +23,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
@@ -243,7 +244,7 @@ internal fun AnimePlayerSettings(
                         AnimePlayerPanel.DANMAKU_ACCESS -> "弹幕服务配置"
                     }
                     Text(panelTitle, Modifier.weight(1f).padding(start = if (section == AnimePlayerPanel.GENERAL) 8.dp else 0.dp)
-                        .semantics { heading() }, style = MaterialTheme.typography.titleMedium,
+                        .semantics { heading() }, style = MaterialTheme.typography.titleLarge,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                     MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭播放设置") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
@@ -260,7 +261,7 @@ internal fun AnimePlayerSettings(
                     AnimePlayerPanel.DANMAKU_DISPLAY, AnimePlayerPanel.DANMAKU_ACCESS)) AnimeDanmakuPane(section, controller, state,
                     onSection = ::show, modifier = Modifier.weight(1f, fill = false))
                 else LazyColumn(Modifier.weight(1f, fill = false), state = sectionScroll,
-                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 14.dp),
+                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 5.dp, bottom = 18.dp),
                     verticalArrangement = Arrangement.spacedBy(if (section == AnimePlayerPanel.GENERAL) 1.dp else 5.dp)) {
                     when (section) {
                         AnimePlayerPanel.GENERAL -> {
@@ -700,8 +701,9 @@ private fun AnimeQuickPlaybackSpeed(speed: Float, active: Boolean, onChange: (Fl
 
 @Composable
 private fun AnimePlayerSettingsSection(title: String) {
-    Text(title, Modifier.padding(start = 8.dp, top = 9.dp, bottom = 2.dp).semantics { heading() },
-        style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Text(title, Modifier.padding(start = 8.dp, top = 14.dp, bottom = 3.dp).semantics { heading() },
+        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurface)
 }
 
 @Composable
@@ -715,16 +717,18 @@ private fun AnimePlayerSettingLink(icon: ImageVector, title: String, value: Stri
         .motionPress(interaction, pressedScale = .98f).heightIn(min = 46.dp)
         .padding(horizontal = 8.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-        Icon(icon, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+        Box(Modifier.size(27.dp), contentAlignment = Alignment.Center) {
+            Icon(icon, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
+        }
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
+            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, color = colors.onSurface)
             if (!inlineValue && value.isNotBlank()) Text(value, style = MaterialTheme.typography.labelSmall,
                 color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
         if (inlineValue) Text(value, Modifier.widthIn(max = window.width * .38f),
             style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant,
             maxLines = 2, overflow = TextOverflow.Ellipsis)
-        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
+        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
     }
 }
 

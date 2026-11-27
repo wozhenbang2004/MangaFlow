@@ -13,12 +13,14 @@ import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -189,6 +191,7 @@ private fun DesktopActionPopup(
         onDispose { if (present) reportPresence(false) }
     }
     if (!present) return
+    val maximumWidth = (LocalMangaWindow.current.width - 24.dp).coerceIn(1.dp, 300.dp)
     val enabledIndices = actions.indices.filter { actions[it].enabled }
     val requesters = remember(actions.size) { List(actions.size) { FocusRequester() } }
     var focusedIndex by remember { mutableIntStateOf(-1) }
@@ -227,8 +230,7 @@ private fun DesktopActionPopup(
             }
         }
         Surface(
-            modifier = Modifier.width((LocalMangaWindow.current.width - 24.dp)
-                .coerceAtLeast(1.dp).coerceAtMost(264.dp))
+            modifier = Modifier.widthIn(min = minOf(144.dp, maximumWidth), max = maximumWidth).width(IntrinsicSize.Max)
                 .motionInputGate(visible)
                 .onPreviewKeyEvent { event ->
                     if (!visible || event.type != KeyEventType.KeyDown) false
@@ -257,7 +259,7 @@ private fun DesktopActionPopup(
                     translationY = -4.dp.toPx() * (1f - opacity.value)
                 },
             shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            color = MaterialTheme.colorScheme.surface,
             tonalElevation = 0.dp,
             shadowElevation = 4.dp,
         ) {
@@ -276,7 +278,7 @@ private fun DesktopActionPopup(
                         .heightIn(min = 36.dp).padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Text(action.label, color = MaterialTheme.colorScheme.onSurface.copy(
-                            alpha = if (action.enabled) .86f else .30f), fontSize = 13.sp, lineHeight = 19.sp)
+                            alpha = if (action.enabled) 1f else .40f), style = MaterialTheme.typography.bodyMedium)
                     }
                 }
             }
@@ -328,10 +330,10 @@ internal fun DesktopIconTooltip(label: String?, interaction: MutableInteractionS
     val overMedia = LocalDesktopTooltipOverMedia.current
     val colors = if (overMedia) MangaDarkColorScheme else MaterialTheme.colorScheme
     Popup(popupPositionProvider = position, properties = PopupProperties(focusable = false)) {
-        Surface(shape = RoundedCornerShape(10.dp), color = colors.surfaceContainerLow,
-            tonalElevation = 0.dp, shadowElevation = if (overMedia) 1.dp else 4.dp) {
-            Text(label, Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                color = if (overMedia) colors.onSurfaceVariant else colors.onSurface, fontSize = 12.sp, lineHeight = 16.sp,
+        Surface(shape = RoundedCornerShape(9.dp), color = if (overMedia) colors.surfaceContainerHigh else colors.surface,
+            tonalElevation = 0.dp, shadowElevation = if (overMedia) 1.dp else 3.dp) {
+            Text(label, Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                color = colors.onSurface, fontSize = 12.sp, lineHeight = 17.sp,
                 maxLines = 2)
         }
     }

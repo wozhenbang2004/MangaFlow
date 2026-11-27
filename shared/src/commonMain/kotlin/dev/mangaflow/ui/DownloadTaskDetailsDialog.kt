@@ -1,6 +1,8 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -20,8 +22,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.SourceKeys
@@ -96,8 +100,8 @@ internal fun DownloadTaskDetails(
                     Spacer(Modifier.width(6.dp))
                 }
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(shown.chapter.title, style = MaterialTheme.typography.titleMedium,
-                        maxLines = if (inPane) 2 else 1, overflow = TextOverflow.Ellipsis)
+                    Text(shown.chapter.title, style = MaterialTheme.typography.titleLarge,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
                     if (!inPane) Text(shown.manga.title, style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -109,11 +113,26 @@ internal fun DownloadTaskDetails(
             val facts: @Composable (Modifier) -> Unit = { modifier ->
                 Column(modifier.fillMaxWidth().verticalScroll(scroll).motionInputGate(enabled)
                     .padding(top = 14.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    DownloadFactRow("原始下载", downloadTransferPhaseLabel(shown, now))
+                    Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(13.dp))
+                        .padding(horizontal = 14.dp, vertical = 11.dp).semantics(mergeDescendants = true) {},
+                        verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("原始下载", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                            Text(shown.completedPages.toString(), Modifier.alignByBaseline(),
+                                style = mangaMetricValueStyle(27.sp, 33.sp), color = colors.onSurface)
+                            val totalPages = if (shown.totalPages > 0) "/ ${shown.totalPages} 页已保存" else "页已保存"
+                            Text(mangaNumberText(totalPages), Modifier.alignByBaseline(),
+                                style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                        }
+                        val bytes = downloadBytes(shown.downloadedBytes)
+                        val phase = if (shown.status == DownloadStatus.COMPLETED) bytes
+                            else "$bytes · ${downloadTransferPhaseLabel(shown, now)}"
+                        Text(mangaNumberText(phase),
+                            color = if (shown.status == DownloadStatus.FAILED) colors.error else colors.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall)
+                    }
                     shown.progress.httpStatus?.let { DownloadFactRow("来源响应", "HTTP $it") }
-                    DownloadFactRow("已保存", shown.completedPages.toString() +
-                        (if (shown.totalPages > 0) " / ${shown.totalPages}" else "") +
-                        " 页 · " + downloadBytes(shown.downloadedBytes))
                     downloadTransferByteLabel(shown, now).takeIf(String::isNotBlank)?.let {
                         DownloadFactRow("正在接收", it)
                     }
@@ -225,6 +244,6 @@ private fun DownloadFactRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(label, Modifier.weight(.75f), style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(mangaNumberText(value), Modifier.weight(1.5f), style = MaterialTheme.typography.bodySmall)
+        Text(mangaNumberText(value), Modifier.weight(1.5f), style = MaterialTheme.typography.bodyMedium)
     }
 }

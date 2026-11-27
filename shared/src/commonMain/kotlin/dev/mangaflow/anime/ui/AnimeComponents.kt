@@ -22,6 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -31,10 +32,13 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.LineBreak
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import coil3.Image
 import coil3.request.ImageRequest
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
@@ -49,6 +53,10 @@ import coil3.network.httpHeaders
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.ui.mangaCoverCard
+import dev.mangaflow.ui.FeaturedCoverColors
+import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.typography.MangaFontScene
 import dev.chrisbanes.haze.HazeState
@@ -154,6 +162,30 @@ internal fun ImageRequest.Builder.animeArtwork(url: String, sourceId: String?): 
 internal fun AnimePoster(subject: AnimeSubject, modifier: Modifier = Modifier) =
     AnimePoster(subject.coverUrl, modifier, animePosterSourceId(subject))
 
+/** A programme title keeps its own typeface in the catalogue, library and search results. */
+@Composable
+internal fun animeWorkTitleStyle(large: Boolean = false): TextStyle =
+    MaterialTheme.typography.titleMedium.copy(
+        fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontWeight = FontWeight.SemiBold,
+        fontSize = if (large) 21.sp else 17.sp, lineHeight = if (large) 27.sp else 23.sp,
+        letterSpacing = (-.2f).sp, lineBreak = LineBreak.Heading,
+    )
+
+/** Reuse the bounded hero decode, keyed with its source because two providers may share a URL. */
+@Composable
+internal fun rememberAnimePosterTint(url: String, source: String?, image: Image?): Color? {
+    val access = LocalGlassAccessibilitySettings.current
+    if (url.isBlank() || access.reduceTransparency || access.increaseContrast) return null
+    val identity = remember(source, url) { "anime:${source.orEmpty()}\n$url" }
+    var hue by remember(identity) { mutableStateOf(FeaturedCoverColors.get(identity)) }
+    LaunchedEffect(identity, image) {
+        if (hue == null && image != null) hue = withContext(Dispatchers.Default) {
+            FeaturedCoverColors.extract(identity, image)
+        }
+    }
+    return hue
+}
+
 @Composable
 internal fun AnimePoster(
     url: String, modifier: Modifier = Modifier, sourceId: String? = null,
@@ -162,7 +194,7 @@ internal fun AnimePoster(
     val alternate = fallbackUrl?.takeIf { it.isNotBlank() && it != url }
     var imageUrl by remember(url, alternate, sourceId) { mutableStateOf(url.ifBlank { alternate.orEmpty() }) }
     var unavailable by remember(imageUrl, sourceId) { mutableStateOf(imageUrl.isBlank()) }
-    Box(modifier.mangaCoverCard(10.dp).background(MaterialTheme.colorScheme.surfaceContainerLow),
+    Box(modifier.mangaCoverCard(10.dp, shadowRadius = 6.dp).background(MaterialTheme.colorScheme.surfaceContainerLow),
         contentAlignment = Alignment.Center) {
         if (unavailable && !title.isNullOrBlank()) {
             Text(title, Modifier.padding(8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -207,12 +239,11 @@ internal fun AnimeSubjectRow(
         .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = onOpenLabel, onClick = onOpen,
             onLongClickLabel = if (onLongClick != null) "番剧操作" else null, onLongClick = onLongClick)
-        .padding(vertical = 8.dp, horizontal = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        AnimePoster(subject, Modifier.width(56.dp).height(80.dp))
+        .padding(vertical = 8.dp, horizontal = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        AnimePoster(subject, Modifier.size(56.dp, 84.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(subject.title, style = MaterialTheme.typography.titleSmall,
-                fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+            Text(subject.title, style = animeWorkTitleStyle(),
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             ratings?.invoke()
             if (subtitle.isNotBlank()) Text(subtitle, style = MaterialTheme.typography.bodySmall,
@@ -288,8 +319,12 @@ internal fun AnimeMessage(
     Column(modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 28.dp)
         .semantics { liveRegion = LiveRegionMode.Polite },
         verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Icon(icon, null, Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .65f))
-        Text(title, style = MaterialTheme.typography.titleSmall)
+        val colors = MaterialTheme.colorScheme
+        Box(Modifier.size(48.dp).background(lerp(colors.surface, colors.primary, .075f),
+            RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+            Icon(icon, null, Modifier.size(24.dp), tint = colors.primary)
+        }
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         if (!detail.isNullOrBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center)
@@ -300,10 +335,12 @@ internal fun AnimeMessage(
 @Composable
 internal fun AnimeSectionTitle(title: String, subtitle: String? = null, modifier: Modifier = Modifier,
     action: (@Composable () -> Unit)? = null) {
-    Row(modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+    Row(modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(title, Modifier.semantics { heading() },
+                style = MaterialTheme.typography.titleLarge.copy(fontSize = 18.sp, lineHeight = 24.sp),
+                fontWeight = FontWeight.SemiBold)
             if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -325,7 +362,7 @@ internal fun AnimeSelection(
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Row(modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
-        .background(if (selected) colors.onSurface.copy(alpha = .075f) else Color.Transparent)
+        .background(if (selected) colors.primaryContainer else Color.Transparent)
         .motionPress(interaction, enabled = enabled, pressedScale = .99f)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null,
             role = Role.RadioButton, onClick = onClick)
@@ -334,12 +371,13 @@ internal fun AnimeSelection(
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(title, style = MaterialTheme.typography.bodyMedium,
-                color = colors.onSurface.copy(alpha = if (enabled) 1f else .45f),
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = (if (selected) colors.onPrimaryContainer else colors.onSurface).copy(alpha = if (enabled) 1f else .45f),
                 maxLines = titleMaxLines, overflow = TextOverflow.Ellipsis)
             if (!detail.isNullOrBlank()) Text(detail, style = MaterialTheme.typography.labelSmall,
                 color = colors.onSurfaceVariant, maxLines = detailMaxLines, overflow = TextOverflow.Ellipsis)
         }
-        if (selected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp), tint = colors.onSurface)
+        if (selected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp), tint = colors.onPrimaryContainer)
         else Spacer(Modifier.size(18.dp))
     }
 }

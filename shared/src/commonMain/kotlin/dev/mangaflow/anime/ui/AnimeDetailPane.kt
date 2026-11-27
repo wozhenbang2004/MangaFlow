@@ -42,12 +42,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
@@ -56,7 +59,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -67,7 +69,6 @@ import coil3.compose.rememberAsyncImagePainter
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
 import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeDetail
 import dev.mangaflow.anime.AnimeDiscoveryFormat
@@ -88,7 +89,6 @@ import dev.mangaflow.anime.canonicalDoubanId
 import dev.mangaflow.anime.sources.isRetiredAnimeSource
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
-import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.CompactMenuAction
 import dev.mangaflow.ui.CommunityPanel
@@ -100,7 +100,9 @@ import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.glass.mangaHazeSource
-import dev.mangaflow.ui.mangaFontFamily
+import dev.mangaflow.ui.mangaCoverCard
+import dev.mangaflow.ui.platform.softwareBitmap
+import coil3.Image as CoilImage
 import dev.mangaflow.ui.motion.*
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
@@ -1038,55 +1040,54 @@ private fun AnimeDetailHero(
     val motion = LocalMotionEnabled.current
     val density = LocalDensity.current
     val ratings = LocalAnimeRatings.current
-    val accessibility = LocalGlassAccessibilitySettings.current
     val openRatings = { ratings.open(AnimeRatingRequest(subject.id, subject.title, subject, scores)) }
     BoxWithConstraints(Modifier.fillMaxWidth().clip(if (wide) RoundedCornerShape(20.dp) else RoundedCornerShape(0.dp))) {
-        val gutter = if (compact) 12.dp else 16.dp
-        val bottomGutter = if (compact) 6.dp else 12.dp
+        val gutter = if (compact) 12.dp else 18.dp
+        val bottomGutter = if (compact) 6.dp else 14.dp
         val innerWidth = (maxWidth - gutter * 2).coerceAtLeast(1.dp)
-        val stacked = wide && !compact
+        val stacked = wide && !compact || innerWidth < 245.dp * density.fontScale.coerceAtLeast(1f)
         val posterWidth = when {
-            stacked -> minOf(innerWidth * .65f, 190.dp)
+            stacked -> minOf(innerWidth * .58f, if (wide) 200.dp else 120.dp)
             compact -> minOf(innerWidth * .23f, 66.dp)
-            else -> minOf(innerWidth * .32f, 116.dp)
+            else -> minOf(innerWidth * .34f, 128.dp)
         }
         val imageWidth = with(density) { (posterWidth.roundToPx() * 3).coerceIn(1, 1200) }
-        val request = remember(context, artwork.coverUrl, artwork.externalIds, imageWidth, motion) {
-            ImageRequest.Builder(imagePlatformContext(context)).animeArtwork(artwork.coverUrl, animePosterSourceId(artwork))
-                .size(imageWidth, imageWidth * 3 / 2).crossfade(if (motion) MangaMotion.Quick else 0).build()
+        val source = animePosterSourceId(artwork)
+        var decoded by remember(source, artwork.coverUrl) { mutableStateOf<CoilImage?>(null) }
+        val request = remember(context, artwork.coverUrl, source, imageWidth, motion) {
+            ImageRequest.Builder(imagePlatformContext(context)).animeArtwork(artwork.coverUrl, source)
+                .softwareBitmap().size(imageWidth, imageWidth * 3 / 2).crossfade(if (motion) MangaMotion.Quick else 0).build()
         }
-        val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit)
-        if (artwork.coverUrl.isNotBlank() && !accessibility.reduceTransparency && !accessibility.increaseContrast) {
-            Box(Modifier.matchParentSize().mangaHazeSource(backdrop).background(surface)) {
-                Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize())
-                val veil = remember(surface) {
-                    Brush.verticalGradient(0f to surface.copy(alpha = .80f),
-                        .68f to surface.copy(alpha = .86f), 1f to surface.copy(alpha = .49f))
-                }
-                Box(Modifier.matchParentSize().background(veil))
-                // Join the catalogue below the controls. The lenses still sit over actual cover colour.
-                Spacer(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(bottomGutter)
-                    .background(remember(surface) { Brush.verticalGradient(listOf(surface.copy(alpha = 0f), surface)) }))
-            }
-        }
+        val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit,
+            onSuccess = { decoded = it.result.image })
+        val hue = rememberAnimePosterTint(artwork.coverUrl, source, decoded)
+        Box(Modifier.matchParentSize().mangaHazeSource(backdrop).background(surface).drawWithCache {
+            val x = gutter.toPx() + posterWidth.toPx() * .48f
+            val origin = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - x else x, size.height * .36f)
+            val radius = maxOf(size.width * .54f, size.height * .68f, 1f)
+            val wash = hue?.let { Brush.radialGradient(
+                0f to lerp(surface, it, .48f), .58f to lerp(surface, it, .20f),
+                1f to surface.copy(alpha = 0f), center = origin, radius = radius) }
+            onDrawBehind { if (wash != null) drawCircle(wash, radius, origin) }
+        })
         val poster: @Composable () -> Unit = {
-            Box(Modifier.width(posterWidth).aspectRatio(2f / 3f).clip(RoundedCornerShape(14.dp))
-                .background(colors.surfaceContainerHigh), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Tv, null, Modifier.size(26.dp), tint = colors.onSurfaceVariant.copy(alpha = .35f))
+            Box(Modifier.width(posterWidth).aspectRatio(2f / 3f).mangaCoverCard(12.dp, shadowRadius = 8.dp)
+                .background(hue?.let { lerp(surface, it, .22f) } ?: colors.surfaceContainerLow), contentAlignment = Alignment.Center) {
+                if (decoded == null) Icon(Icons.Outlined.Tv, null, Modifier.size(26.dp), tint = colors.onSurfaceVariant)
                 if (artwork.coverUrl.isNotBlank()) Image(painter, contentDescription = null,
-                    contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().mangaHazeSource(backdrop))
             }
         }
         val information: @Composable (Modifier) -> Unit = { infoModifier ->
             Column(infoModifier, verticalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 6.dp)) {
-                val titleStyle = if (stacked) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge
+                if (facts.isNotBlank()) Text(facts, style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
+                    color = colors.onSurfaceVariant)
                 Text(subject.title, Modifier.semantics { heading() },
-                    style = titleStyle.copy(fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                        fontWeight = FontWeight.Bold), maxLines = if (stacked) 3 else 2, overflow = TextOverflow.Ellipsis)
+                    style = animeWorkTitleStyle(large = true).copy(fontSize = if (compact) 20.sp else 25.sp,
+                        lineHeight = if (compact) 25.sp else 31.sp),
+                    maxLines = if (compact) 2 else 3, overflow = TextOverflow.Ellipsis)
                 if (alternateTitle != null && !compact) Text(alternateTitle, style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (facts.isNotBlank()) Text(facts, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
                 if (scores.isNotEmpty()) AnimeRatingBadges(subject.id, scores, Modifier.fillMaxWidth(),
                     onExpand = openRatings.takeIf { active && ratings.active })
                 else if (metadata != null || subject.canonicalDoubanId() != null) MotionTextButton(
@@ -1102,11 +1103,11 @@ private fun AnimeDetailHero(
             top = contentTopPadding + if (compact) 6.dp else 18.dp, bottom = bottomGutter),
             verticalArrangement = Arrangement.spacedBy(if (compact) 7.dp else 14.dp)) {
             if (stacked) {
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { poster() }
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) { poster() }
                 information(Modifier.fillMaxWidth())
             } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalAlignment = Alignment.CenterVertically) { poster(); information(Modifier.weight(1f)) }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { followAction() }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) { followAction() }
         }
     }
 }
@@ -1141,25 +1142,26 @@ private fun AnimeDetailLineRow(
     val interaction = remember { MutableInteractionSource() }
     Row(modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(Modifier.weight(1f).clip(RoundedCornerShape(14.dp))
+        Row(Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(colors.surfaceContainerLow)
             .clickable(enabled = active, role = Role.Button, interactionSource = interaction, indication = null,
                 onClickLabel = "查看播放线路", onClick = onOpen)
             .motionPress(interaction, enabled = active)
-            .heightIn(min = 48.dp).padding(horizontal = 4.dp, vertical = 5.dp)
+            .heightIn(min = 50.dp).padding(horizontal = 12.dp, vertical = 6.dp)
             .semantics(mergeDescendants = true) {
                 if (lastSource != null) stateDescription = "上次使用 ${lastSource.second}"
-            }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             if (availability == AnimeEpisodeAvailability.CHECKING || (availability == null && looking)) {
                 MotionBusyIndicator(Modifier.size(16.dp), color = colors.onSurfaceVariant, strokeWidth = 1.5.dp)
             } else if (availability == AnimeEpisodeAvailability.MATCHED && lastSource != null) {
                 AnimeSourceMark(lastSource.first, lastSource.second, size = 17.dp)
             } else Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-            Text(episode?.let { "${animeEpisodeLabel(it)}线路" } ?: "播放线路",
-                modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(caption, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
-                textAlign = TextAlign.End, color = colors.onSurfaceVariant,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(episode?.let { "${animeEpisodeLabel(it)}线路" } ?: "播放线路",
+                    style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(caption, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
             Icon(Icons.Outlined.ChevronRight, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
         }
         if (episode != null) DetailAction(Icons.Outlined.Link, "管理作品来源", enabled = active, onClick = onManage)
@@ -1216,15 +1218,15 @@ private fun AnimeEpisodeRanges(
             val colors = MaterialTheme.colorScheme
             val current = index == selected
             Box(Modifier.clip(RoundedCornerShape(12.dp))
-                .background(if (current) colors.surfaceContainerHighest else Color.Transparent)
+                .background(if (current) colors.primaryContainer else Color.Transparent)
                 .clickable(enabled = active, role = Role.Button, onClickLabel = "跳到第 $label 集",
                     interactionSource = interaction, indication = null,
                     onClick = { scope.launch { position.scrollToItem(prefix + index * groupHeight) } })
                 .motionPress(interaction, enabled = active).heightIn(min = 44.dp)
                 .semantics { this.selected = current }.padding(horizontal = 12.dp),
                 contentAlignment = Alignment.Center) {
-                Text(label, style = MaterialTheme.typography.labelMedium,
-                    color = if (current) colors.onSurface else colors.onSurfaceVariant)
+                Text(label, style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
+                    color = if (current) colors.onPrimaryContainer else colors.onSurfaceVariant)
             }
         }
     }

@@ -42,8 +42,11 @@ internal fun MotionOutlinedButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     shape: Shape = ButtonDefaults.outlinedShape,
-    colors: ButtonColors = ButtonDefaults.outlinedButtonColors(),
-    border: BorderStroke? = ButtonDefaults.outlinedButtonBorder(enabled),
+    colors: ButtonColors = ButtonDefaults.filledTonalButtonColors(
+        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer),
+    border: BorderStroke? = if (LocalPlatformAccessibilityPreferences.current.increaseContrast)
+        ButtonDefaults.outlinedButtonBorder(enabled) else null,
     contentPadding: PaddingValues = ButtonDefaults.ContentPadding,
     interactionSource: MutableInteractionSource? = null,
     content: @Composable RowScope.() -> Unit,

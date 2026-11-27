@@ -61,8 +61,14 @@ import dev.chrisbanes.haze.HazeState
 import kotlin.math.roundToInt
 
 internal val HeaderContentGap = 2.dp
-private val DiscoveryIconInk = DpSize(22.dp, 22.dp)
-private val DiscoveryMenuInk = HeaderInkCells(0.dp, listOf(DiscoveryIconInk))
+private val NavigationIconInk = DpSize(22.dp, 22.dp)
+private val NavigationMenuInk = HeaderInkCells(0.dp, listOf(NavigationIconInk))
+
+@Composable
+internal fun rememberHeaderActionInk(width: Dp, inset: Dp = 0.dp): HeaderInkCells = remember(width, inset) {
+    val count = ((width - inset * 2) / 44.dp).roundToInt().coerceAtLeast(1)
+    HeaderInkCells(inset, List(count) { NavigationIconInk })
+}
 
 /** Each cluster casts one diffuse shadow outside its shared material. */
 @Composable
@@ -91,11 +97,11 @@ internal fun PageTitleHeader(
         .coerceAtLeast(44.dp)
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        HeaderGlassSurface(backdrop, Modifier.size(44.dp), preferSource = false) { navigation() }
+        HeaderGlassSurface(backdrop, Modifier.size(44.dp), preferSource = false, ink = NavigationMenuInk) { navigation() }
         if (leading != null) leading()
         if (summary != null) Box(Modifier.weight(1f)) { summary() }
         else Spacer(Modifier.weight(1f))
-        if (actions != null) HeaderGlassSurface(backdrop, Modifier.widthIn(max = actionsRoom), preferSource = false) {
+        if (actions != null) HeaderGlassSurface(backdrop, Modifier.widthIn(max = actionsRoom), quietShadow = true, preferSource = false) {
             Row(Modifier.horizontalScroll(rememberScrollState())) { actions() }
         }
     }
@@ -114,23 +120,18 @@ internal fun SegmentedGlassHeader(
     quietShadow: Boolean = false,
     actions: @Composable () -> Unit,
     secondary: (@Composable () -> Unit)? = null,
-    discoveryTabLabels: List<String>? = null,
+    tabInk: HeaderInkCells? = null,
+    actionInset: Dp = 0.dp,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val tabInk = if (discoveryTabLabels.isNullOrEmpty()) null else rememberBrowseTabInk(discoveryTabLabels)
-    val menuInk = if (tabInk == null) null else DiscoveryMenuInk
-    val actionInk = if (tabInk == null) null else remember(actionsWidth) {
-        // The reserved search cell and the optional history cell sit inside 8dp end insets.
-        val count = ((actionsWidth - 16.dp) / 44.dp).roundToInt().coerceAtLeast(1)
-        HeaderInkCells(8.dp, List(count) { DiscoveryIconInk })
-    }
+    val actionInk = if (tabInk == null) null else rememberHeaderActionInk(actionsWidth, actionInset)
     Column(modifier.fillMaxWidth()) {
         BoxWithConstraints(Modifier.fillMaxWidth().zIndex(1f)) {
         val stacked = maxWidth < 44.dp + 12.dp + controlsWidth + actionsWidth
         if (stacked) {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                    HeaderGlassSurface(backdrop, Modifier.size(44.dp), quietShadow, ink = menuInk) { navigation() }
+                    HeaderGlassSurface(backdrop, Modifier.size(44.dp), quietShadow, ink = NavigationMenuInk) { navigation() }
                     Spacer(Modifier.weight(1f))
                     HeaderGlassSurface(backdrop, Modifier.width(actionsWidth).graphicsLayer {
                         alpha = controlsAlpha()
@@ -147,7 +148,7 @@ internal fun SegmentedGlassHeader(
         } else {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.Top) {
-            HeaderGlassSurface(backdrop, Modifier.size(44.dp), quietShadow, ink = menuInk) { navigation() }
+            HeaderGlassSurface(backdrop, Modifier.size(44.dp), quietShadow, ink = NavigationMenuInk) { navigation() }
             Box(Modifier.weight(1f)) {
                 GlassControlGroup(backdrop, controlsWidth, actionsWidth, controlsAlpha, actions, content,
                     quietShadow = quietShadow, tabInk = tabInk, actionInk = actionInk)

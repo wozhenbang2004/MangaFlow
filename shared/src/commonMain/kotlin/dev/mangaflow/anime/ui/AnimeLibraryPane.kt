@@ -31,16 +31,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.graphics.lerp
+import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.progressBarRangeInfo
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -50,7 +52,6 @@ import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
-import dev.mangaflow.typography.MangaFontScene
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -376,9 +377,9 @@ internal fun AnimeLibrary(
 
 @Composable
 private fun AnimeLibrarySection(title: String, count: Int? = null, detail: String? = null) {
-    Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 10.dp, bottom = 4.dp),
+    Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 14.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(title, Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+        Text(title, Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge)
         val subtitle = detail ?: count?.let { "$it 部" }
         if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
             color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis,
@@ -414,34 +415,33 @@ internal fun AnimeLibraryWorkRow(
         ).joinToString(" · ")
     }
     Row(Modifier.fillMaxWidth().clip(shape)
-        .then(if (featured) Modifier.background(colors.surfaceContainerHigh.copy(alpha = .70f)) else Modifier),
+        .then(if (featured) Modifier.background(lerp(colors.surface, colors.primary, .07f)) else Modifier),
         verticalAlignment = Alignment.CenterVertically) {
         Row(Modifier.weight(1f).clip(shape).motionPress(interaction, enabled = active, pressedScale = .99f)
             .combinedClickable(enabled = active, interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = actionLabel, onClick = onOpen,
                 onLongClickLabel = if (onManage != null) "管理番剧" else null, onLongClick = onManage)
-            .padding(start = if (featured) 10.dp else 4.dp, end = 4.dp,
-                top = if (featured) 10.dp else 6.dp, bottom = if (featured) 10.dp else 6.dp),
+            .padding(start = if (featured) 8.dp else 4.dp, end = 4.dp,
+                top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             if (featured) {
                 // Only the lead poster supplies pixels to its own play lens.
                 val artwork = rememberHazeState()
-                Box(Modifier.width(62.dp).height(90.dp), contentAlignment = Alignment.BottomEnd) {
+                Box(Modifier.size(70.dp, 105.dp), contentAlignment = Alignment.BottomEnd) {
                     AnimePoster(entry.subject, Modifier.fillMaxSize().mangaHazeSource(artwork))
                     LiquidGlassSurface(artwork, Modifier.padding(4.dp).size(28.dp),
                         cornerRadius = 14.dp, role = GlassSurfaceRole.ARTWORK,
                         trackPointer = true, elevation = 0.dp, preferSource = true,
-                        surfaceColor = Color.Black, contentColor = Color.White) {
+                        surfaceColor = colors.surface, contentColor = colors.onSurface) {
                         Icon(Icons.Outlined.PlayArrow, null, Modifier.align(Alignment.Center).size(19.dp))
                     }
                 }
-            } else AnimePoster(entry.subject, Modifier.width(46.dp).height(66.dp))
+            } else AnimePoster(entry.subject, Modifier.size(50.dp, 75.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 if (featured) Text(actionLabel, style = MaterialTheme.typography.labelMedium,
                     color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(entry.subject.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                    style = if (featured) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(entry.subject.title, style = animeWorkTitleStyle(large = featured),
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (location != null && resume != null) {
                     Text(location, style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
                         color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -473,15 +473,24 @@ internal fun AnimeLibraryWorkRow(
 
 @Composable
 internal fun AnimeWatchProgressLine(fraction: Float, modifier: Modifier = Modifier) {
-    val ink = MaterialTheme.colorScheme.onSurface
     val progress = fraction.coerceIn(0f, 1f)
-    Canvas(modifier.fillMaxWidth().height(3.dp).semantics {
+    AnimeProgressTrack(progress, modifier.semantics {
         contentDescription = "本集观看进度"
         progressBarRangeInfo = ProgressBarRangeInfo(progress, 0f..1f)
-    }) {
-        val start = Offset(0f, center.y)
-        drawLine(ink.copy(alpha = .12f), start, Offset(size.width, center.y), 3.dp.toPx(), StrokeCap.Round)
-        drawLine(ink.copy(alpha = .70f), start, Offset(size.width * progress, center.y), 3.dp.toPx(), StrokeCap.Round)
+    })
+}
+
+@Composable
+internal fun AnimeProgressTrack(fraction: Float, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    val contrast = LocalGlassAccessibilitySettings.current.increaseContrast
+    Canvas(modifier.fillMaxWidth().height(3.dp)) {
+        val corner = CornerRadius(size.height / 2f)
+        val width = size.width * fraction.coerceIn(0f, 1f)
+        drawRoundRect(colors.onSurface.copy(alpha = if (contrast) .32f else .11f), cornerRadius = corner)
+        if (width > 0f) drawRoundRect(if (contrast) colors.onSurface else colors.primary,
+            topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - width else 0f, 0f),
+            size = Size(width, size.height), cornerRadius = corner)
     }
 }
 

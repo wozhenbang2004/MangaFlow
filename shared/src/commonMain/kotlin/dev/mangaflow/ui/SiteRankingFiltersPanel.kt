@@ -25,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -97,7 +98,7 @@ internal fun SiteRankingFiltersDialog(
                         verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text("筛选与排序", Modifier.semantics { heading() },
-                                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                             Row(verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                                 ReviewSourceMark(preview.site.id, size = 14.dp)
@@ -111,7 +112,7 @@ internal fun SiteRankingFiltersDialog(
                         }
                     }
                     Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll)
-                        .padding(top = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        .padding(top = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             RankingFilterHeading("排序")
                             val kinds = preview.availableKinds
@@ -330,8 +331,8 @@ internal fun SiteRankingFiltersDialog(
 
 @Composable
 private fun RankingFilterHeading(label: String, modifier: Modifier = Modifier) {
-    Text(label, modifier.semantics { heading() }, style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.Medium)
+    Text(label, modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.SemiBold)
 }
 
 /** Adapt the existing SourceBrowseChoice pills: options wrap within the panel, not a second scroll axis. */
@@ -361,13 +362,13 @@ private fun RankingFilterChoice(label: String, chosen: Boolean, enabled: Boolean
             selected = chosen
             stateDescription = if (chosen) "已选择" else "未选择"
         }, shape = RoundedCornerShape(13.dp),
-        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface,
-            containerColor = colors.onSurface.copy(alpha = if (chosen) .12f else .045f)),
+        colors = ButtonDefaults.textButtonColors(contentColor = if (chosen) colors.primary else colors.onSurfaceVariant,
+            containerColor = if (chosen) colors.primary.copy(alpha = .10f) else Color.Transparent),
         contentPadding = PaddingValues(horizontal = 9.dp, vertical = 7.dp)) {
         Box(Modifier.size(13.dp), contentAlignment = Alignment.Center) {
             if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp))
         }
-        Text(label, Modifier.padding(start = 4.dp), style = MaterialTheme.typography.bodySmall,
+        Text(label, Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelMedium,
             fontWeight = if (chosen) FontWeight.Medium else FontWeight.Normal, maxLines = 2,
             overflow = TextOverflow.Ellipsis)
     }

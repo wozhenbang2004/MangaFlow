@@ -55,7 +55,7 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 
 internal enum class GlassSurfaceRole {
-    CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, TAB_LENS, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO,
+    CONTROL, ARTWORK, NAVIGATION, SEARCH, PANEL, THUMB, TAB_LENS, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO,
     VIDEO_DOCK,
 }
 
@@ -100,16 +100,16 @@ internal fun LiquidGlassSurface(
     val colors = MaterialTheme.colorScheme
     val surface = surfaceColor ?: colors.surface
     val light = surface.luminance() > .5f
-    val navigationTint = if (light) .40f else .56f
+    val navigationTint = if (light) .35f else .51f
     val foreground = contentColor ?: if (surfaceColor == null) colors.onSurface
         else if (light) Color(0xFF242426) else Color.White
-    val toolbar = role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.READING_DOCK
+    val toolbar = role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.SEARCH || role == GlassSurfaceRole.READING_DOCK
     val compactHeader = headerInk != null && role == GlassSurfaceRole.NAVIGATION
     val tabLens = role == GlassSurfaceRole.TAB_LENS
     val tintColor = when {
         surfaceColor != null -> surfaceColor
         compactHeader -> surface
-        toolbar || tabLens -> colors.surfaceContainerHigh
+        toolbar || tabLens -> lerp(colors.surface, colors.surfaceContainerHigh, .24f)
         softCard -> lerp(colors.background, surface, .70f)
         else -> surface
     }
@@ -134,7 +134,7 @@ internal fun LiquidGlassSurface(
         val sources = HazeInput.Sources(state, retention = if (preferSource || role == GlassSurfaceRole.DRAWER ||
             role == GlassSurfaceRole.VIDEO_DOCK)
             HazeSourceRetention.ClearWhenUnavailable else HazeSourceRetention.KeepLastFrame)
-        if (!preferSource && (role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.READING_DOCK))
+        if (!preferSource && toolbar)
             HazeInput.Backdrop(sources)
         else sources
     }
@@ -166,7 +166,7 @@ internal fun LiquidGlassSurface(
                         chromaticAberrationStrength(0f)
                         contentNormalBlend(.08f)
                     }
-                    GlassSurfaceRole.NAVIGATION -> if (compactHeader) {
+                    GlassSurfaceRole.NAVIGATION, GlassSurfaceRole.SEARCH -> if (compactHeader) {
                         // The clear centre carries cover colour. The actual optical rim supplies
                         // the glint on a short curved segment as the boundary turns toward the light.
                         optics { copy(refractionStrength = .66f, refractionHeightFraction = .19f,
@@ -187,7 +187,7 @@ internal fun LiquidGlassSurface(
                             refractionDisplacement = 9.dp + 2.dp * progress,
                             refractionProfile = RefractionProfile.Edge(4.dp + 1.dp * progress),
                             blurRadius = navigationBlur, depth = toolbarDepth) }
-                        val bodyTint = navigationTint + (if (light) .20f else .16f) * progress
+                        val bodyTint = navigationTint + (if (light) .20f else .18f) * progress
                         tint(tintColor.copy(alpha = bodyTint))
                         whitePoint(if (light) .015f else -.03f)
                         contrast(0f)
@@ -219,7 +219,7 @@ internal fun LiquidGlassSurface(
                             refractionDisplacement = 6.dp + 2.dp * progress,
                             refractionProfile = RefractionProfile.Edge(4.dp + 1.dp * progress),
                             blurRadius = readingDockBlur, depth = toolbarDepth) }
-                        val bodyTint = if (light) .72f else .80f
+                        val bodyTint = if (light) .60f else .71f
                         tint(tintColor.copy(alpha = bodyTint + .025f * progress))
                         whitePoint(if (light) .045f else -.08f)
                         specularIntensity(if (light) .18f else .15f)
@@ -290,7 +290,7 @@ internal fun LiquidGlassSurface(
                     chromaMultiplier(1.025f)
                 }
                 if (interactive) {
-                    val touchLens = (role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.CONTROL) &&
+                    val touchLens = (role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.SEARCH || role == GlassSurfaceRole.CONTROL) &&
                         !accessibility.reduceTransparency && !accessibility.increaseContrast
                     interactionLightRadiusFraction(if (touchLens) .98f else if (clear) .76f else .66f)
                     hovered { animate(tween(MangaMotion.Quick), tween(MangaMotion.Quick)) { lightingIntensity(.28f) } }
@@ -332,15 +332,30 @@ internal fun LiquidGlassSurface(
     } else {
         val preset = if (role == GlassSurfaceRole.PANEL) HazeMaterials.regular(tintColor) else HazeMaterials.thin(tintColor)
         val material3Blur = HazeBlurStyle.Material3(tintColor)
-        val blurStyle = remember(material3Blur, preset, tintColor, accessibility) {
+        val blurStyle = remember(material3Blur, preset, role, tintColor, accessibility) {
             material3Blur.then(preset).then {
+                blurRadius(when (role) {
+                    GlassSurfaceRole.POPOVER -> 18.dp
+                    GlassSurfaceRole.DRAWER -> 24.dp
+                    else -> 27.dp
+                })
                 noiseFactor(0f)
                 if (accessibility.reduceTransparency || accessibility.increaseContrast) {
                     colorEffects(listOf(HazeColorEffect.tint(tintColor.copy(alpha =
-                        if (accessibility.reduceTransparency) 1f else .86f))))
+                        if (accessibility.reduceTransparency) 1f else .93f))))
+                } else if (role == GlassSurfaceRole.POPOVER) {
+                    colorEffects(listOf(HazeColorEffect.tint(tintColor.copy(alpha = if (light) .74f else .79f))))
+                } else {
+                    // A single frosted sheet. The heading has a clear paper ground; more of the
+                    // underlying colour comes through as the surface falls away from the light.
+                    val top = if (role == GlassSurfaceRole.DRAWER) .75f else .83f
+                    val base = if (role == GlassSurfaceRole.DRAWER) .60f else .72f
+                    val density = if (light) 0f else .06f
+                    colorEffects(listOf(HazeColorEffect.tint(Brush.verticalGradient(listOf(
+                        tintColor.copy(alpha = top + density), tintColor.copy(alpha = base + density))))))
                 }
                 fallbackColorEffect(HazeColorEffect.tint(tintColor.copy(alpha =
-                    if (accessibility.reduceTransparency || accessibility.increaseContrast) 1f else .90f)))
+                    if (accessibility.reduceTransparency || accessibility.increaseContrast) 1f else .94f)))
             }
         }
         Modifier.hazeBlur(input = input, style = blurStyle)
@@ -349,13 +364,22 @@ internal fun LiquidGlassSurface(
         strength = elevation?.let { (it.value / 10f).coerceIn(0f, 1f) } ?: 1f)
     else if (softCard) Modifier.softSurfaceShadow(shape, light,
         strength = elevation?.let { (it.value / 16f).coerceIn(0f, 1f) } ?: if (toolbar) .72f else 1f,
-        radius = if (toolbar) 16.dp else 24.dp,
+        radius = if (toolbar || role == GlassSurfaceRole.POPOVER) 14.dp else 20.dp,
         strengthScale = { 1f + .28f * expansion.value().coerceIn(0f, 1f) })
     else Modifier.shadow(elevation ?: 3.dp, shape, clip = false,
         ambientColor = Color.Black.copy(alpha = .04f), spotColor = Color.Black.copy(alpha = .065f))
     // Blend with the material pixels before drawing the labels. The soft floor/ceiling responds
     // to passing artwork in the same frame, without reading a bitmap or switching glyph colours.
-    val inkContrast = if ((role == GlassSurfaceRole.NAVIGATION || tabLens) &&
+    val inkContrast = if (role == GlassSurfaceRole.SEARCH &&
+        !accessibility.reduceTransparency && !accessibility.increaseContrast) {
+        Modifier.drawWithCache {
+            val inputHeight = 44.dp.toPx()
+            val paper = Brush.verticalGradient(listOf(tintColor.copy(alpha = 0f),
+                tintColor.copy(alpha = if (light) .48f else .54f)),
+                startY = inputHeight * .72f, endY = inputHeight * 1.55f)
+            onDrawBehind { if (size.height > inputHeight) drawRect(paper) }
+        }
+    } else if ((role == GlassSurfaceRole.NAVIGATION || tabLens) &&
         !accessibility.reduceTransparency && !accessibility.increaseContrast) {
         val darkInk = foreground.luminance() < .5f
         val tone = if (darkInk) Color(0xFFA0A0A0) else Color(0xFF56565A)

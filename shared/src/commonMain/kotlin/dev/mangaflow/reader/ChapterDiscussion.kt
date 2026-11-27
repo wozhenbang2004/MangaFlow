@@ -20,6 +20,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
@@ -32,7 +33,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,6 +43,7 @@ import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.data.ReviewRepository
 import dev.mangaflow.ui.CommunityDiscussionComment
 import dev.mangaflow.ui.CommentSourceBadge
+import dev.mangaflow.ui.mangaNumberText
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.rememberDelayedBusy
@@ -112,7 +113,7 @@ internal fun ChapterDiscussion(
                 items(mixed, key = ReaderDiscussionRow::key) { row ->
                     CommunityDiscussionComment(row.source.source, row.review, state::replies,
                         foreground = foreground, muted = muted)
-                    HorizontalDivider(color = foreground.copy(alpha = .06f), thickness = .5.dp)
+                    HorizontalDivider(Modifier.padding(start = 38.dp), color = foreground.copy(alpha = .065f), thickness = .5.dp)
                 }
                 items(notices, key = { "notice:${it.key}" }) { source ->
                     DiscussionNotice(source, foreground, busy) { state.retry(source.key) }
@@ -147,9 +148,9 @@ private fun DiscussionHeading(
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("评论", color = foreground, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("评论", color = foreground, style = MaterialTheme.typography.titleLarge)
             val count = chapterCount?.toString() ?: "已加载 $loadedCount".takeIf { loadedCount > 0 }.orEmpty()
-            if (count.isNotEmpty()) Text(count, color = muted, fontSize = 11.sp,
+            if (count.isNotEmpty()) Text(mangaNumberText(count), color = muted, style = MaterialTheme.typography.labelMedium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         MotionIconButton(onClick = onRefresh, enabled = !busy) {

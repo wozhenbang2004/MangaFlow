@@ -171,7 +171,7 @@ internal fun PrivateChapterDiscussion(chapterTitle: String, sourceName: String, 
         Column(Modifier.fillMaxWidth().fillMaxHeight(.86f).imePadding().padding(horizontal = 16.dp)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("MangaFlow 私有讨论", style = MaterialTheme.typography.titleMedium, color = foreground)
+                    Text("私有讨论", style = MaterialTheme.typography.titleLarge, color = foreground)
                     Text(listOfNotNull(chapterTitle, sourceName, activeSpace?.room).joinToString(" · "),
                         style = MaterialTheme.typography.labelMedium, color = muted,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)

@@ -340,8 +340,9 @@ internal fun RecentCopyGroupSearches(terms: List<String>, query: String, onChoos
                 val current = term == query.trim()
                 MotionTextButton(onClick = { keyboard?.hide(); focus.clearFocus(force = true); onChoose(term) },
                     modifier = Modifier.widthIn(max = 200.dp).semantics { selected = current }, shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.textButtonColors(containerColor = colors.onSurface.copy(alpha = if (current) .09f else .035f),
-                        contentColor = colors.onSurface), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp)) {
+                    colors = ButtonDefaults.textButtonColors(
+                        containerColor = if (current) colors.primary.copy(alpha = .10f) else colors.onSurface.copy(alpha = .025f),
+                        contentColor = if (current) colors.primary else colors.onSurface), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp)) {
                     Text(term, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                 }
             }
@@ -367,20 +368,20 @@ private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = 
         },
         contentAlignment = Alignment.Center) {
         Row(Modifier.clip(RoundedCornerShape(10.dp))
-            .background(colors.onSurface.copy(alpha = if (selected) .09f else .035f))
+            .background(if (selected) colors.primary.copy(alpha = .10f) else colors.onSurface.copy(alpha = .025f))
             .padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             if (remove || selected) Icon(if (remove) Icons.Outlined.Close else Icons.Outlined.Check, null,
-                Modifier.size(12.dp), tint = colors.onSurface)
-            Text(tag.name, fontSize = 12.sp, lineHeight = 17.sp,
-                color = colors.onSurface,
+                Modifier.size(12.dp), tint = colors.primary)
+            Text(tag.name, fontSize = 13.sp, lineHeight = 18.sp,
+                color = if (selected) colors.primary else colors.onSurface,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (showOrigins) origins.filterNot { it == "copy" && copyCount != null }.forEach { origin ->
                 ReviewSourceMark(origin, size = 12.dp)
             }
             copyCount?.let { count ->
                 ReviewSourceMark("copy", size = 12.dp)
-                Text(count.toString(), fontSize = 11.sp, lineHeight = 17.sp,
+                Text(count.toString(), style = mangaMetricValueStyle(12.sp, 17.sp),
                     color = colors.onSurfaceVariant, maxLines = 1)
             }
         }

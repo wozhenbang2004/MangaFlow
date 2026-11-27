@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -43,11 +42,11 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
-import dev.mangaflow.reader.ConfigureReaderDialogWindow
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.MangaWindowSize
+import dev.mangaflow.ui.mangaOverlayScrim
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionDialogWindowPolicy
@@ -89,15 +88,14 @@ internal fun EnhancementPanelHost(
             onDismissRequest = { if (visible) onDismiss() },
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
-            MotionDialogWindowPolicy(visible)
-            if (playbackOverlay) ConfigureReaderDialogWindow(dimAmount = 0f)
+            MotionDialogWindowPolicy(visible, backgroundDim = 0f)
             val focus = LocalFocusManager.current
             SideEffect { if (!visible) focus.clearFocus(force = true) }
             Box(Modifier.fillMaxSize()) {
-                val scrim = if (playbackOverlay) .08f else .14f
+                val scrim = if (playbackOverlay) Color.Transparent else mangaOverlayScrim()
                 val backdropInput = if (playbackOverlay) Modifier.clearAndSetSemantics { }
                     .focusProperties { canFocus = false } else Modifier
-                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = scrim * alpha.value))
+                Box(Modifier.fillMaxSize().background(scrim.copy(alpha = scrim.alpha * alpha.value))
                     .then(backdropInput)
                     .clickable(enabled = visible, indication = null, interactionSource = remember { MutableInteractionSource() }) {
                         onDismiss()
@@ -133,9 +131,7 @@ internal fun EnhancementPanelHost(
                             cornerRadius = 24.dp,
                             role = GlassSurfaceRole.PANEL,
                         ) {
-                            // Keep the existing frosted shell while isolating dense text from comic ink.
-                            Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface.copy(alpha = .94f)),
-                                propagateMinConstraints = true) { content() }
+                            Box(Modifier.fillMaxWidth(), propagateMinConstraints = true) { content() }
                         }
                     }
                 }

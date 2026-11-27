@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -24,7 +25,7 @@ import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.ViewSidebar
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Translate
@@ -42,6 +43,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -72,7 +74,9 @@ import dev.mangaflow.ui.motion.MotionNavigationColumn
 import dev.mangaflow.ui.motion.motionPress
 import kotlinx.coroutines.delay
 
-internal data class DesktopDestination(val title: String, val icon: ImageVector, val groupHeading: String? = null)
+internal data class DesktopDestination(
+    val title: String, val icon: ImageVector, val groupHeading: String? = null, val utility: Boolean = false,
+)
 
 internal val DesktopNavigationRailWidth = 64.dp
 
@@ -102,14 +106,12 @@ internal fun sidebarNavigationRows(headingsByDestination: List<String?>): List<S
 @Composable
 internal fun SidebarGroupLabel(title: String, modifier: Modifier = Modifier, compact: Boolean = false) {
     val ink = MaterialTheme.colorScheme.onSurfaceVariant
-    if (compact) Box(modifier.fillMaxWidth().height(10.dp).semantics {
+    if (compact) Spacer(modifier.fillMaxWidth().height(13.dp).semantics {
         heading()
         contentDescription = title
-    }, contentAlignment = Alignment.Center) {
-        Spacer(Modifier.width(18.dp).height(1.dp).background(ink.copy(alpha = .28f)))
-    } else Text(title, modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 7.dp, bottom = 1.dp)
+    }) else Text(title, modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 12.dp, bottom = 2.dp)
         .semantics { heading() }, style = MaterialTheme.typography.labelMedium,
-        color = ink, fontWeight = FontWeight.Medium)
+        color = ink, letterSpacing = .45.sp, fontWeight = FontWeight.Medium)
 }
 
 private fun Modifier.revealDesktopNavigationLabel(progress: State<Float>): Modifier = graphicsLayer {
@@ -130,26 +132,31 @@ private fun DesktopNavigationAction(
     shortcut: String? = null,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val ink = MaterialTheme.colorScheme.onSurface
+    val colors = MaterialTheme.colorScheme
+    val selectedInk = if (LocalPlatformAccessibilityPreferences.current.increaseContrast) colors.onSurface else colors.primary
     val hint = listOfNotNull(title, shortcut).joinToString(" · ")
     Box(modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+        .then(if (shortcut == null) Modifier else Modifier.background(lerp(colors.surface, colors.primary, .09f)))
         .clickable(role = Role.Button, interactionSource = interaction, indication = null, onClick = onClick)
         .motionPress(interaction).semantics {
             contentDescription = hint
             if (current != null) selected = current
         }, contentAlignment = Alignment.CenterStart) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(40.dp), contentAlignment = Alignment.Center) {
-                Icon(icon, null, Modifier.size(20.dp), tint = ink.copy(alpha = if (current == true) 1f else .76f))
+            Box(Modifier.width(42.dp), contentAlignment = Alignment.Center) {
+                Icon(icon, null, Modifier.size(if (shortcut != null) 18.dp else 20.dp),
+                    tint = if (current == true) selectedInk else colors.onSurfaceVariant)
             }
             if (expanded) {
                 Text(title, Modifier.weight(1f).revealDesktopNavigationLabel(labels).clearAndSetSemantics {},
-                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurface, style = MaterialTheme.typography.bodyMedium,
                     fontWeight = if (current == true) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (shortcut != null) Text(shortcut,
-                    Modifier.padding(horizontal = 8.dp).revealDesktopNavigationLabel(labels).clearAndSetSemantics {},
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, maxLines = 1)
+                if (shortcut != null) Text(shortcut, Modifier.padding(end = 7.dp)
+                    .revealDesktopNavigationLabel(labels).background(colors.surface, RoundedCornerShape(5.dp))
+                    .padding(horizontal = 5.dp, vertical = 1.dp).clearAndSetSemantics {},
+                    color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         DesktopIconTooltip(hint.takeUnless { expanded }, interaction, enabled = true)
@@ -205,36 +212,61 @@ internal fun DesktopNavigationWorkspace(
                         }
                         .onFocusChanged { if (it.hasFocus) keyboardPulse.intValue++ }.focusGroup()
                         .padding(horizontal = 6.dp, vertical = 8.dp)) {
+                        val window = LocalMangaWindow.current
+                        val pinTools = window.height >= 570.dp * window.fontScale.coerceAtLeast(1f)
+                        val bodyIndices = remember(destinations, pinTools) {
+                            destinations.indices.filter { !pinTools || !destinations[it].utility }
+                        }
+                        val toolIndices = remember(destinations, pinTools) {
+                            destinations.indices.filter { pinTools && destinations[it].utility }
+                        }
                         DesktopNavigationAction("搜索", Icons.Outlined.Search, expanded, labels, onSearch,
-                            modifier = Modifier.height(40.dp), shortcut = "Ctrl+K")
+                            modifier = Modifier.heightIn(min = 44.dp), shortcut = "Ctrl+K")
+                        Spacer(Modifier.height(10.dp))
                         val scroll = rememberScrollState()
-                        val rows = remember(destinations) { sidebarNavigationRows(destinations.map(DesktopDestination::groupHeading)) }
-                        val selectedRow = rows.indexOf(SidebarNavigationRow.Destination(selectedIndex))
+                        val rows = remember(destinations, bodyIndices) {
+                            sidebarNavigationRows(bodyIndices.map { destinations[it].groupHeading })
+                        }
+                        val selectedRow = rows.indexOf(SidebarNavigationRow.Destination(bodyIndices.indexOf(selectedIndex)))
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 3.dp)) {
                                 profileControl(!expanded)
-                                Spacer(Modifier.height(12.dp))
                                 MotionNavigationColumn(selected = selectedRow, itemCount = rows.size,
-                                    selectionVisible = selectedRow >= 0) { index, itemModifier ->
+                                    selectionVisible = selectedRow >= 0, routeMarker = true) { index, itemModifier ->
                                     when (val row = rows[index]) {
                                         is SidebarNavigationRow.Heading -> SidebarGroupLabel(row.title, itemModifier, compact = !expanded)
                                         is SidebarNavigationRow.Destination -> {
-                                            val destination = destinations[row.index]
+                                            val route = bodyIndices[row.index]
+                                            val destination = destinations[route]
                                             DesktopNavigationAction(destination.title, destination.icon, expanded, labels,
-                                                onClick = { onNavigate(row.index) }, modifier = itemModifier.height(46.dp),
-                                                current = selectedIndex == row.index)
+                                                onClick = { onNavigate(route) }, modifier = itemModifier.heightIn(min = 46.dp),
+                                                current = selectedIndex == route)
                                         }
                                     }
                                 }
                             }
                             DesktopNavigationRailThumb(scroll, railHover, keyboardPulse)
                         }
-                        // Keep the search anchor at the top in every docked width. The
-                        // display preference belongs in the footer, not in the task list.
+                        if (toolIndices.isNotEmpty()) {
+                            val colors = MaterialTheme.colorScheme
+                            Column(Modifier.fillMaxWidth().padding(top = 5.dp)
+                                .background(colors.primary.copy(alpha = .055f), RoundedCornerShape(15.dp))
+                                .padding(vertical = 2.dp)) {
+                                toolIndices.forEach { route ->
+                                    val target = destinations[route]
+                                    val current = route == selectedIndex
+                                    DesktopNavigationAction(target.title, target.icon, expanded, labels, { onNavigate(route) },
+                                        modifier = Modifier.heightIn(min = 44.dp).then(if (current)
+                                            Modifier.background(colors.surface, RoundedCornerShape(13.dp)) else Modifier),
+                                        current = current)
+                                }
+                            }
+                        }
                         if (canExpand) Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
                             val action = if (expanded) "收起导航" else "展开导航"
-                            MotionIconButton(onClick = onToggle, modifier = Modifier.size(40.dp), tooltip = action) {
-                                Icon(Icons.Outlined.Menu, action, Modifier.size(20.dp))
+                            MotionIconButton(onClick = onToggle, modifier = Modifier.size(44.dp), tooltip = action) {
+                                Icon(Icons.Outlined.ViewSidebar, action, Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             if (expanded) Text(version, modifier = Modifier.revealDesktopNavigationLabel(labels),
                                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -298,6 +330,11 @@ internal fun DesktopSearchField(
     val focus = LocalFocusManager.current
     var scopeOpen by remember { mutableStateOf(false) }
     val inputInteraction = remember { MutableInteractionSource() }
+    val focused by inputInteraction.collectIsFocusedAsState()
+    val colors = MaterialTheme.colorScheme
+    val height = maxOf(44.dp, 24.dp * LocalMangaWindow.current.fontScale + 14.dp)
+    val focusAmount = animateFloatAsState(if (focused) 1f else 0f,
+        if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "search-field-focus")
     val searchLabel = when {
         !showScopeSelector -> "搜索漫画标题"
         target == SearchTarget.TRANSLATION_GROUP -> "搜索汉化组名称"
@@ -310,36 +347,42 @@ internal fun DesktopSearchField(
         }
     }
     LaunchedEffect(active, showScopeSelector) { if (!active || !showScopeSelector) scopeOpen = false }
-    Box(modifier.height(44.dp)) {
-        LiquidGlassSurface(backdrop, Modifier.fillMaxSize(), cornerRadius = 16.dp,
-            role = GlassSurfaceRole.NAVIGATION, interactionSource = inputInteraction, softCard = true) {}
-        Row(Modifier.fillMaxSize().padding(start = 12.dp, end = 4.dp),
+    val submit = {
+        scopeOpen = false
+        onOpen()
+        onSubmit()
+        focus.clearFocus(force = true)
+    }
+    Box(modifier.height(height)) {
+        LiquidGlassSurface(backdrop, Modifier.fillMaxSize(), cornerRadius = height / 2,
+            role = GlassSurfaceRole.SEARCH, interactionSource = inputInteraction, softCard = true,
+            elevation = 6.dp, materialExpansion = { focusAmount.value }) {}
+        Row(Modifier.fillMaxSize().padding(start = 2.dp, end = 3.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Outlined.Search, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            val searchAction = if (query.isBlank()) "输入关键词" else "搜索"
+            MotionIconButton(onClick = { if (query.isBlank()) requester.requestFocus() else submit() },
+                modifier = Modifier.size(44.dp), enabled = active, tooltip = searchAction) {
+                Icon(Icons.Outlined.Search, searchAction, Modifier.size(19.dp), tint = if (focused) colors.primary else colors.onSurfaceVariant)
+            }
             BasicTextField(value = query, onValueChange = { onOpen(); onQuery(it) },
                 enabled = active, singleLine = true, interactionSource = inputInteraction,
-                textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
+                cursorBrush = SolidColor(colors.primary),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = {
-                    scopeOpen = false
-                    onOpen()
-                    onSubmit()
-                    focus.clearFocus(force = true)
-                }),
-                modifier = Modifier.weight(1f).height(44.dp).padding(horizontal = 10.dp)
+                keyboardActions = KeyboardActions(onSearch = { submit() }),
+                modifier = Modifier.weight(1f).height(height).padding(end = 8.dp)
                     .focusRequester(requester).onFocusChanged { if (it.isFocused) onOpen() }
                     .semantics { contentDescription = searchLabel },
                 decorationBox = { input ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
                         if (query.isEmpty()) Text(searchLabel, style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         input()
                     }
                 })
             if (query.isNotEmpty() || copyOnly) MotionIconButton(onClick = {
                 scopeOpen = false; onClear()
-            }, enabled = active, modifier = Modifier.size(32.dp), tooltip = "清空搜索") {
+            }, enabled = active, modifier = Modifier.size(44.dp), tooltip = "清空搜索") {
                 Icon(Icons.Outlined.Close, "清空搜索", Modifier.size(17.dp))
             }
             if (showScopeSelector) {
@@ -357,11 +400,13 @@ internal fun DesktopSearchField(
                 }
                 Box {
                     MotionIconButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
-                        modifier = Modifier.size(36.dp), tooltip = "搜索范围：" + targetLabel) {
-                        Box(Modifier.size(22.dp)) {
+                        modifier = Modifier.size(44.dp), tooltip = "搜索范围：" + targetLabel) {
+                        Box(Modifier.size(32.dp).background(
+                            if (scopeOpen) colors.primaryContainer else colors.primary.copy(alpha = .072f), RoundedCornerShape(12.dp)),
+                            contentAlignment = Alignment.Center) {
                             Icon(targetIcon, "搜索范围：" + targetLabel, Modifier.align(Alignment.Center).size(18.dp))
                             if (copyOnly || target == SearchTarget.TRANSLATION_GROUP)
-                                BodySourceMark("copy", "拷贝", Modifier.align(Alignment.BottomEnd).size(8.dp))
+                                BodySourceMark("copy", "拷贝", Modifier.align(Alignment.BottomEnd).padding(4.dp).size(8.dp))
                         }
                     }
                     CompactGlassPopover(scopeOpen, backdrop, onDismiss = { scopeOpen = false }, maximumWidth = 200.dp) {
@@ -389,6 +434,7 @@ internal fun DesktopSearchField(
 internal fun DesktopDiscoveryHeader(
     searching: Boolean,
     backdrop: HazeState,
+    tabLabels: List<String>,
     onLeaveSearch: () -> Unit,
     navigation: @Composable () -> Unit,
     tabs: @Composable (Modifier) -> Unit,
@@ -398,8 +444,9 @@ internal fun DesktopDiscoveryHeader(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier) {
+        val ink = rememberBrowseTabInk(tabLabels)
         val tabGroup: @Composable (Modifier) -> Unit = { bounds ->
-            HeaderGlassSurface(backdrop, bounds, quietShadow = true) {
+            HeaderGlassSurface(backdrop, bounds, quietShadow = true, ink = ink) {
                 tabs(Modifier.fillMaxWidth().padding(horizontal = 4.dp))
             }
         }

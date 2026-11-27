@@ -1127,7 +1127,7 @@ private val BrowseTileCaption = Modifier.fillMaxWidth().padding(start = 1.dp, en
 private val BrowseTileFootnote = Modifier.fillMaxWidth().padding(top = 3.dp)
 
 @Composable
-private fun browseTitleStyle(size: TextUnit, leading: TextUnit, weight: FontWeight = FontWeight.SemiBold) =
+internal fun browseTitleStyle(size: TextUnit, leading: TextUnit, weight: FontWeight = FontWeight.SemiBold) =
     MaterialTheme.typography.titleMedium.copy(fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
         fontSize = size, lineHeight = leading, fontWeight = weight, letterSpacing = (-.15f).sp,
         lineBreak = LineBreak.Heading)
@@ -1294,20 +1294,27 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
             })
             .motionPress(interaction, pressedScale = .985f)
             .padding(horizontal = horizontalInset, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
     ) {
-        MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).mangaSharedCover(manga.id, placement).mangaCoverCard(7.dp))
-        Column(Modifier.weight(1f).padding(start = 11.dp,
+        MangaCover(manga, repository, Modifier.width(54.dp).height(78.dp).mangaSharedCover(manga.id, placement)
+            .mangaCoverCard(8.dp, shadowRadius = 6.dp))
+        val secondary = browseNoteColor()
+        Column(Modifier.weight(1f).heightIn(min = 78.dp).padding(start = 13.dp,
             end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall,
-                maxLines = if (adultProfile) 2 else 1, overflow = TextOverflow.Ellipsis)
-            if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (adultProfile && bodySources.size <= 1) MangaBrowseSource(manga)
-            else SearchSourceMarks(bodySources, Modifier.fillMaxWidth(), onSource, alignedSources, tagSearch)
-            if (!adultProfile) MangaMetricBadges(manga, showMore = false)
+            verticalArrangement = Arrangement.SpaceBetween) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(manga.title, style = browseTitleStyle(16.sp, 21.sp),
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
+                    style = MaterialTheme.typography.bodySmall, color = secondary,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Column(Modifier.fillMaxWidth().padding(top = 3.dp)) {
+                if (adultProfile && bodySources.size <= 1) MangaBrowseSource(manga, foreground = secondary)
+                else SearchSourceMarks(bodySources, Modifier.fillMaxWidth(), onSource, alignedSources, tagSearch)
+                if (!adultProfile) MangaMetricBadges(manga, foreground = secondary, compact = true,
+                    plain = true, showMore = false)
+            }
         }
     }
 }
@@ -1604,33 +1611,69 @@ internal fun ContinueRow(
     prominent: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
+    val colors = MaterialTheme.colorScheme
+    val note = browseNoteColor()
+    val coverWidth = if (!prominent) 46.dp else if (LocalDensity.current.fontScale > 1.4f) 54.dp else 68.dp
+    val featuredPaper = if (prominent) {
+        val storedColor = remember(progress.manga.coverUrl) { FeaturedCoverColors.get(progress.manga.coverUrl) }
+        val pigment = storedColor ?: colors.primary
+        val nearCover = lerp(colors.surface, pigment, .12f)
+        val paper = listOf(nearCover, colors.surfaceContainerLow)
+        val tones = if (LocalLayoutDirection.current == LayoutDirection.Rtl) paper.reversed() else paper
+        if (LocalPlatformAccessibilityPreferences.current.increaseContrast)
+            Modifier.background(colors.surface, RoundedCornerShape(17.dp))
+        else Modifier.background(androidx.compose.ui.graphics.Brush.horizontalGradient(tones), RoundedCornerShape(17.dp))
+    } else Modifier
     Row(Modifier.fillMaxWidth()
         .combinedClickable(interactionSource = interaction, indication = null,
             onClickLabel = "继续阅读", onClick = { onContinue(progress) },
             onLongClickLabel = if (onManage != null) "管理阅读记录" else null,
             onLongClick = onManage)
-        .motionPress(interaction, pressedScale = .985f).padding(vertical = 6.dp),
+        .motionPress(interaction, pressedScale = .985f).then(featuredPaper)
+        .padding(horizontal = if (prominent) 10.dp else 0.dp, vertical = if (prominent) 10.dp else 7.dp),
         verticalAlignment = Alignment.CenterVertically) {
         MangaCover(progress.manga, repository, Modifier
-            .width(if (prominent) 54.dp else 46.dp).height(if (prominent) 76.dp else 64.dp).mangaCoverCard(7.dp))
-        Column(Modifier.weight(1f).padding(start = 12.dp, end = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(if (prominent) 3.dp else 2.dp)) {
-            Text(progress.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                style = if (prominent) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
+            .size(coverWidth, coverWidth * 1.4f)
+            .mangaCoverCard(if (prominent) 10.dp else 7.dp, shadowRadius = 6.dp))
+        Column(Modifier.weight(1f).padding(start = if (prominent) 14.dp else 12.dp, end = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(if (prominent) 5.dp else 3.dp)) {
+            Text(progress.manga.title, color = colors.onSurface,
+                style = if (prominent) browseTitleStyle(20.sp, 25.sp) else browseTitleStyle(16.sp, 21.sp),
                 maxLines = if (prominent) 2 else 1, overflow = TextOverflow.Ellipsis)
-            Text(mangaNumberText(recentReadingLocation(progress)), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (progress.pageCount > 0) {
-                val fraction = ((progress.pageIndex + 1).toFloat() / progress.pageCount).coerceIn(0f, 1f)
-                Box(Modifier.fillMaxWidth().padding(top = 5.dp).height(2.dp)
-                    .clip(RoundedCornerShape(1.dp))
-                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .07f))) {
-                    Box(Modifier.fillMaxWidth(fraction).height(2.dp)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = .62f)))
+            if (prominent) {
+                if (progress.chapterTitle.isNotBlank()) Text(progress.chapterTitle,
+                    color = note, style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val page = if (progress.pageCount > 0) "${progress.pageIndex + 1}/${progress.pageCount} 页"
+                    else "第 ${progress.pageIndex + 1} 页"
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(mangaNumberText(page), style = MaterialTheme.typography.labelSmall,
+                        color = note, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    detailReadingFraction(progress)?.let { fraction ->
+                        Box(Modifier.weight(1f).height(3.dp).clip(RoundedCornerShape(2.dp))
+                            .background(colors.onSurface.copy(alpha = .08f))) {
+                            Box(Modifier.fillMaxWidth(fraction).height(3.dp).background(colors.primary))
+                        }
+                    }
+                }
+            } else {
+                Text(mangaNumberText(recentReadingLocation(progress)), style = MaterialTheme.typography.bodySmall,
+                    color = note, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                detailReadingFraction(progress)?.let { fraction ->
+                    Box(Modifier.fillMaxWidth().height(2.dp).clip(RoundedCornerShape(1.dp))
+                        .background(colors.onSurface.copy(alpha = .07f))) {
+                        Box(Modifier.fillMaxWidth(fraction).height(2.dp).background(colors.primary.copy(alpha = .72f)))
+                    }
                 }
             }
         }
-        if (onHistory == null) Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (onHistory == null) Box(Modifier.size(if (prominent) 32.dp else 24.dp)
+            .then(if (prominent) Modifier.background(colors.primaryContainer, RoundedCornerShape(50)) else Modifier),
+            contentAlignment = Alignment.Center) {
+            Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp),
+                tint = if (prominent) colors.onPrimaryContainer else note)
+        }
         else MotionIconButton(onClick = onHistory, modifier = Modifier.size(44.dp),
             tooltip = if (namedHistory) "${progress.manga.title}的章节记录" else "章节阅读记录") {
             Icon(Icons.Outlined.History, "章节阅读记录", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1662,8 +1705,9 @@ internal fun RecentReadingSheet(
             else Column(Modifier.fillMaxWidth()) {
                 Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("最近阅读", fontSize = 16.sp, fontWeight = FontWeight.Medium, lineHeight = 22.sp)
-                    Text(history.size.toString(), style = MaterialTheme.typography.labelSmall,
+                    Text("最近阅读", style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.semantics { heading() })
+                    Text(history.size.toString(), style = mangaMetricValueStyle(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(), state = recentPosition,
@@ -1683,9 +1727,9 @@ internal fun RecentReadingSheet(
                                 .motionPress(rowInteraction, pressedScale = .985f)
                                 .padding(horizontal = 4.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                MangaCover(progress.manga, repository, Modifier.width(36.dp).height(50.dp).mangaCoverCard(5.dp))
-                                Column(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                                    Text(progress.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
+                                MangaCover(progress.manga, repository, Modifier.width(40.dp).height(56.dp).mangaCoverCard(7.dp, shadowRadius = 5.dp))
+                                Column(Modifier.weight(1f).padding(start = 12.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(progress.manga.title, style = browseTitleStyle(15.sp, 20.sp),
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(mangaNumberText(recentReadingLocation(progress)),
                                         fontSize = 12.sp, lineHeight = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1808,24 +1852,33 @@ internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Mod
 
 @Composable
 internal fun QuietLoading(message: String) {
-    Text(message,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 64.dp)
-            .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        textAlign = TextAlign.Center)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 34.dp)
+        .semantics(mergeDescendants = true) { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
+        horizontalArrangement = Arrangement.spacedBy(9.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(Modifier.size(13.dp).clearAndSetSemantics { },
+            color = MaterialTheme.colorScheme.primary, strokeWidth = 1.5.dp)
+        Text(message, style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 @Composable
 internal fun EmptyMessage(title: String, description: String, action: String? = null, onAction: () -> Unit = {}) {
-    Column(Modifier.fillMaxWidth().semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite }
-        .padding(vertical = 48.dp, horizontal = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(36.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
-        Text(title, style = MaterialTheme.typography.titleMedium)
-        Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-        if (action != null) TextButton(onClick = onAction) { Text(action) }
+    val colors = MaterialTheme.colorScheme
+    Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 36.dp),
+        contentAlignment = Alignment.Center) {
+        Column(Modifier.widthIn(max = 360.dp).semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(title, modifier = Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge,
+                color = colors.onSurface, textAlign = TextAlign.Center)
+            Text(description, Modifier.padding(top = 6.dp), style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurfaceVariant, textAlign = TextAlign.Center)
+            if (action != null) TextButton(onClick = onAction, modifier = Modifier.padding(top = 12.dp),
+                colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
+                    containerColor = colors.primaryContainer, contentColor = colors.onPrimaryContainer),
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp)) { Text(action) }
+        }
     }
 }
 

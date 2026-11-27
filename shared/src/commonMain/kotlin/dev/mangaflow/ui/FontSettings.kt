@@ -178,7 +178,7 @@ private fun FontChoiceRow(
         }
     }
     val selectionTone by animateColorAsState(
-        if (selected) colors.onSurface.copy(alpha = .045f) else Color.Transparent,
+        if (selected) colors.primary.copy(alpha = .075f) else Color.Transparent,
         if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
         label = "font-choice-selection",
     )
@@ -213,7 +213,7 @@ private fun FontChoiceRow(
                 onLongClick = onManage.takeIf { !builtIn })
             .semantics { contentDescription = selectionLabel; this.selected = selected }
             .motionPress(interaction, enabled = enabled, pressedScale = .99f)
-            .heightIn(min = 68.dp).padding(start = 10.dp, top = 5.dp, bottom = 5.dp),
+            .heightIn(min = 72.dp).padding(start = 12.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -223,18 +223,18 @@ private fun FontChoiceRow(
                         color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp,
                         fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
                     MotionSwap(selected, Modifier.size(16.dp)) { chosen ->
-                        if (chosen) Icon(Icons.Outlined.Check, "已选择", Modifier.size(16.dp), tint = colors.onSurface)
+                        if (chosen) Icon(Icons.Outlined.Check, "已选择", Modifier.size(16.dp), tint = colors.primary)
                     }
                 }
                 if (previewReady) {
                     Text(if (scene == MangaFontScene.NUMBERS) "8.7 / 10   12:34   299.4" else scene.sample,
                         color = colors.onSurface, style = TextStyle(
                             fontFamily = family, fontSize = when (scene) {
-                                MangaFontScene.WORK_TITLE, MangaFontScene.NUMBERS -> 20.sp
-                                MangaFontScene.INTERFACE -> 18.sp
-                                MangaFontScene.READING -> 15.sp
+                                MangaFontScene.WORK_TITLE, MangaFontScene.NUMBERS -> 24.sp
+                                MangaFontScene.INTERFACE -> 19.sp
+                                MangaFontScene.READING -> 16.sp
                             },
-                            lineHeight = if (scene == MangaFontScene.READING) 22.sp else 26.sp,
+                            lineHeight = if (scene == MangaFontScene.READING) 24.sp else 30.sp,
                             fontWeight = previewWeight,
                             fontFeatureSettings = if (scene == MangaFontScene.NUMBERS) "tnum" else null),
                         maxLines = if (scene == MangaFontScene.READING) 3 else 2, overflow = TextOverflow.Ellipsis)

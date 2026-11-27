@@ -15,13 +15,11 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusDirection
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -163,11 +161,10 @@ fun AccountScreen(
             modifier = Modifier.widthIn(max = if (desktop) 480.dp else Dp.Infinity).fillMaxWidth()
                 .align(Alignment.TopCenter).heightIn(max = accountHeight)
                 .verticalScroll(loginScroll)
-                .padding(start = 24.dp, end = 24.dp, top = contentTopPadding + 4.dp, bottom = 16.dp + bottomInset),
+                .padding(start = 24.dp, end = 24.dp, top = contentTopPadding + 18.dp, bottom = 16.dp + bottomInset),
             verticalArrangement = Arrangement.spacedBy(0.dp),
         ) {
-            Text("匿名阅读已启用", Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-            Text("连接账号，导入拷贝收藏；阅读进度可在漫画详情中选择采用。", Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+            AccountIdentity("匿名阅读已启用", "连接账号可导入拷贝收藏。阅读进度可在漫画详情中选择采用。")
             if (state.savedCredentialPresent) {
                 Text(if (state.autoRestorePending)
                     "账号凭据已安全保留，客户端会自动重试恢复连接，无需重复登录。"
@@ -183,26 +180,30 @@ fun AccountScreen(
             }
             if (!state.savedCredentialPresent || !state.autoRestorePending) Column(Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 val formActive = active
-                OutlinedTextField(
-                    value = username, onValueChange = { if (formActive) username = it },
-                    modifier = Modifier.fillMaxWidth(), enabled = formActive && !busy, singleLine = true,
-                    label = { Text("账号") },
-                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Next),
-                    keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
-                    shape = RoundedCornerShape(18.dp), colors = accountInputColors(),
-                )
-                OutlinedTextField(
-                    value = password, onValueChange = { if (formActive) password = it },
-                    modifier = Modifier.fillMaxWidth(), enabled = formActive && !busy, singleLine = true,
-                    label = { Text("密码") },
-                    visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = { SecretVisibility(showSecret, formActive && !busy) { showSecret = !showSecret } },
-                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false,
-                        keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { submitPassword() }),
-                    shape = RoundedCornerShape(18.dp), colors = accountInputColors(),
-                )
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    OutlinedTextField(
+                        value = username, onValueChange = { if (formActive) username = it },
+                        modifier = Modifier.fillMaxWidth(), enabled = formActive && !busy, singleLine = true,
+                        label = { Text("账号") },
+                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Next),
+                        keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+                        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 5.dp, bottomEnd = 5.dp),
+                        colors = settingsInputColors(),
+                    )
+                    OutlinedTextField(
+                        value = password, onValueChange = { if (formActive) password = it },
+                        modifier = Modifier.fillMaxWidth(), enabled = formActive && !busy, singleLine = true,
+                        label = { Text("密码") },
+                        visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = { SecretVisibility(showSecret, formActive && !busy) { showSecret = !showSecret } },
+                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false,
+                            keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { submitPassword() }),
+                        shape = RoundedCornerShape(topStart = 5.dp, topEnd = 5.dp, bottomStart = 16.dp, bottomEnd = 16.dp),
+                        colors = settingsInputColors(),
+                    )
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("登录线路", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
                     MotionTabs(loginRoute.ordinal, CopyLoginRoute.entries.map { it.label },
                         onSelect = { if (formActive && !busy) loginRoute = CopyLoginRoute.entries[it] },
@@ -243,12 +244,11 @@ fun AccountScreen(
             Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).padding(top = contentTopPadding),
                 contentAlignment = Alignment.TopCenter) {
                 Column(Modifier.widthIn(max = 480.dp).fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 20.dp),
+                    .verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, top = 18.dp, bottom = 16.dp + bottomInset),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(if (profile.locallyRestored) "本地会话已恢复" else "拷贝已连接", style = MaterialTheme.typography.titleMedium)
-                    Text(if (profile.locallyRestored) "尚未联网确认有效性，收藏和历史请求会显示各自实际结果。"
-                        else "本机与拷贝收藏已汇入同一个书架；云端独有作品无需导入即可查看。删除、同步与阅读进度仍分别管理。",
-                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                    AccountIdentity(if (profile.locallyRestored) "本地会话已恢复" else "拷贝已连接",
+                        if (profile.locallyRestored) "尚未联网确认有效性，收藏和历史请求会显示各自实际结果。"
+                        else "本机与拷贝收藏已汇入同一个书架。云端独有作品可直接查看，删除、同步与阅读进度仍分别管理。")
                     Button(onClick = onGoShelf, enabled = active,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         shape = RoundedCornerShape(16.dp)) { Text("打开统一书架") }
@@ -288,15 +288,16 @@ private fun SecretVisibility(visible: Boolean, enabled: Boolean, onClick: () -> 
 }
 
 @Composable
-private fun accountInputColors() = OutlinedTextFieldDefaults.colors(
-    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-    disabledTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-    focusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
-    unfocusedBorderColor = Color.Transparent,
-    disabledBorderColor = Color.Transparent,
-)
+private fun AccountIdentity(title: String, detail: String) {
+    Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 18.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.Top) {
+        ChapterSourceLogo("copy", "拷贝", Modifier.size(44.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            PreferenceHeading(title)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
 
 @Composable
 private fun AccountBusyRow(message: String, onCancel: () -> Unit) {

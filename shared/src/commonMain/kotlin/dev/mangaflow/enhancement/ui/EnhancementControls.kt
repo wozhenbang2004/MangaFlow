@@ -17,7 +17,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.enhancement.engine.*
@@ -25,6 +27,8 @@ import dev.mangaflow.enhancement.EnhancementTask
 import dev.mangaflow.enhancement.EnhancementTaskPhase
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.ui.motion.*
+import dev.mangaflow.ui.LocalMangaWindow
+import dev.mangaflow.ui.mangaNumberText
 
 @Composable
 internal fun EnhancementSection(
@@ -34,12 +38,13 @@ internal fun EnhancementSection(
     action: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleSmall)
+            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(title, modifier = Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold)
                 if (!summary.isNullOrBlank()) Text(summary, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -94,12 +99,20 @@ internal fun EnhancementQuiet(text: String, error: Boolean = false) {
 
 @Composable
 internal fun EnhancementValue(name: String, value: String, detail: String? = null) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.Top) {
-            Text(name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(value, Modifier.weight(1.15f), style = MaterialTheme.typography.bodySmall)
+    val window = LocalMangaWindow.current
+    val ink = MaterialTheme.colorScheme.onSurfaceVariant
+    val valueText = mangaNumberText(value)
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp).semantics(mergeDescendants = true) {},
+        verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (window.width < 300.dp * window.fontScale) {
+            Text(name, style = MaterialTheme.typography.bodySmall, color = ink)
+            Text(valueText, style = MaterialTheme.typography.labelLarge)
+        } else {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text(name, Modifier.weight(1f).alignByBaseline(), style = MaterialTheme.typography.bodySmall, color = ink)
+                Text(valueText, Modifier.weight(1.25f).alignByBaseline(), style = MaterialTheme.typography.labelLarge,
+                    textAlign = TextAlign.End)
+            }
         }
         if (!detail.isNullOrBlank()) EnhancementQuiet(detail)
     }

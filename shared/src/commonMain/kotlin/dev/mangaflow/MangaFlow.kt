@@ -71,8 +71,8 @@ fun MangaFlowHost(
             lifecycle.addObserver(observer)
             onDispose { lifecycle.removeObserver(observer) }
         }
-        MangaFlowTheme {
-            MangaMotionProvider {
+        MangaMotionProvider {
+            MangaFlowTheme {
                 HazeProviders {
                     MangaAdaptiveLayout {
                         ScreenFitProvider {

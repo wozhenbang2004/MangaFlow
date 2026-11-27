@@ -207,6 +207,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.IntOffset
@@ -1541,8 +1544,9 @@ fun ReaderScreen(
                 Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).pointerInput(Unit) {}.padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回漫画详情", interactive = readerToolsVisible, onClick = leaveReader)
-                    Column(Modifier.weight(1f).padding(start = 2.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)) {
-                        Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                    Column(Modifier.weight(1f).padding(start = 3.dp, end = 4.dp, top = 5.dp, bottom = 5.dp)) {
+                        Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface,
+                            fontSize = 17.sp, lineHeight = 21.sp, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title,
                             repairState.replacements[pageIndex]?.let {
@@ -1550,7 +1554,8 @@ fun ReaderScreen(
                             },
                             currentSourceName.takeIf { chapter.variants.size > 1 },
                             clock.takeIf { it.isNotBlank() }).joinToString(" · "),
-                            color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 16.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (preferences.panelEngine == PanelEngine.OFF &&
                         (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT)) {
@@ -4498,8 +4503,8 @@ private fun ReaderPageNavigatorDialog(
                     columns = GridCells.Adaptive(76.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
                     modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
                     contentPadding = PaddingValues(bottom = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(9.dp),
+                    verticalArrangement = Arrangement.spacedBy(13.dp),
                 ) {
                     items(pages, key = { it.index }) { page ->
                         val selected = page.index == currentPage
@@ -4513,16 +4518,11 @@ private fun ReaderPageNavigatorDialog(
                         val request = remember(preview, headers, sourceId) {
                             preview?.let { readerImageRequest(context, it, headers, sourceId).crossfade(0).build() }
                         }
-                        Column(
-                            Modifier.clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = if (selected) .08f else .035f))
-                                .clickable(role = Role.Button) { onSelect(page.index) }
-                                .padding(5.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
+                        val colors = MaterialTheme.colorScheme
+                        Column(Modifier.clip(RoundedCornerShape(8.dp))
+                            .selectable(selected, role = Role.RadioButton, onClick = { onSelect(page.index) })) {
                             Box(Modifier.fillMaxWidth().aspectRatio(.7f)
-                                .clip(RoundedCornerShape(7.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant)) {
+                                .clip(RoundedCornerShape(8.dp)).background(colors.surfaceVariant)) {
                                 AsyncImage(
                                     model = request,
                                     contentDescription = "第 ${page.index + 1} 页",
@@ -4530,20 +4530,23 @@ private fun ReaderPageNavigatorDialog(
                                     modifier = Modifier.fillMaxSize(),
                                 )
                                 MotionIconButton(onClick = { onToggleCollection(page.index) },
-                                    modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).size(30.dp)
-                                        .clip(CircleShape).background(MaterialTheme.colorScheme.surface.copy(alpha = .92f))) {
-                                    Icon(if (page.index in collectedPages) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                        if (page.index in collectedPages) "取消这一页的收藏" else "单独收藏这一页",
-                                        Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurface)
+                                    modifier = Modifier.align(Alignment.TopEnd).size(44.dp)) {
+                                    Box(Modifier.size(25.dp).background(colors.surface, CircleShape),
+                                        contentAlignment = Alignment.Center) {
+                                        Icon(if (page.index in collectedPages) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                            if (page.index in collectedPages) "取消这一页的收藏" else "单独收藏这一页",
+                                            Modifier.size(14.dp), tint = colors.onSurface)
+                                    }
                                 }
                             }
-                            Text(
-                                "${page.index + 1}",
-                                fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), fontSize = 12.sp,
-                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 3.dp),
-                            )
+                            Row(Modifier.padding(start = 2.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                if (selected) Spacer(Modifier.size(12.dp, 3.dp).background(colors.primary, CircleShape))
+                                Text("${page.index + 1}", fontFamily = mangaFontFamily(MangaFontScene.NUMBERS),
+                                    fontSize = 13.sp, lineHeight = 17.sp,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (selected) colors.onSurface else colors.onSurfaceVariant)
+                            }
                         }
                     }
                 }
@@ -4579,9 +4582,15 @@ private fun ReaderProgressSlider(
             preview == null && pendingPage == null
     }
     val pageLabel = if (spread != null) "${spread.min() + 1}–${spread.max() + 1}" else "${shown.roundToInt() + 1}"
-    val labelStyle = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp, fontFeatureSettings = "tnum")
+    val colors = MaterialTheme.colorScheme
+    val labelStyle = MaterialTheme.typography.labelLarge.copy(fontFamily = mangaFontFamily(MangaFontScene.NUMBERS),
+        fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
+    val totalStyle = SpanStyle(color = colors.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.Normal)
     val reserve = "8".repeat(pageCount.toString().length)
-    val reserveLabel = if (showSpreadRange) "$reserve–$reserve / $reserve" else "$reserve / $reserve"
+    val reserveLabel = buildAnnotatedString {
+        append(if (showSpreadRange) "$reserve–$reserve" else reserve)
+        withStyle(totalStyle) { append(" / $reserve") }
+    }
     val measurer = rememberTextMeasurer()
     val labelPixels = remember(measurer, reserveLabel, labelStyle) {
         measurer.measure(reserveLabel, labelStyle, maxLines = 1).size.width
@@ -4600,7 +4609,6 @@ private fun ReaderProgressSlider(
     }
     DisposableEffect(interactions) { onDispose { interactionChanged(false) } }
 
-    val colors = MaterialTheme.colorScheme
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         sourceContent?.invoke()
         ReaderSeekBar(
@@ -4614,6 +4622,7 @@ private fun ReaderProgressSlider(
             modifier = Modifier.weight(1f).padding(end = 4.dp),
             enabled = enabled && pageCount > 1,
             interactions = interactions,
+            pageCount = pageCount,
             label = "阅读进度，第 ${shown.roundToInt() + 1} 页，共 $pageCount 页",
         )
         Box(Modifier.width(labelWidth)
@@ -4623,7 +4632,10 @@ private fun ReaderProgressSlider(
             .semantics { contentDescription = "第 $pageLabel 页，共 $pageCount 页" }
             .padding(horizontal = 4.dp, vertical = 5.dp),
             contentAlignment = Alignment.Center) {
-            Text(mangaNumberText("$pageLabel / $pageCount"), color = colors.onSurface,
+            Text(buildAnnotatedString {
+                append(pageLabel)
+                withStyle(totalStyle) { append(" / $pageCount") }
+            }, color = colors.onSurface,
                 style = labelStyle, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         }
         statusContent?.invoke()
@@ -4790,12 +4802,12 @@ private fun ReaderChaptersDialog(
                         else -> "$visibleCount 章"
                     }
                     if (stackHeading) Column(Modifier.weight(1f).padding(end = 4.dp)) {
-                        Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                        Text("章节", style = MaterialTheme.typography.titleLarge, maxLines = 1)
                         Text(countLabel, color = colors.onSurfaceVariant, fontSize = 11.sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                     } else {
-                        Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)
-                        Text(countLabel, Modifier.weight(1f).padding(start = 8.dp),
+                        Text("章节", style = MaterialTheme.typography.titleLarge)
+                        Text(mangaNumberText(countLabel), Modifier.weight(1f).padding(start = 8.dp),
                             color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (!android || catalogBusy) Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
@@ -4914,14 +4926,15 @@ private fun ReaderChaptersDialog(
                             val selected = chapter.id == currentId
                             val entry = saved[chapter.id]
                             Row(Modifier.fillMaxWidth().heightIn(min = if (listResults) 56.dp else 48.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(colors.onSurface.copy(alpha = if (selected) .09f else .035f))
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (selected) colors.primaryContainer
+                                    else colors.onSurface.copy(alpha = if (listResults) 0f else .042f))
                                 .selectable(selected = selected, role = Role.RadioButton, onClick = { onSelect(chapter.id) })
                                 .padding(horizontal = if (listResults) 12.dp else 6.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
-                                    Text(chapter.title, color = colors.onSurface,
-                                        fontSize = if (listResults) 14.sp else 12.sp, lineHeight = if (listResults) 20.sp else 17.sp,
+                                    Text(chapter.title, color = if (selected) colors.onPrimaryContainer else colors.onSurface,
+                                        fontSize = if (listResults) 15.sp else 13.sp, lineHeight = if (listResults) 21.sp else 18.sp,
                                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     if (searching && groups.size > 1) Text(chapterGroupLabel(chapter.group),
@@ -4969,8 +4982,8 @@ private fun ReaderChaptersDialog(
 @Composable
 internal fun ReaderPanelHeading(title: String, closeLabel: String, onDismiss: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(title, color = MaterialTheme.colorScheme.onSurface, fontSize = 17.sp,
-            fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+        Text(title, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.weight(1f))
         ReaderIcon(Icons.Rounded.Close, closeLabel, onClick = onDismiss)
     }
 }

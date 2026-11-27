@@ -7,9 +7,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.LazyGridState
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.*
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -22,6 +19,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -202,9 +200,11 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
     val schedule = animeDiscoveryMetric(item, query)
     val length = "电影".takeIf { item.format == AnimeDiscoveryFormat.MOVIE }
         ?: item.episodeCount?.takeIf { it > 0 }?.let { "${it} 集" }
+    val rank = item.rank?.takeIf { it > 0 && list && query.order == AnimeDiscoveryOrder.RANK }
     val caption = when {
         query.calendar -> schedule ?: length.orEmpty()
         query.season != null && schedule != null -> schedule
+        rank != null -> listOfNotNull(item.year?.toString(), length).joinToString(" · ")
         else -> listOfNotNull(schedule, item.year?.toString(), length).take(2).joinToString(" · ")
     }
     val rated = item.copy(sourceScores = scores)
@@ -227,7 +227,8 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
             else AnimeDiscoveryPrimaryScore(score, onScores = showScores)
         } },
         captionBadge = sourceBadge,
-        description = listOfNotNull(item.title, caption.takeIf(String::isNotBlank)).joinToString("，"),
+        description = listOfNotNull(rank?.let { "评分榜第 ${it} 名" }, item.title, caption.takeIf(String::isNotBlank)).joinToString("，"),
+        rank = rank,
         modifier = modifier, list = list, showPoster = showPoster,
         captionLines = if (schedule != null && (query.calendar || query.season != null)) 2 else 1,
         onManage = onManage, onOpen = onOpen)
@@ -302,7 +303,7 @@ internal fun AnimeSourceGroupDiscoveryCard(group: AnimeSearchGroup, sources: Lis
 private fun AnimeCompactCoverCard(key: String, title: String, cover: String, caption: String, sourceId: String,
     ratings: (@Composable () -> Unit)?, description: String, modifier: Modifier,
     list: Boolean, captionBadge: (@Composable () -> Unit)? = null, fallbackCover: String? = null, showPoster: Boolean = true,
-    captionLines: Int = 1, onManage: (() -> Unit)? = null, onOpen: () -> Unit) {
+    captionLines: Int = 1, rank: Int? = null, onManage: (() -> Unit)? = null, onOpen: () -> Unit) {
     val interaction = remember(key) { MutableInteractionSource() }
     val click = modifier.motionPress(interaction, pressedScale = .98f)
         .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
@@ -312,32 +313,33 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
     DesktopContextMenuArea(if (onManage != null) listOf(
         DesktopMenuAction("查看详情", onClick = onOpen), DesktopMenuAction("番剧操作", onClick = onManage)) else emptyList()) {
     if (list) {
-        Row(click.fillMaxWidth().heightIn(min = 48.dp).padding(vertical = 4.dp, horizontal = 4.dp),
+        Row(click.fillMaxWidth().heightIn(min = 48.dp).padding(vertical = 4.dp, horizontal = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (rank != null) Text(rank.toString(), Modifier.widthIn(min = 25.dp).clearAndSetSemantics { },
+                style = mangaMetricValueStyle(16.sp, 21.sp), color = MaterialTheme.colorScheme.primary,
+                maxLines = 1)
             if (showPoster) AnimePoster(cover, Modifier.width(58.dp).height(84.dp).clearAndSetSemantics { },
                 sourceId, fallbackCover, title)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text(title, Modifier.clearAndSetSemantics { }, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                    style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2,
+                Text(title, Modifier.clearAndSetSemantics { }, style = animeWorkTitleStyle(), maxLines = 2,
                     overflow = TextOverflow.Ellipsis)
                 ratings?.invoke()
                 AnimeCompactCardCaption(caption, captionBadge, captionLines)
             }
-            Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     } else {
         Column(click) {
             if (showPoster) AnimePoster(cover, Modifier.fillMaxWidth().aspectRatio(2f / 3f).clearAndSetSemantics { },
                 sourceId, fallbackCover, title)
-            Text(title, Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp).clearAndSetSemantics { },
+            Text(title, Modifier.padding(top = 9.dp, start = 1.dp, end = 1.dp).clearAndSetSemantics { },
                 fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 19.sp),
-                fontWeight = FontWeight.Medium, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
-            if (ratings != null) Box(Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp)) { ratings() }
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp,
+                    lineBreak = LineBreak.Heading), fontWeight = FontWeight.Medium,
+                maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
+            if (ratings != null) Box(Modifier.fillMaxWidth().padding(start = 1.dp, end = 1.dp)) { ratings() }
             if (caption.isNotBlank() || captionBadge != null)
-                Box(Modifier.fillMaxWidth().padding(top = 3.dp, start = 2.dp, end = 2.dp)) {
+                Box(Modifier.fillMaxWidth().padding(top = 3.dp, start = 1.dp, end = 1.dp)) {
                     AnimeCompactCardCaption(caption, captionBadge, captionLines)
                 }
         }

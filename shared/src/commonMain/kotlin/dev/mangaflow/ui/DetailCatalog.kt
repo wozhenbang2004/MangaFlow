@@ -88,15 +88,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -392,8 +396,9 @@ internal fun DetailCatalog(
                         runs.forEachIndexed { runIndex, run ->
                             if (showGroup && (runIndex > 0 || !isDefaultChapterGroup(run.first().group))) item(key = "group:$runIndex:${run.first().group}",
                                 span = { GridItemSpan(maxLineSpan) }, contentType = "group") {
-                                Text(chapterGroupLabel(run.first().group), color = DetailMuted, fontSize = 11.sp,
-                                    modifier = Modifier.padding(top = if (runIndex == 0) 2.dp else 10.dp, bottom = 3.dp))
+                                Text(chapterGroupLabel(run.first().group), color = DetailSecondary,
+                                    style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(top = if (runIndex == 0) 3.dp else 14.dp, bottom = 5.dp))
                             }
                             if (!showGroup && runIndex > 0) item(key = "run-break:$runIndex",
                                 span = { GridItemSpan(maxLineSpan) }, contentType = "run-break") { Spacer(Modifier.height(4.dp)) }
@@ -792,23 +797,30 @@ private fun ChapterTile(
                     )
                     .semantics {
                         contentDescription = chapter.title
-                        stateDescription = listOf(chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
+                        stateDescription = listOf(if (current) "当前阅读章节" else "",
+                            chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
                             .filter(String::isNotBlank).joinToString("，")
                     },
             ) {
                 Column(Modifier.fillMaxSize().padding(vertical = 4.dp)
                     .motionPress(interaction, pressedScale = .98f)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(if (current) readingColor.copy(alpha = .055f) else Color.Transparent)
-                    .padding(horizontal = 6.dp)) {
+                    .then(if (current) Modifier.background(readingColor.copy(alpha = .09f)).drawBehind {
+                        val width = 2.dp.toPx()
+                        val height = minOf(size.height, 14.dp.toPx())
+                        val x = if (layoutDirection == LayoutDirection.Rtl) size.width - width else 0f
+                        drawRoundRect(readingColor, Offset(x, (size.height - height) / 2f),
+                            Size(width, height), CornerRadius(width / 2f))
+                    } else Modifier)
+                    .padding(horizontal = 7.dp)) {
                     Box(Modifier.fillMaxWidth().height((if (desktop) 24.dp else 20.dp) * fontScale), contentAlignment = Alignment.CenterStart) {
                         Text(
-                            chapter.title, color = when {
+                            mangaNumberText(chapter.title), color = when {
                                 current -> readingColor
-                                complete -> DetailSecondary.copy(alpha = .65f)
-                                else -> DetailForeground.copy(alpha = .90f)
+                                complete -> DetailSecondary
+                                else -> DetailForeground
                             },
-                            fontSize = 13.sp, lineHeight = 20.sp, maxLines = 1,
+                            fontSize = 14.sp, lineHeight = 20.sp, maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
                             modifier = Modifier.fillMaxWidth(),

@@ -24,12 +24,10 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -147,8 +145,7 @@ internal fun MangaTrackingSheet(
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                 }
                 Column(Modifier.weight(1f)) {
-                    Text(website?.let { "连接 " + it.provider.label } ?: "漫画进度同步",
-                        style = MaterialTheme.typography.titleMedium)
+                    PreferenceHeading(website?.let { "连接 " + it.provider.label } ?: "漫画进度同步")
                     if (website != null) TrackingHint(if (website.provider == MangaTrackingProvider.BANGUMI)
                         "Bangumi 官方页面 · next.bgm.tv" else "AniList 官方页面 · anilist.co")
                     else work?.let { Text(it.title, style = MaterialTheme.typography.bodySmall,
@@ -482,17 +479,12 @@ private fun TrackingInput(
     secret: Boolean = false,
     number: Boolean = false,
 ) {
-    val colors = MaterialTheme.colorScheme
     OutlinedTextField(value, onValueChange, modifier = modifier, enabled = enabled, singleLine = true,
         label = { Text(label) }, shape = RoundedCornerShape(16.dp),
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(autoCorrectEnabled = false,
             keyboardType = if (secret) KeyboardType.Password else if (number) KeyboardType.Number else KeyboardType.Text),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedContainerColor = colors.surfaceVariant, unfocusedContainerColor = colors.surfaceVariant,
-            disabledContainerColor = colors.surfaceVariant, disabledTextColor = colors.onSurfaceVariant,
-            focusedBorderColor = colors.outline.copy(alpha = .25f),
-            unfocusedBorderColor = Color.Transparent, disabledBorderColor = Color.Transparent))
+        colors = settingsInputColors())
 }
 
 private fun progressLabel(value: MangaTrackingProgress): String =

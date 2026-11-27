@@ -81,15 +81,15 @@ internal fun ChapterEndFooter(
     LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), role = GlassSurfaceRole.READING_DOCK,
         preferSource = true, cornerRadius = 22.dp, trackPointer = onNext != null || onRetry != null) {
         Row(
-            Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(start = 12.dp, end = 4.dp),
+            Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 12.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             if (onNext != null) Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
                 BottomPullLoadIndicator(pull, Modifier.size(32.dp), color = foreground.copy(alpha = .65f))
             }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                Text(when {
+            Column(Modifier.weight(1f).padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                val hint = when {
                     onNext == null -> unavailableMessage
                     pull.loading -> if (previous) "正在打开上一话" else "正在打开下一话"
                     pull.progress >= 1f -> if (previous) "松手返回上一话" else "松手进入下一话"
@@ -98,11 +98,13 @@ internal fun ChapterEndFooter(
                     pull.horizontal && pull.towardStart -> "右滑进入下一话"
                     pull.horizontal -> "左滑进入下一话"
                     else -> "上拉进入下一话"
-                },
-                    color = foreground, fontWeight = FontWeight.Medium, fontSize = 12.sp,
+                }
+                val hasTitle = !nextTitle.isNullOrBlank()
+                Text(if (hasTitle) nextTitle.orEmpty() else hint, color = foreground,
+                    style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (!nextTitle.isNullOrBlank()) Text(nextTitle, color = foreground.copy(alpha = .78f),
-                    fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (hasTitle) Text(hint, color = foreground.copy(alpha = .82f),
+                    style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             if (onNext != null) TextButton(onClick = onNext) {
                 Text(if (previous) "上一话" else "下一话", color = foreground.copy(alpha = .8f), fontSize = 12.sp)

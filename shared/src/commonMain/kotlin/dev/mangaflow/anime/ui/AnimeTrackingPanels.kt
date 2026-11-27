@@ -97,7 +97,7 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
                         item {
                             Row(
                                 Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-                                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .045f))
+                                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
                                     .padding(start = 14.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -105,7 +105,7 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
                                 Icon(Icons.Outlined.AccountCircle, null, Modifier.size(22.dp),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Text(account.displayName.ifBlank { account.ownerId }, style = MaterialTheme.typography.titleSmall)
+                                    Text(account.displayName.ifBlank { account.ownerId }, style = MaterialTheme.typography.titleMedium)
                                     AnimeQuietLabel(accountName + " · 已连接")
                                 }
                                 MotionTextButton(onClick = { controller.disconnectTracking(provider) },
@@ -224,11 +224,10 @@ private fun AnimeReviewItem(review: AnimeTrackingReview, enabled: Boolean, onRec
     }
     var expandedNumbers by remember(review.id) { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
-        .background(colors.onSurface.copy(alpha = .035f)).padding(14.dp),
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(review.subjectTitle, style = MaterialTheme.typography.titleSmall)
+            Text(review.subjectTitle, style = animeWorkTitleStyle(large = true))
             AnimeQuietLabel(animeProviderName(review.providerId) + " · 条目 " + review.remoteSubjectId)
         }
         AnimeQuietLabel("追番状态")

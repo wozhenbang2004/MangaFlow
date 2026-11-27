@@ -67,9 +67,11 @@ import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
@@ -385,7 +387,7 @@ internal fun RankingPageFrame(
 
 @Composable
 private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
-    top: androidx.compose.ui.unit.Dp, active: Boolean, onRetry: () -> Unit, onMore: () -> Unit,
+    top: Dp, active: Boolean, onRetry: () -> Unit, onMore: () -> Unit,
     onOpen: (SiteRankedWork) -> Unit, onInspect: (SiteRankedWork) -> Unit,
 ) {
     val grid = rememberLazyGridState()
@@ -393,6 +395,12 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
     val empty = state.entries.isEmpty()
     val firstError = state.error?.takeIf { empty || (state.failedPage ?: 0) == 0 }
     val fetching = empty && (state.loading || state.restoringSelection)
+    val digits = remember(state.entries) {
+        (state.entries.maxOfOrNull { it.position } ?: 0).toString().length.coerceAtLeast(2)
+    }
+    val ordinalStyle = mangaMetricValueStyle(16.sp, 22.sp).copy(fontWeight = FontWeight.SemiBold)
+    val widest = rememberTextMeasurer().measure("8".repeat(digits), ordinalStyle, maxLines = 1).size.width
+    val ordinalWidth = with(LocalDensity.current) { widest.toDp() + 9.dp }
     val nearEnd by remember(grid) { derivedStateOf {
         val info = grid.layoutInfo
         info.totalItemsCount > 0 && (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 4
@@ -436,7 +444,7 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
                 }
             }
             items(state.entries, key = { it.work.key }, contentType = { "native-ranking" }) { entry ->
-                SiteRankingRow(entry, state.selection.kind, entry.work.key in state.linkedIds,
+                SiteRankingRow(entry, state.selection.kind, entry.work.key in state.linkedIds, ordinalWidth,
                     state.selection.key, onOpen, onInspect)
             }
             if (!empty && (state.loadingMore || state.error != null && firstError == null)) item(
@@ -457,10 +465,12 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
 }
 
 @Composable
-private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linked: Boolean,
+private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linked: Boolean, ordinalWidth: Dp,
     selectionKey: String, onOpen: (SiteRankedWork) -> Unit, onInspect: (SiteRankedWork) -> Unit) {
     val w = entry.work
     val colors = MaterialTheme.colorScheme
+    val lead = entry.position == 1
+    val coverHeight = if (lead) 112.dp else 96.dp
     val interaction = remember { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
     val placement = "ranking-site-" + selectionKey
@@ -475,17 +485,16 @@ private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linke
         }).motionPress(interaction, pressedScale = .985f).padding(vertical = 3.dp),
         verticalAlignment = Alignment.Top) {
         Text(entry.position.toString().padStart(2, '0'),
-            Modifier.widthIn(min = 30.dp).padding(end = 4.dp, top = 2.dp),
-            style = mangaMetricValueStyle(17.sp, 23.sp), maxLines = 1,
+            Modifier.width(ordinalWidth).padding(end = 4.dp, top = 2.dp),
+            style = mangaMetricValueStyle(16.sp, 22.sp), maxLines = 1,
             fontWeight = if (entry.position <= 3) FontWeight.SemiBold else FontWeight.Normal,
-            color = colors.onSurface.copy(alpha = if (entry.position <= 3) .84f else .42f))
-        CatalogueCover(w.manga, Modifier.width(68.dp).height(98.dp)
-            .mangaSharedCover(w.manga.id, placement).mangaCoverCard(8.dp))
-        Column(Modifier.weight(1f).padding(start = 10.dp).heightIn(min = 98.dp),
+            color = if (entry.position <= 3) colors.primary else colors.onSurfaceVariant)
+        CatalogueCover(w.manga, Modifier.width(if (lead) 78.dp else 66.dp).height(coverHeight)
+            .mangaSharedCover(w.manga.id, placement).mangaCoverCard(9.dp, shadowRadius = 7.dp))
+        Column(Modifier.weight(1f).padding(start = 13.dp).heightIn(min = coverHeight),
             verticalArrangement = Arrangement.SpaceBetween) {
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(w.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                    fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium,
+                Text(w.manga.title, style = if (lead) browseTitleStyle(20.sp, 25.sp) else browseTitleStyle(17.sp, 22.sp),
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (w.manga.authors.isNotEmpty()) Text(w.manga.authors.take(2).joinToString(" / "),
                     style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -508,7 +517,7 @@ private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linke
                     } else if (value != null) {
                         Row(Modifier.alignByBaseline(), verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text(value, style = mangaMetricValueStyle(16.sp, 22.sp), maxLines = 1)
+                            Text(value, style = mangaMetricValueStyle(14.sp, 20.sp), maxLines = 1)
                             Text(if (kind == SiteRankingKind.SCORE) "/${w.scoreScale}" else when (kind) {
                                 SiteRankingKind.POPULARITY -> "书单"
                                 SiteRankingKind.NEWEST -> "首发"
@@ -655,11 +664,10 @@ internal fun RankedWorkDetailScreen(
                     item(key = "catalogue-work") {
                         Row(Modifier.fillMaxWidth().padding(bottom = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.Top) {
-                            CatalogueCover(work.manga, Modifier.width(80.dp).height(116.dp)
-                                .mangaSharedCover(work.manga.id).mangaCoverCard(9.dp))
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                                Text(work.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                                    style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+                            CatalogueCover(work.manga, Modifier.width(92.dp).height(134.dp)
+                                .mangaSharedCover(work.manga.id).mangaCoverCard(11.dp, shadowRadius = 8.dp))
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                                Text(work.manga.title, style = browseTitleStyle(23.sp, 30.sp),
                                     maxLines = 3, overflow = TextOverflow.Ellipsis)
                                 if (work.manga.authors.isNotEmpty()) Text(work.manga.authors.take(2).joinToString(" / "),
                                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
@@ -681,7 +689,8 @@ internal fun RankedWorkDetailScreen(
                     item(key = "source-search") {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text("阅读来源", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                                Text("阅读来源", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold)
                                 if (state.rankedSourcesLoading) MotionBusyIndicator(Modifier.size(16.dp))
                                 if (state.rankedLinkedSource != null) MotionTextButton(
                                     onClick = { onClearSource(work.key) }, enabled = sourceReady,

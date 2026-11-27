@@ -16,7 +16,6 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Link
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -29,6 +28,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -71,7 +71,7 @@ internal fun SearchSourceMarks(
             }
         }
         CompositionLocalProvider(LocalViewConfiguration provides compactTargets) {
-            Row(modifier.height(24.dp).horizontalScroll(rememberScrollState()),
+            Row(modifier.height(28.dp).horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically) {
                 grouped.forEach { sourceMatches ->
                     val source = sourceMatches.first()
@@ -82,19 +82,21 @@ internal fun SearchSourceMarks(
                         else if (tagSearch && sourceMatches.size == 1) "打开${name}的标签命中结果"
                         else if (sourceMatches.size == 1) "打开${name}的搜索结果"
                         else "$name，${sourceMatches.size}条搜索结果，选择条目"
-                    Box(Modifier.size(24.dp).clip(RoundedCornerShape(5.dp))
+                    Row(Modifier.height(28.dp).widthIn(min = 26.dp).clip(RoundedCornerShape(6.dp))
                         .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                             onClickLabel = description, onClick = { onSource(sourceMatches) })
                         .motionPress(interaction, pressedScale = .94f)
-                        .semantics { contentDescription = description },
-                        contentAlignment = Alignment.Center) {
+                        .semantics(mergeDescendants = true) { contentDescription = description }
+                        .padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically) {
                         ChapterSourceLogo(source.sourceId, name, Modifier.size(14.dp), muted = true)
                         if (linkedOnly) Icon(Icons.Outlined.Link, null,
-                            Modifier.align(Alignment.BottomEnd).size(10.dp),
+                            Modifier.size(11.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (sourceMatches.size > 1) Text(sourceMatches.size.toString(),
-                            modifier = Modifier.align(Alignment.TopEnd).padding(end = 1.dp),
-                            fontSize = 7.sp, lineHeight = 8.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            modifier = Modifier.clearAndSetSemantics {},
+                            style = mangaMetricValueStyle(12.sp, 16.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -184,9 +186,8 @@ internal fun FederatedSearchChoices(
         Column(Modifier.fillMaxWidth().heightIn(max = maximumHeight).navigationBarsPadding()) {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp).heightIn(min = 44.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.Search, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
-                Text(heading, modifier = Modifier.weight(1f).padding(start = 8.dp),
-                    fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                Text(heading, modifier = Modifier.weight(1f).padding(vertical = 6.dp),
+                    style = browseTitleStyle(20.sp, 26.sp),
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 MotionIconButton(onClick = dismiss) { Icon(Icons.Outlined.Close, "关闭搜索结果选择", Modifier.size(20.dp)) }
             }
@@ -216,11 +217,11 @@ internal fun FederatedSearchChoices(
                                     ChapterSourceLogo(manga.sourceId, entry.sourceName, Modifier.size(14.dp))
                                 Text(entry.primary,
                                     fontFamily = if (entry.primaryIsTitle) mangaFontFamily(MangaFontScene.WORK_TITLE) else null,
-                                    fontSize = 13.sp, lineHeight = 17.sp, fontWeight = FontWeight.Medium,
+                                    fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
                                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }
                             if (entry.secondary.isNotBlank()) Text(entry.secondary,
-                                fontSize = 11.sp, lineHeight = 15.sp, color = colors.onSurfaceVariant,
+                                fontSize = 12.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant,
                                 maxLines = 2, overflow = TextOverflow.Ellipsis)
                             // Only genuinely indistinguishable metadata needs a native identifier up front.
                             if (entry.ambiguous || identityVisible) Text(entry.identity,

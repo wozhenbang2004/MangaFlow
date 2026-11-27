@@ -48,7 +48,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.toggleable
@@ -95,6 +94,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextFieldColors
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -112,25 +112,29 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalDensity
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineBreak
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -162,7 +166,6 @@ import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionSwitchThumb
-import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.rememberDelayedBusy
@@ -392,7 +395,7 @@ fun SettingsScreen(
     ) {
         item {
             // Keep the import controls composed while scrolling; their in-progress copy owns this lifetime.
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(if (desktop) 0.dp else 16.dp)) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(if (desktop) 0.dp else 24.dp)) {
                 RetainedSettingsCategory(!desktop || settingsCategory == 0) {
                 SettingsSection("阅读", sourceBackdrop) {
                     SettingsDisclosure("阅读顺序", when (preferences.mode) {
@@ -549,7 +552,7 @@ fun SettingsScreen(
                                 SettingsRowIcon(Icons.Outlined.SystemUpdate)
                                 Spacer(Modifier.width(12.dp))
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text("软件更新", style = MaterialTheme.typography.bodyMedium, color = foreground)
+                                    Text("软件更新", style = MaterialTheme.typography.titleSmall, color = foreground)
                                     val version = update.release?.let { "v${platformVersion(LocalContext.current)} → ${it.versionName}" }
                                         ?: "v${platformVersion(LocalContext.current)}"
                                     Text(listOfNotNull(version, checked).joinToString(" · "),
@@ -835,9 +838,8 @@ private fun WebDavBackupDialog(
                 Column(Modifier.fillMaxWidth().heightIn(max = height).padding(horizontal = 16.dp, vertical = 8.dp)) dialogBody@{
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.CloudSync, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-                        Text(if (connectionOnly) "WebDAV 连接" else if (pendingUpload == null) "WebDAV 备份" else "确认上传备份",
-                            Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.titleMedium,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        PreferenceHeading(if (connectionOnly) "WebDAV 连接" else if (pendingUpload == null) "WebDAV 备份" else "确认上传备份",
+                            Modifier.weight(1f).padding(start = 10.dp))
                         val closeLabel = if (pendingUpload == null) "关闭备份" else "取消上传"
                         MotionIconButton(onClick = dismissStep, enabled = visible, modifier = Modifier.size(44.dp), tooltip = closeLabel) {
                             Icon(Icons.Outlined.Close, closeLabel, Modifier.size(19.dp))
@@ -1003,7 +1005,7 @@ private fun BackupRestoreDialog(
             ReadingBackupPanel(backdrop, Modifier.padding(horizontal = 12.dp).fillMaxWidth()) {
                 Column(Modifier.heightIn(max = LocalMangaWindow.current.height * .84f)
                     .padding(horizontal = 18.dp, vertical = 12.dp)) {
-                    Text("恢复阅读备份", Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.titleMedium)
+                    PreferenceHeading("恢复阅读备份", Modifier.padding(vertical = 6.dp))
                     Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         val date = restore.info.createdAt.takeIf { it > 0 }?.let {
@@ -1062,36 +1064,40 @@ private fun webDavStatusDetail(config: WebDavBackupConfig, busy: String?): Strin
 }
 
 @Composable
-private fun settingsInputColors() = OutlinedTextFieldDefaults.colors(
-    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-    disabledTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-    focusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
-    unfocusedBorderColor = Color.Transparent,
-    disabledBorderColor = Color.Transparent,
-)
+internal fun settingsInputColors(): TextFieldColors {
+    val colors = MaterialTheme.colorScheme
+    val resting = lerp(colors.surface, colors.onSurface, .045f)
+    return OutlinedTextFieldDefaults.colors(
+        focusedContainerColor = lerp(colors.surface, colors.primary, .065f),
+        unfocusedContainerColor = resting, disabledContainerColor = resting,
+        disabledTextColor = colors.onSurfaceVariant,
+        focusedBorderColor = colors.primary, unfocusedBorderColor = Color.Transparent,
+        disabledBorderColor = Color.Transparent,
+    )
+}
+
+@Composable
+internal fun PreferenceHeading(title: String, modifier: Modifier = Modifier, maxLines: Int = 2) {
+    Text(title, modifier.semantics { heading() }, color = MaterialTheme.colorScheme.onSurface,
+        style = MaterialTheme.typography.titleLarge.copy(lineBreak = LineBreak.Heading, letterSpacing = (-.25f).sp),
+        fontWeight = FontWeight.SemiBold, maxLines = maxLines, overflow = TextOverflow.Ellipsis)
+}
 
 @Composable
 private fun SettingsSection(title: String, backdrop: HazeState?, content: @Composable ColumnScope.() -> Unit) {
     val colors = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(20.dp)
+    val shape = RoundedCornerShape(22.dp)
     val body: @Composable () -> Unit = {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp), content = content)
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp), content = content)
     }
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(title, style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .8f),
-            fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 4.dp))
-        val surfaceModifier = Modifier.fillMaxWidth()
-            .softSurfaceShadow(shape, colors.surface.luminance() > .5f, strength = .48f)
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        PreferenceHeading(title, Modifier.padding(start = 16.dp))
         if (backdrop != null) {
-            // The root source ancestor excludes itself; PANEL samples the lower wallpaper source.
-            LiquidGlassSurface(state = backdrop, modifier = surfaceModifier, cornerRadius = 20.dp,
+            LiquidGlassSurface(state = backdrop, modifier = Modifier.fillMaxWidth(), cornerRadius = 22.dp,
                 role = GlassSurfaceRole.PANEL, elevation = 0.dp) { body() }
         } else {
-            Surface(surfaceModifier, shape = shape, color = lerp(colors.background, colors.surface, .85f),
+            Surface(Modifier.fillMaxWidth(), shape = shape, color = colors.surface,
                 tonalElevation = 0.dp) { body() }
         }
     }
@@ -1125,35 +1131,36 @@ internal fun SettingsDisclosure(
                 .clickable(interactionSource = interaction, indication = null,
                     role = if (compact) Role.Button else null, onClick = onToggle)
                 .motionPress(interaction, pressedScale = .99f)
-                .heightIn(min = if (compact) 44.dp else 48.dp).padding(vertical = 6.dp),
+                .heightIn(min = if (compact) 44.dp else 52.dp).padding(vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 12.dp)) {
-                SettingsRowIcon(icon)
+                SettingsRowIcon(icon, selected = expanded)
                 if (stacked) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(title, style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
+                        Text(title, style = MaterialTheme.typography.titleSmall, color = colors.onSurface)
                         if (value.isNotBlank()) Text(value, style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            color = colors.onSurfaceVariant)
                     }
                 } else {
-                    Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                    Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
                         color = colors.onSurface, maxLines = if (compact) 1 else Int.MAX_VALUE,
                         overflow = if (compact) TextOverflow.Ellipsis else TextOverflow.Clip)
-                    Text(value, Modifier.weight(.8f, fill = false).widthIn(max = 132.dp),
-                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                    if (value.isNotBlank()) Text(value, Modifier.weight(.85f), textAlign = TextAlign.End,
+                        style = MaterialTheme.typography.bodySmall, color = if (expanded) colors.primary else colors.onSurfaceVariant,
                         maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
                 }
                 if (compact && modified) Box(Modifier.size(4.dp).clip(CircleShape)
-                    .background(colors.onSurfaceVariant.copy(alpha = .65f)))
-                Box(Modifier.width(if (compact) 16.dp else 44.dp).height(32.dp), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp)
-                        .graphicsLayer { rotationZ = 90f * reveal.value }, tint = colors.onSurfaceVariant.copy(alpha = .65f))
+                    .background(colors.primary))
+                Box(Modifier.width(16.dp).height(32.dp), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp)
+                        .graphicsLayer { rotationZ = 90f * reveal.value }, tint = colors.onSurfaceVariant)
                 }
             }
         }
-        if (compact) BoxWithConstraints(Modifier.fillMaxWidth()) {
-            header(maxWidth < 300.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f))
-        } else header(false)
+        if (value.isBlank()) header(false) else BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val minimum = if (compact) 300.dp else 260.dp
+            header(maxWidth < minimum * LocalDensity.current.fontScale.coerceAtLeast(1f))
+        }
         Column(Modifier.fillMaxWidth().clipToBounds().motionInputGate(expanded)
             .layout { measurable, constraints ->
                 // Keep the composed child alive for imports, but do not measure it when closed.
@@ -1172,8 +1179,11 @@ internal fun SettingsDisclosure(
 }
 
 @Composable
-private fun SettingsRowIcon(icon: ImageVector) {
-    Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+internal fun SettingsRowIcon(icon: ImageVector, selected: Boolean = false) {
+    val colors = MaterialTheme.colorScheme
+    Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) {
+        Icon(icon, null, Modifier.size(19.dp), tint = if (selected) colors.primary else colors.onSurfaceVariant)
+    }
 }
 
 
@@ -1198,13 +1208,13 @@ internal fun SettingsToggle(title: String, checked: Boolean, icon: ImageVector, 
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .toggleable(checked, enabled = enabled, interactionSource = interaction, indication = null,
-                role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = 48.dp),
+                role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = 52.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         SettingsRowIcon(icon)
         Text(title, Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium, color = colors.onSurface.copy(alpha = if (enabled) 1f else .45f))
+            style = MaterialTheme.typography.titleSmall, color = colors.onSurface.copy(alpha = if (enabled) 1f else .45f))
         Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
             MotionSwitchThumb(checked, interaction)
         }
@@ -1212,29 +1222,33 @@ internal fun SettingsToggle(title: String, checked: Boolean, icon: ImageVector, 
 }
 
 @Composable
-private fun SettingsLinkRow(title: String, detail: String, icon: ImageVector, external: Boolean = false, inlineDetail: Boolean = false, compact: Boolean = false, onClick: () -> Unit) {
+internal fun SettingsLinkRow(title: String, detail: String, icon: ImageVector, external: Boolean = false,
+    inlineDetail: Boolean = false, compact: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-        .motionPress(interaction, pressedScale = .99f).heightIn(min = if (compact) 48.dp else 56.dp)
-            .padding(vertical = if (compact) 6.dp else 8.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        SettingsRowIcon(icon)
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
-            if (!inlineDetail && detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant)
-        }
-        if (inlineDetail && detail.isNotBlank()) Text(detail,
-            modifier = Modifier.weight(.8f, fill = false).widthIn(max = 160.dp),
-            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
-            maxLines = 2, overflow = TextOverflow.Ellipsis)
-        Box(Modifier.width(44.dp).height(32.dp), contentAlignment = Alignment.Center) {
+    val row: @Composable (Boolean) -> Unit = { trailing ->
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+            .motionPress(interaction, enabled = enabled, pressedScale = .99f)
+            .then(if (enabled) Modifier else Modifier.graphicsLayer { alpha = .5f })
+            .heightIn(min = if (compact) 48.dp else 56.dp).padding(vertical = if (compact) 6.dp else 8.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            SettingsRowIcon(icon)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, color = colors.onSurface)
+                if (!trailing && detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant)
+            }
+            if (trailing) Text(detail, Modifier.weight(.85f), textAlign = TextAlign.End,
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
             Icon(if (external) Icons.AutoMirrored.Outlined.OpenInNew else Icons.Outlined.ChevronRight,
-                contentDescription = null, tint = colors.onSurfaceVariant.copy(alpha = .7f), modifier = Modifier.size(18.dp))
+                contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(16.dp))
         }
     }
+    if (inlineDetail && detail.isNotBlank()) BoxWithConstraints(Modifier.fillMaxWidth()) {
+        row(maxWidth >= 260.dp * LocalDensity.current.fontScale.coerceAtLeast(1f))
+    } else row(false)
 }
 
 private fun settingsBytes(bytes: Long): String = when {

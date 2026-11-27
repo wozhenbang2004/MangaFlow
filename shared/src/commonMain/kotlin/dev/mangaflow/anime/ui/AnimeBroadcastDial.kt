@@ -66,6 +66,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.lerp
 import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
@@ -231,7 +233,7 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
     val colors = MaterialTheme.colorScheme
     val ink = colors.onSurface
     val caption = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum")
-    val value = MaterialTheme.typography.titleSmall.copy(fontFeatureSettings = "tnum")
+    val value = MaterialTheme.typography.titleMedium.copy(fontSize = 18.sp, lineHeight = 23.sp, fontFeatureSettings = "tnum")
     val height = maxOf(58.dp, with(density) { caption.lineHeight.toDp() + value.lineHeight.toDp() + 24.dp })
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Row(Modifier.widthIn(max = 458.dp).fillMaxWidth().motionInputGate(active)
@@ -248,7 +250,7 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
                 Icon(if (rtl) Icons.Outlined.ChevronRight else Icons.Outlined.ChevronLeft, previous, Modifier.size(18.dp))
             }
             BoxWithConstraints(Modifier.weight(1f).height(height).clip(RoundedCornerShape(14.dp))
-                .background(colors.surfaceContainerHigh.copy(alpha = if (contrast) 1f else .84f))
+                .background(if (contrast) colors.surfaceContainerHigh else colors.surfaceContainerLow)
                 .semantics {
                     contentDescription = label
                     stateDescription = if (selectionVisible) mark(anchor).description else noSelection
@@ -270,7 +272,7 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
                             scaleY = (stretch.pow(-.65f) * (1f - pressure.value)).coerceIn(.88f, 1.025f)
                         }
                     }
-                    .background(ink.copy(alpha = if (contrast) .16f else .065f), lens)
+                    .background(if (contrast) colors.primaryContainer else lerp(colors.surface, colors.primary, .085f), lens)
                     .then(if (keyboardFocus) Modifier.border(1.dp, ink.copy(alpha = if (contrast) 1f else .50f), lens) else Modifier))
                 HorizontalPager(state = pager, modifier = Modifier.fillMaxSize().then(drag),
                     pageSize = PageSize.Fixed(pageWidth), contentPadding = PaddingValues(horizontal = inset),
@@ -302,7 +304,7 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
                                 val distance = abs(page - pager.currentPage - pager.currentPageOffsetFraction +
                                     (if (rtl) -i else i).toFloat() / DialTicksPerPage)
                                 val contact = (1f - distance * DialTicksPerPage).coerceIn(0f, 1f)
-                                drawLine(ink.copy(alpha = if (contrast) 1f else .24f + .52f * contact),
+                                drawLine(ink.copy(alpha = if (contrast) 1f else .18f + .46f * contact),
                                     Offset(x, 1.dp.toPx()), Offset(x, (if (i == 0) 7.dp else 4.dp).toPx()),
                                     (if (i == 0) 1.5.dp else 1.dp).toPx(), StrokeCap.Round)
                             }
@@ -313,7 +315,7 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
                     // Clock-style fixed index. Marks travel under it; the index catches each detent visually.
                     val tickOffset = pager.currentPageOffsetFraction * DialTicksPerPage
                     val contact = (1f - 2f * abs(tickOffset - tickOffset.roundToInt())).coerceIn(0f, 1f)
-                    drawLine(ink.copy(alpha = if (contrast) 1f else .38f + .45f * contact), Offset(size.width / 2, 1.dp.toPx()),
+                    drawLine(colors.primary.copy(alpha = if (contrast) 1f else .67f + .33f * contact), Offset(size.width / 2, 1.dp.toPx()),
                         Offset(size.width / 2, size.height), size.width, StrokeCap.Round)
                 }
             }

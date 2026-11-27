@@ -244,8 +244,7 @@ internal fun SourceImportSheet(
             .imePadding().navigationBarsPadding()) {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Text(if (prepared == null) "导入第三方源" else "确认来源", Modifier.weight(1f),
-                    fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                PreferenceHeading(if (prepared == null) "导入第三方源" else "确认来源", Modifier.weight(1f))
                 if (prepared == null) DownloadRouteControl(DownloadCategory.SOURCE_PACKAGES, enabled = busy == null, backdrop = backdrop)
                 MotionIconButton(onClick = { activeJob?.cancel(); dismiss() }) {
                     Icon(Icons.Outlined.Close, "关闭来源导入", Modifier.size(20.dp))
@@ -431,7 +430,7 @@ internal fun SourceImportSheet(
                 } else {
                     item(key = "review") {
                         Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                            Text(bundle.metadata.optString("name"), fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            Text(bundle.metadata.optString("name"), style = MaterialTheme.typography.titleMedium)
                             ImportDetail("网站", bundle.metadata.optString("baseUrl"))
                             ImportDetail("版本", listOf(bundle.metadata.optString("version"), bundle.metadata.optString("lang"))
                                 .filter(String::isNotBlank).joinToString(" · ").ifBlank { "未提供" })
@@ -518,10 +517,10 @@ internal fun SourceImportSheet(
 private fun ImportDetail(label: String, value: String) {
     if (value.isBlank()) return
     val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(label, Modifier.width(32.dp), color = colors.onSurfaceVariant, fontSize = 11.sp)
-        Text(value, Modifier.weight(1f), color = colors.onSurface, fontSize = 12.sp,
-            maxLines = 3, overflow = TextOverflow.Ellipsis)
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(label, Modifier.width(42.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f)),
+            color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        Text(value, Modifier.weight(1f), color = colors.onSurface, style = MaterialTheme.typography.bodyMedium)
     }
 }
 

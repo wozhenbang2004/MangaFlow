@@ -29,7 +29,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
@@ -41,10 +40,8 @@ import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeUnifiedSearchState
 import dev.mangaflow.anime.canLoadMoreSearch
-import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.DesktopContextMenuArea
 import dev.mangaflow.ui.DesktopMenuAction
-import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.motion.BottomPullLoadIndicator
 import dev.mangaflow.ui.motion.BottomPullLoadState
 import dev.mangaflow.ui.motion.MotionBottomSheet
@@ -237,12 +234,11 @@ internal fun AnimeSearchWorkRow(
         .combinedClickable(enabled = active, interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = openLabel, onClick = onOpen, onLongClick = onLongClick,
             onLongClickLabel = if (onLongClick == null) null else "番剧操作")
-        .padding(horizontal = 6.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-        AnimePoster(subject, Modifier.size(44.dp, 64.dp))
+        .padding(horizontal = 4.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(13.dp)) {
+        AnimePoster(subject, Modifier.size(54.dp, 81.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(subject.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
-                fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(subject.title, style = animeWorkTitleStyle(), maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (original != null) Text(original, style = MaterialTheme.typography.labelSmall,
                 color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (facts.isNotBlank()) Text(facts, style = MaterialTheme.typography.labelSmall,
@@ -255,7 +251,6 @@ internal fun AnimeSearchWorkRow(
                 else if (sources.size > 3) AnimeQuietLabel("+${sources.size - 3}")
             }
         }
-        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp), tint = muted)
     }
 }
 

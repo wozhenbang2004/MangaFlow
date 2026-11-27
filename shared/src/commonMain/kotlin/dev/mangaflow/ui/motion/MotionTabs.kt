@@ -42,6 +42,7 @@ import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.RectangleShape
@@ -73,6 +74,7 @@ internal fun MotionNavigationColumn(
     itemCount: Int,
     modifier: Modifier = Modifier,
     selectionVisible: Boolean = true,
+    routeMarker: Boolean = false,
     item: @Composable (Int, Modifier) -> Unit,
 ) {
     if (itemCount <= 0) return
@@ -82,7 +84,15 @@ internal fun MotionNavigationColumn(
     val bottom = remember { Animatable(index + 1f) }
     val heights = remember(itemCount) { mutableStateMapOf<Int, Int>() }
     val motion = LocalMotionEnabled.current
-    val indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f)
+    val colors = MaterialTheme.colorScheme
+    val preferences = LocalPlatformAccessibilityPreferences.current
+    val indicator = colors.onSurface.copy(alpha = .075f)
+    val mark = if (preferences.increaseContrast) colors.onSurface else colors.primary
+    val solid = preferences.increaseContrast || preferences.reduceTransparency
+    val dark = colors.surface.luminance() < .5f
+    val routeStart = if (solid) lerp(colors.surface, mark, .17f) else mark.copy(alpha = if (dark) .18f else .13f)
+    val routeEnd = if (solid) routeStart else mark.copy(alpha = if (dark) .072f else .045f)
+    val rowGap = if (routeMarker) 2.dp else 6.dp
     LaunchedEffect(motion, itemCount) {
         snapshotFlow { latest.value }.collect { target ->
             val down = target > top.value
@@ -107,13 +117,18 @@ internal fun MotionNavigationColumn(
     Column(modifier.fillMaxWidth().padding(vertical = 3.dp).drawWithCache {
         if (!selectionVisible || heights.size != itemCount) return@drawWithCache onDrawBehind { }
         var y = 0f
-        val gap = 6.dp.roundToPx().toFloat()
+        val gap = rowGap.roundToPx().toFloat()
         val starts = FloatArray(itemCount) { i ->
             y.also { y += heights.getValue(i) + gap }
         }
         val ends = FloatArray(itemCount) { i -> starts[i] + heights.getValue(i) }
         val restingHeight = heights.getValue(index).toFloat().coerceAtLeast(1f)
         val cornerRadius = CornerRadius(14.dp.toPx())
+        val rtl = layoutDirection == LayoutDirection.Rtl
+        val wash = if (routeMarker) Brush.horizontalGradient(
+            if (rtl) listOf(routeEnd, routeStart) else listOf(routeStart, routeEnd)) else null
+        val markWidth = 3.dp.toPx()
+        val markX = if (rtl) size.width - 3.dp.toPx() - markWidth else 3.dp.toPx()
         fun interpolate(position: Float, values: FloatArray): Float {
             val value = position.coerceIn(0f, itemCount - 1f)
             val from = value.toInt()
@@ -126,10 +141,18 @@ internal fun MotionNavigationColumn(
             // A long jump should travel between rows, not turn into a full-column selection panel.
             val height = (end - start).coerceIn(restingHeight * .9f, restingHeight * 1.22f)
             val offset = ((start + end - height) / 2f).coerceIn(0f, (size.height - height).coerceAtLeast(0f))
-            drawRoundRect(indicator, topLeft = Offset(0f, offset), size = Size(size.width, height),
-                cornerRadius = cornerRadius)
+            val origin = Offset(0f, offset)
+            val area = Size(size.width, height)
+            if (wash == null) {
+                drawRoundRect(indicator, topLeft = origin, size = area, cornerRadius = cornerRadius)
+            } else {
+                drawRoundRect(wash, topLeft = origin, size = area, cornerRadius = cornerRadius)
+                val markHeight = minOf(18.dp.toPx(), height * .36f)
+                drawRoundRect(mark, Offset(markX, offset + (height - markHeight) / 2f),
+                    Size(markWidth, markHeight), CornerRadius(markWidth / 2f))
+            }
         }
-    }.selectableGroup(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    }.selectableGroup(), verticalArrangement = Arrangement.spacedBy(rowGap)) {
         repeat(itemCount) { i -> item(i, Modifier.onSizeChanged { heights[i] = it.height }) }
     }
 }

@@ -107,10 +107,10 @@ internal fun ContentProfileAccountScreen(
                     catch (cancel: CancellationException) { throw cancel }
                     catch (_: Exception) { capabilities = null; capabilityUnavailable = true }
                 }
-                Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(top = 8.dp, bottom = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ChapterSourceLogo(source.id, source.name, Modifier.size(32.dp))
-                    Text(source.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                Row(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    ChapterSourceLogo(source.id, source.name, Modifier.size(44.dp))
+                    PreferenceHeading(source.name, Modifier.weight(1f))
                     MotionIconButton(onClick = { onInspect(source.id) }, enabled = enabled,
                         modifier = Modifier.size(44.dp), tooltip = "${source.name}设置") {
                         Icon(Icons.Outlined.Tune, "${source.name}设置", Modifier.size(19.dp))

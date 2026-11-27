@@ -32,10 +32,10 @@ fun LaunchFailureMessage(report: String, onRetry: () -> Unit) {
         .safeDrawingPadding().padding(horizontal = 20.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             EmptyMessage("应用上次意外退出", "可复制错误详情，也可以重试打开。",
-                action = if (copied) "已复制" else "复制错误详情") {
+                action = "重试打开", onAction = onRetry)
+            TextButton(onClick = {
                 copied = copyText(context, "MangaFlow 错误详情", report)
-            }
-            TextButton(onClick = onRetry) { Text("重试打开") }
+            }) { Text(if (copied) "已复制" else "复制错误详情") }
         }
     }
 }

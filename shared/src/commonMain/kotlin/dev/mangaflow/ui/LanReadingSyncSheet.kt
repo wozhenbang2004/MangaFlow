@@ -45,7 +45,7 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
             .heightIn(max = (LocalMangaWindow.current.height - 64.dp).coerceAtLeast(200.dp))
             .padding(horizontal = 20.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("局域网阅读同步", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                PreferenceHeading("局域网阅读同步", Modifier.weight(1f))
                 MotionIconButton(onClick = dismiss, tooltip = "关闭", modifier = Modifier.size(44.dp)) {
                     Icon(Icons.Outlined.Close, "关闭", Modifier.size(18.dp))
                 }
@@ -85,13 +85,14 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                 } }
                 val pairing = state.pairing
                 if (pairing != null) item(key = "pairing:${pairing.session}") {
-                    Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(12.dp))
-                        .padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("与 ${pairing.name} 配对", style = MaterialTheme.typography.titleSmall)
+                    Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(16.dp))
+                        .padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("与 ${pairing.name} 配对", style = MaterialTheme.typography.titleMedium)
                         Text("请面对面核对两端校验码完全相同。双方确认后，才开始交换阅读数据。",
                             fontSize = 12.sp, color = colors.onSurfaceVariant)
                         Text(pairing.code.split(' ').chunked(4).joinToString("\n") { it.joinToString(" ") },
-                            fontFamily = FontFamily.Monospace, fontSize = 16.sp, lineHeight = 25.sp)
+                            fontFamily = FontFamily.Monospace, fontSize = 18.sp, lineHeight = 28.sp,
+                            modifier = Modifier.padding(vertical = 4.dp), color = colors.onSurface)
                         if (pairing.confirmedHere) Text("本机已确认，等待另一台设备确认。", fontSize = 12.sp,
                             color = colors.onSurfaceVariant)
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
@@ -106,7 +107,7 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                     }
                 }
                 if (paired.isNotEmpty()) item(key = "paired-title") {
-                    Text("已配对设备", style = MaterialTheme.typography.titleSmall)
+                    Text("已配对设备", style = MaterialTheme.typography.titleMedium)
                 }
                 items(paired, key = { "paired:${it.id}" }) { device ->
                     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {

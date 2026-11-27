@@ -204,7 +204,7 @@ private fun DirectorySheet(choices: List<DirectoryChoice>, current: DirectoryCho
 @Composable
 private fun DirectoryHeading(label: String) {
     Text(label, Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 2.dp).semantics { heading() },
-        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
 }
 
 @Composable
@@ -212,7 +212,7 @@ private fun DirectoryRow(choice: DirectoryChoice, selected: Boolean, detail: Str
     val colors = MaterialTheme.colorScheme
     val interaction = remember(choice.source.id, choice.source.revision) { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-        .background(if (selected) colors.onSurface.copy(alpha = .075f) else Color.Transparent)
+        .background(if (selected) colors.primaryContainer else Color.Transparent)
         .selectable(selected, interactionSource = interaction, indication = null, role = Role.RadioButton,
             onClick = onClick)
         .motionPress(interaction, pressedScale = .98f).heightIn(min = 46.dp)
@@ -222,11 +222,12 @@ private fun DirectoryRow(choice: DirectoryChoice, selected: Boolean, detail: Str
             AnimeSourceMark(choice.source.id, choice.source.name, size = 18.dp)
         }
         Column(Modifier.weight(1f)) {
-            Text(choice.source.name, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(choice.source.name, style = MaterialTheme.typography.titleMedium,
+                color = if (selected) colors.onPrimaryContainer else colors.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (detail != null) Text(detail, style = MaterialTheme.typography.labelSmall,
                 color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
-        if (selected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp), tint = colors.onSurface)
+        if (selected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp), tint = colors.onPrimaryContainer)
     }
 }
 
@@ -234,7 +235,7 @@ private fun DirectoryRow(choice: DirectoryChoice, selected: Boolean, detail: Str
 private fun DirectorySearch(query: String, onChange: (String) -> Unit, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
     val focus = LocalFocusManager.current
-    Row(modifier.heightIn(min = 44.dp).background(colors.onSurface.copy(alpha = .055f), RoundedCornerShape(14.dp))
+    Row(modifier.heightIn(min = 44.dp).background(colors.surfaceContainerLow, RoundedCornerShape(14.dp))
         .padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Outlined.Search, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
         BasicTextField(query, onChange, singleLine = true, textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),

@@ -11,9 +11,12 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.danmaku.*
@@ -62,12 +65,21 @@ internal fun AnimeDanmakuPane(section: AnimePlayerPanel, controller: AnimeContro
                     onCheckedChange = { control.updateSettings(state.settings.copy(enabled = it)) }) }
                 item {
                     val matched = state.selectionLabel
-                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp))
-                        .background(MaterialTheme.colorScheme.surfaceContainerLow).padding(14.dp),
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(17.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = 14.dp, vertical = 11.dp),
                         verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        AnimeSectionTitle(if (state.loading) "正在加载本集弹幕" else matched ?: "本集还没有弹幕",
-                            if (state.loading) matched else if (matched != null) "${state.totalCount} 条弹幕" else
-                                current?.let(::animeEpisodeLabel))
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(if (state.loading) "正在加载本集弹幕" else matched ?: "本集还没有弹幕",
+                                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                                maxLines = 3, overflow = TextOverflow.Ellipsis)
+                            val caption = if (state.loading) matched else current?.let(::animeEpisodeLabel)?.takeUnless { it == matched }
+                            if (!caption.isNullOrBlank()) AnimeQuietLabel(caption)
+                        }
+                        if (!state.loading && matched != null) Row(verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(mangaNumberText(state.totalCount.toString()), style = MaterialTheme.typography.titleLarge)
+                            Text("条弹幕", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+                        }
                         if (screen.sourceDanmakuAvailable) MotionTextButton(onClick = controller::loadCurrentSourceDanmaku,
                             enabled = !state.loading, modifier = Modifier.heightIn(min = 44.dp)) {
                             Text("使用当前线路的弹幕")

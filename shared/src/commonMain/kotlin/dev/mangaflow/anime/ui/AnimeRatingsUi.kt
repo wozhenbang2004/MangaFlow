@@ -29,11 +29,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -184,9 +184,10 @@ private fun AnimeRatingsSheet(request: AnimeRatingRequest, controller: AnimeRati
             Row(Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 12.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("各站评分", style = MaterialTheme.typography.titleLarge)
-                    Text(request.title, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text("各站评分", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(request.title, Modifier.semantics { heading() }, style = animeWorkTitleStyle(large = true),
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
                 request.subject?.let { subject ->
                     MotionIconButton(onClick = { controller.refresh(subject) }, enabled = !refreshing,
@@ -235,15 +236,16 @@ private fun AnimeRatingProviderRow(
         score == null -> "暂无评分"
         else -> null
     }
-    BoxWithConstraints(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(colors.onSurface.copy(alpha = .045f))
-        .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = if (status == null) 4.dp else 8.dp)) {
+    BoxWithConstraints(Modifier.fillMaxWidth()
+        .padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = if (status == null) 6.dp else 10.dp)) {
         val separateScore = maxWidth < 240.dp * LocalDensity.current.fontScale
         Column(Modifier.fillMaxWidth()) {
             Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ReviewSourceMark(animeDiscoveryScoreSourceId(provider), size = 20.dp)
+                Box(Modifier.size(34.dp).background(colors.surfaceContainerLow, RoundedCornerShape(10.dp)),
+                    contentAlignment = Alignment.Center) { ReviewSourceMark(animeDiscoveryScoreSourceId(provider), size = 20.dp) }
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(name, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     if (score != null) {
                         if (separateScore) AnimeRatingValue(score)
                         score.ratingCount?.let { count ->
@@ -269,7 +271,7 @@ private fun AnimeRatingProviderRow(
                     else -> Unit
                 }
             }
-            if (status != null) Text(status, Modifier.padding(start = 4.dp, end = 12.dp)
+            if (status != null) Text(status, Modifier.padding(start = 44.dp, end = 8.dp)
                 .semantics { liveRegion = LiveRegionMode.Polite },
                 style = MaterialTheme.typography.bodySmall,
                 color = if (failure != null && !refreshing) colors.error else colors.onSurfaceVariant)
@@ -284,7 +286,7 @@ private fun AnimeRatingValue(score: AnimeSourceScore) {
             contentDescription = "评分 ${animeDiscoveryScoreText(score)}"
         }) {
         Text(detailMetricScore(score.rating), Modifier.alignByBaseline(),
-            style = mangaMetricValueStyle(20.sp, 26.sp), maxLines = 1, softWrap = false)
+            style = mangaMetricValueStyle(23.sp, 29.sp), maxLines = 1, softWrap = false)
         Text("/ ${score.scale}", Modifier.alignByBaseline(), style = mangaMetricValueStyle(12.sp, 16.sp),
             color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, softWrap = false)
     }

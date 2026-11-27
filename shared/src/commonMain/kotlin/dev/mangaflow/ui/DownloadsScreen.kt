@@ -869,7 +869,8 @@ fun DownloadsScreen(
                             if (expanded && !desktopSplit) items(
                                 chapterIds.mapNotNull(entriesById::get).chunked(downloadChapterColumns),
                                 key = { "chapters:" + it.first().id }, contentType = { "download-chapter-grid" }) { row ->
-                                Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
+                                Row(Modifier.fillMaxWidth().padding(start = if (downloadChapterColumns == 1) 24.dp else 12.dp,
+                                    end = 4.dp, top = 3.dp, bottom = 3.dp),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     row.forEach { entry ->
                                         Box(Modifier.weight(1f)) {
@@ -1174,19 +1175,22 @@ private fun DownloadQueueSummary(
     val failed = entries.count { it.status == DownloadStatus.FAILED }
     val paused = entries.count { it.status == DownloadStatus.PAUSED }
     val working = running + queued > 0
-    val summary = buildList {
-        if (running > 0) add("$running 话下载中")
-        if (queued > 0) add("$queued 话等待")
-        if (failed > 0) add("$failed 话需处理")
-        if (paused > 0) add("$paused 话暂停")
-    }.joinToString(" · ")
-    Row(Modifier.fillMaxWidth().padding(bottom = 6.dp).heightIn(min = 44.dp),
+    val statuses = listOf(running to "话下载中", queued to "话等待", failed to "话需处理", paused to "话暂停")
+        .filter { it.first > 0 }
+    val (count, phase) = statuses.firstOrNull() ?: return
+    Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 9.dp).heightIn(min = 52.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Icon(if (working) Icons.Outlined.Downloading else Icons.Outlined.Pause, null,
-            Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-        Text(mangaNumberText(summary), Modifier.weight(1f),
-            style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.weight(1f).semantics(mergeDescendants = true) {},
+            verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text(count.toString(), Modifier.alignByBaseline(), style = mangaMetricValueStyle(29.sp, 35.sp),
+                    color = if (!working && failed > 0) colors.error else colors.onSurface)
+                Text(phase, Modifier.alignByBaseline(), style = MaterialTheme.typography.titleSmall)
+            }
+            if (statuses.size > 1) Text(mangaNumberText(statuses.drop(1).joinToString(" · ") { "${it.first} ${it.second}" }),
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        }
         val action = when {
             working -> "全部暂停" to onPause
             hasRetryable -> "重试失败" to onRetry
@@ -1254,7 +1258,7 @@ private fun DesktopDownloadChapterPane(
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(entries.firstOrNull()?.manga?.title.orEmpty(),
-                    fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleMedium,
+                    fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleLarge,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text("${entries.size} 话 · ${downloadBytes(entries.sumOf { it.downloadedBytes })}",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)

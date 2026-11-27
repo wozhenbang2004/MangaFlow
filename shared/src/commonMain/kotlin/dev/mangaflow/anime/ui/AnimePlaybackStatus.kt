@@ -223,18 +223,19 @@ internal fun AnimePlaybackStatus(
             val rowWidth = if (quiet) Modifier else Modifier.fillMaxWidth()
             Row(rowWidth.heightIn(min = if (quiet) 26.dp else 44.dp).padding(start = 9.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                Icon(Icons.Outlined.QueryStats, null, Modifier.size(13.dp), tint = Color.White.copy(alpha = .82f))
+                Icon(Icons.Outlined.QueryStats, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(readouts.joinToString("  ·  ") { it.value },
                     Modifier.weight(1f, fill = !quiet).horizontalScroll(summaryScroll, enabled = interactive)
                         .padding(end = 8.dp, top = 3.dp, bottom = 3.dp)
                         .semantics { contentDescription = readouts.joinToString("；") { it.description } },
-                    maxLines = 1, color = Color.White.copy(alpha = .94f),
+                    maxLines = 1, color = MaterialTheme.colorScheme.onSurface,
                     style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"))
                 if (!quiet && canExpand) MotionIconButton(onClick = { details = !details; onInteraction() },
                     modifier = Modifier.size(44.dp), enabled = interactive,
                     tooltip = if (expanded) "收起观看读数" else "展开观看读数") {
                     Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                        if (expanded) "收起观看读数" else "展开 ${readouts.size} 项观看读数", Modifier.size(17.dp), tint = Color.White)
+                        if (expanded) "收起观看读数" else "展开 ${readouts.size} 项观看读数", Modifier.size(17.dp),
+                        tint = MaterialTheme.colorScheme.onSurface)
                 }
             }
             if (expanded) EnhancementReadouts(readouts, quiet = false,

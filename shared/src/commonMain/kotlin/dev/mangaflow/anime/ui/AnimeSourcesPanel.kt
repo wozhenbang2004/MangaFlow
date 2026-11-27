@@ -1210,8 +1210,8 @@ private fun AnimeBoundSourceRow(sourceId: String, title: String, detail: String?
     val identity: @Composable () -> Unit = {
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text(title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 signal?.let { AnimeSourceSignal(it) }
             }
             if (detail != null) Text(detail, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
@@ -1225,8 +1225,9 @@ private fun AnimeBoundSourceRow(sourceId: String, title: String, detail: String?
             .motionPress(interaction, pressedScale = .99f)
             .semantics { stateDescription = if (expanded) "已展开" else "已收起" }
             .padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(36.dp), contentAlignment = Alignment.Center) { AnimeSourceMark(sourceId, title, size = 18.dp) }
-            val content = Modifier.weight(1f).padding(start = 7.dp, top = 5.dp, bottom = 5.dp)
+            Box(Modifier.size(34.dp).background(colors.surfaceContainerLow, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center) { AnimeSourceMark(sourceId, title, size = 18.dp) }
+            val content = Modifier.weight(1f).padding(start = 11.dp, top = 6.dp, bottom = 6.dp)
             if (inlineMetrics) Row(content, verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(Modifier.weight(1f)) { identity() }
@@ -1289,14 +1290,15 @@ private fun AnimeSourceProviderRow(sourceId: String, title: String, detail: Stri
             .clickable(enabled = enabled, interactionSource = interaction, indication = null,
                 role = Role.Button, onClickLabel = onClickLabel, onClick = onClick)
             .motionPress(interaction, enabled = enabled, pressedScale = .98f)
-            .padding(horizontal = 8.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            if (showMark) Box(Modifier.width(38.dp), contentAlignment = Alignment.Center) {
+            .padding(horizontal = 6.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+            if (showMark) Box(Modifier.size(34.dp).background(colors.surfaceContainerLow, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center) {
                 AnimeSourceMark(sourceId, title)
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text(title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.bodyMedium, maxLines = 2,
+                    Text(title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, maxLines = 2,
                         overflow = TextOverflow.Ellipsis, color = colors.onSurface.copy(alpha = if (enabled) 1f else .55f))
                     signal?.let { AnimeSourceSignal(it) }
                 }

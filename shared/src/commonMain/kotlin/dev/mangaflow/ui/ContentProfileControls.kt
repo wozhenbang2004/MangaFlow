@@ -2,6 +2,8 @@ package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -34,7 +36,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
@@ -48,7 +52,9 @@ import dev.mangaflow.storage.BodySourceRegistryEntry
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
 import dev.mangaflow.ui.motion.motionInputGate
 
 internal enum class ContentProfile(val key: String, val label: String, val title: String, val icon: ImageVector) {
@@ -68,31 +74,39 @@ internal fun ContentProfileSwitch(
     enabled: Boolean = true,
 ) {
     val scopeName = profile.title
+    val colors = MaterialTheme.colorScheme
+    val accessibility = LocalPlatformAccessibilityPreferences.current
+    val activeInk = if (accessibility.increaseContrast) colors.onSurface else colors.primary
+    val track = lerp(colors.surface, colors.primary, if (accessibility.increaseContrast) .22f else .11f)
+    val selectedPaper = colors.surface
     val sourceAction = if (profile == ContentProfile.ANIME) "管理片源" else "当前分区来源"
     val manage: @Composable () -> Unit = {
         MotionIconButton(onClick = onManage, enabled = enabled,
             modifier = Modifier.size(44.dp), tooltip = sourceAction,
         ) {
-            Icon(Icons.Outlined.Tune, sourceAction, Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(Icons.Outlined.Tune, sourceAction, Modifier.size(18.dp),
+                tint = colors.onSurfaceVariant)
         }
     }
     if (compact) {
         Column(modifier.fillMaxWidth().semantics { stateDescription = scopeName },
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            ContentProfile.entries.forEach { entry ->
-                val current = entry == profile
-                MotionIconButton(
-                    onClick = { if (!current) onSelect(entry) },
-                    modifier = Modifier.size(44.dp)
-                        .background(if (current) MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)
-                            else Color.Transparent, RoundedCornerShape(14.dp))
-                        .semantics { selected = current },
-                    enabled = enabled, tooltip = entry.title,
-                ) {
-                    Icon(entry.icon, entry.title, Modifier.size(20.dp),
-                        tint = if (current) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(Modifier.background(track, RoundedCornerShape(16.dp)).padding(vertical = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally) {
+                ContentProfile.entries.forEach { entry ->
+                    val current = entry == profile
+                    MotionIconButton(
+                        onClick = { if (!current) onSelect(entry) },
+                        modifier = Modifier.size(44.dp).semantics { selected = current },
+                        enabled = enabled, tooltip = entry.title,
+                    ) {
+                        Box(Modifier.size(35.dp).background(if (current) selectedPaper else Color.Transparent,
+                            RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                            Icon(entry.icon, entry.title, Modifier.size(19.dp),
+                                tint = if (current) activeInk else colors.onSurfaceVariant)
+                        }
+                    }
                 }
             }
             manage()
@@ -101,16 +115,33 @@ internal fun ContentProfileSwitch(
         Row(modifier.fillMaxWidth().semantics { stateDescription = scopeName },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            MotionTabs(
-                selected = profile.ordinal,
-                labels = ContentProfile.entries.map { it.label },
-                onSelect = { index ->
-                    val next = ContentProfile.entries[index]
-                    if (enabled && next != profile) onSelect(next)
-                },
-                modifier = Modifier.weight(1f).motionInputGate(enabled),
-                controlHeight = 44.dp, fontSize = 13.sp,
-            )
+            BoxWithConstraints(Modifier.weight(1f)) {
+                val fontScale = LocalDensity.current.fontScale
+                val showIcons = fontScale <= 1.3f &&
+                    maxWidth >= (32.dp + 28.dp * fontScale) * ContentProfile.entries.size
+                MotionTabs(
+                    selected = profile.ordinal,
+                    labels = ContentProfile.entries.map { it.label },
+                    onSelect = { index ->
+                        val next = ContentProfile.entries[index]
+                        if (enabled && next != profile) onSelect(next)
+                    },
+                    modifier = Modifier.fillMaxWidth().motionInputGate(enabled),
+                    foreground = activeInk, muted = colors.onSurfaceVariant, track = track, indicator = selectedPaper,
+                    fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+                    selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
+                    controlHeight = 44.dp, fontSize = 13.sp,
+                    itemContent = if (!showIcons) null else { index, current, ink ->
+                        val entry = ContentProfile.entries[index]
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Icon(entry.icon, null, Modifier.size(15.dp), tint = ink)
+                            Text(entry.label, style = MaterialTheme.typography.labelLarge, fontSize = 13.sp,
+                                fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal, color = ink,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    },
+                )
+            }
             manage()
         }
     }

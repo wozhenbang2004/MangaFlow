@@ -72,7 +72,7 @@ internal fun AnimeHistoryActionLine(playback: AnimeHistoryPlayback, updatedAt: L
     val colors = MaterialTheme.colorScheme
     val time = remember(updatedAt) { animeWatchRecordTime(updatedAt) }
     val playable = playback != AnimeHistoryPlayback.UNAVAILABLE
-    val ink = if (playable) colors.onSurface else colors.onSurfaceVariant
+    val ink = if (playable) colors.primary else colors.onSurfaceVariant
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         if (playable) Icon(if (playback == AnimeHistoryPlayback.REPLAY) Icons.Outlined.Replay else Icons.Outlined.PlayArrow,
             null, Modifier.size(14.dp), tint = ink)
@@ -203,14 +203,16 @@ private fun AnimeEpisodeHistoryRow(
     val name = remember(entry.subject.id, record, catalogued) { animeWatchedEpisodeName(entry, record, catalogued) }
     val shape = RoundedCornerShape(14.dp)
     Row(Modifier.fillMaxWidth().clip(shape)
-        .then(if (current) Modifier.background(colors.surfaceContainerLow) else Modifier)
+        .then(if (current) Modifier.background(colors.primaryContainer) else Modifier)
         .then(if (playback != AnimeHistoryPlayback.UNAVAILABLE) Modifier.motionPress(interaction, pressedScale = .985f)
             .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = playback.label, onClick = onOpen) else Modifier)
         .heightIn(min = 56.dp).padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(name, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(name, style = MaterialTheme.typography.titleMedium,
+                color = if (current) colors.onPrimaryContainer else colors.onSurface,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(listOfNotNull(
                 "上次看到".takeIf { current },
                 animeWatchPosition(record),

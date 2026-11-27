@@ -10,7 +10,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -34,7 +34,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.AuthorWorksState
@@ -66,15 +67,19 @@ internal fun AuthorWorksSheet(
     val colors = MaterialTheme.colorScheme
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background) { dismiss ->
         Column(Modifier.fillMaxWidth().fillMaxHeight(.9f).navigationBarsPadding()) {
-            Row(Modifier.fillMaxWidth().height(48.dp).padding(start = 22.dp, end = 8.dp),
+            Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(start = 20.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Text(state.name, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Column(Modifier.weight(1f).padding(vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(state.name, style = browseTitleStyle(23.sp, 30.sp), modifier = Modifier.semantics { heading() })
+                    if (state.items.isNotEmpty()) Text(mangaNumberText("已载入 ${state.items.size} 部作品"),
+                        style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                }
                 MotionIconButton(onClick = dismiss) { Icon(Icons.Outlined.Close, "关闭作者作品", Modifier.size(20.dp)) }
             }
-            LazyVerticalGrid(columns = GridCells.Fixed(if (LocalDensity.current.fontScale >= 1.4f) 2 else 3),
+            LazyVerticalGrid(columns = GridCells.Adaptive(88.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
                 state = grid, modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 24.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 items(state.items, key = Manga::id) { manga -> CoverTile(manga, repository, dense = true) { onOpen(manga) } }
                 item(key = "author-footer", span = { GridItemSpan(maxLineSpan) }) {
                     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {

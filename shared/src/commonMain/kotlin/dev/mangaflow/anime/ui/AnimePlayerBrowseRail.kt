@@ -27,6 +27,8 @@ import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.canonicalDoubanId
 import dev.mangaflow.ui.DesktopVerticalScrollbar
+import dev.mangaflow.ui.mangaFontFamily
+import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionInputGate
@@ -120,7 +122,7 @@ internal fun AnimePlayerBrowseRail(
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回搜索结果", Modifier.size(19.dp))
             }
             Column(Modifier.weight(1f)) {
-                Text("边看边逛", style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
+                Text("边看边逛", style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
                 AnimeQuietLabel("番剧目录 · 豆瓣")
             }
             MotionIconButton(onClick = onClose, enabled = active, modifier = Modifier.size(42.dp), tooltip = "收起边看边逛") {
@@ -140,10 +142,11 @@ internal fun AnimePlayerBrowseRail(
                     contentPadding = PaddingValues(top = 10.dp, end = 6.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     item {
-                        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            AnimePoster(preview, Modifier.size(64.dp, 92.dp))
+                        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                            AnimePoster(preview, Modifier.size(78.dp, 112.dp))
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                 Text(preview.title, style = MaterialTheme.typography.titleMedium,
+                                    fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                                     maxLines = 4, overflow = TextOverflow.Ellipsis)
                                 preview.originalTitle.takeIf { it.isNotBlank() && it != preview.title }?.let { AnimeQuietLabel(it) }
                                 playbackCatalogueFacts(preview).takeIf(String::isNotBlank)?.let { AnimeQuietLabel(it) }
@@ -153,7 +156,6 @@ internal fun AnimePlayerBrowseRail(
                     if (preview.description.isNotBlank()) item {
                         Text(preview.description, style = MaterialTheme.typography.bodyMedium)
                     }
-                    item { AnimeQuietLabel("仅查看资料，不切换当前播放。") }
                 }
             } else {
                 LazyColumn(Modifier.fillMaxSize(), state = list, userScrollEnabled = active,

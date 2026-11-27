@@ -246,8 +246,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                 Column(Modifier.fillMaxWidth().height(maximumHeight)
                     .padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("体验策略", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        PreferenceHeading("体验策略", Modifier.weight(1f))
                         // A stable header slot replaces the permanently empty bottom action row.
                         Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
                             if (applying) MotionBusyIndicator(Modifier.size(16.dp).semantics {
@@ -341,9 +340,8 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
 @Composable
 private fun ExperienceOverview(budget: ExperienceBudget, custom: ExperienceOverrides, mode: ExperienceMode,
     enabled: Boolean, onMode: (ExperienceMode) -> Unit, onCategory: (String) -> Unit) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         ExperienceModeChoices(mode, enabled, onMode)
-        ExperienceHint("增强、补帧、缓冲与预读统一在这里设置；观看时可打开对应的当前状态。")
         ExperienceOverviewLink(Icons.Outlined.AutoAwesome, "漫画增强",
             "画质 · 提前增强 · 阅读时显示", enabled) { onCategory("manga-enhancement") }
         ExperienceOverviewLink(Icons.Outlined.SlowMotionVideo, "番剧增强与补帧",
@@ -368,15 +366,7 @@ private fun ExperienceOverview(budget: ExperienceBudget, custom: ExperienceOverr
 @Composable
 private fun ExperienceOverviewLink(icon: ImageVector, title: String, value: String,
     enabled: Boolean, onClick: () -> Unit) {
-    MotionTextButton(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)) {
-        Icon(icon, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Column(Modifier.weight(1f).padding(horizontal = 10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
-            Text(value, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
+    SettingsLinkRow(title, value, icon, enabled = enabled, onClick = onClick)
 }
 
 /** Reuse the reader/player editor in the same retained experience surface. */
@@ -648,7 +638,7 @@ private fun ExperienceCategorySection(title: String, icon: ImageVector, modified
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
-            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
             if (modified) Box(Modifier.size(4.dp).background(MaterialTheme.colorScheme.primary, CircleShape)
                 .semantics { contentDescription = "已自定义" })
         }

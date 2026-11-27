@@ -110,9 +110,11 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -424,6 +426,10 @@ fun LibraryScreen(
             if (!libraryReady) LibraryRestoreStatus(libraryStore, Modifier.padding(top = headerPadding))
             else MotionTabContent(if (showHistory) 1 else 0, Modifier.fillMaxSize()) { tab ->
                 if (tab == 1) {
+                    val today = localToday()
+                    val dates = remember(visibleHistory) {
+                        visibleHistory.groupBy { if (it.updatedAt > 0L) localDateAt(it.updatedAt) else null }
+                    }
                     LazyColumn(
                         state = historyPosition,
                         modifier = Modifier.fillMaxSize(),
@@ -436,33 +442,46 @@ fun LibraryScreen(
                         if (visibleHistory.isEmpty()) item(key = "empty-history") {
                             EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
                         }
-                        items(visibleHistory, key = { "history-${it.manga.id}" }, contentType = { "reading-history" }) { progress ->
-                            val historyActions = listOf(
-                                DesktopMenuAction("继续阅读") { onContinue(progress) },
-                                DesktopMenuAction("详情与目录") { onDetails(progress.manga) },
-                                DesktopMenuAction("章节记录") { chapterHistoryManga = progress.manga },
-                                DesktopMenuAction("移除阅读记录") { removeHistoryWithUndo(progress.manga.id) })
-                            DesktopContextMenuArea(historyActions) {
-                            Box {
-                            SwipeToRemove(enabled = !desktop, onRemove = { removeHistoryWithUndo(progress.manga.id) }, label = "删除阅读记录",
-                                modifier = Modifier.animateItem(
-                                    fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
-                                    placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
-                                    fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)) {
-                                Box(Modifier.padding(end = if (desktop) 40.dp else 0.dp)) {
-                                ContinueRow(progress, repository, onContinue,
-                                    onManage = { onCancelOpen(); managedId = progress.manga.id },
-                                    onHistory = { onCancelOpen(); managedId = null; chapterHistoryManga = progress.manga },
-                                    namedHistory = adultProfile)
+                        dates.forEach { (date, books) ->
+                            item(key = "reading-date:$date", contentType = "history-day") {
+                                val day = when {
+                                    date == null -> "早期记录"
+                                    date == today -> "今天"
+                                    date == today.minusDays(1L) -> "昨天"
+                                    date.year != today.year -> formatUiDate(date, "yyyy/M/d")
+                                    else -> "${date.monthNumber}月${date.dayOfMonth}日"
                                 }
-                                RecordActionsMenu(managedId == progress.manga.id,
-                                    onDismiss = { managedId = null },
-                                    onDetails = { onDetails(progress.manga) })
+                                Text(mangaNumberText(day), style = MaterialTheme.typography.titleMedium,
+                                    modifier = Modifier.padding(top = 10.dp, bottom = 2.dp).semantics { heading() })
                             }
-                            if (desktop) Box(Modifier.align(Alignment.CenterEnd)) {
-                                DesktopMoreButton(historyActions, "阅读记录操作")
-                            }
-                            }
+                            items(books, key = { "history-${it.manga.id}" }, contentType = { "reading-history" }) { progress ->
+                                val historyActions = listOf(
+                                    DesktopMenuAction("继续阅读") { onContinue(progress) },
+                                    DesktopMenuAction("详情与目录") { onDetails(progress.manga) },
+                                    DesktopMenuAction("章节记录") { chapterHistoryManga = progress.manga },
+                                    DesktopMenuAction("移除阅读记录") { removeHistoryWithUndo(progress.manga.id) })
+                                DesktopContextMenuArea(historyActions) {
+                                Box {
+                                SwipeToRemove(enabled = !desktop, onRemove = { removeHistoryWithUndo(progress.manga.id) }, label = "删除阅读记录",
+                                    modifier = Modifier.animateItem(
+                                        fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
+                                        placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
+                                        fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)) {
+                                    Box(Modifier.padding(end = if (desktop) 40.dp else 0.dp)) {
+                                    ContinueRow(progress, repository, onContinue,
+                                        onManage = { onCancelOpen(); managedId = progress.manga.id },
+                                        onHistory = { onCancelOpen(); managedId = null; chapterHistoryManga = progress.manga },
+                                        namedHistory = adultProfile)
+                                    }
+                                    RecordActionsMenu(managedId == progress.manga.id,
+                                        onDismiss = { managedId = null },
+                                        onDetails = { onDetails(progress.manga) })
+                                }
+                                if (desktop) Box(Modifier.align(Alignment.CenterEnd)) {
+                                    DesktopMoreButton(historyActions, "阅读记录操作")
+                                }
+                                }
+                                }
                             }
                         }
                     }
@@ -486,18 +505,17 @@ fun LibraryScreen(
                             contentPadding = PaddingValues(start = 16.dp, end = 16.dp,
                                 top = headerPadding + 8.dp, bottom = 32.dp + bottomInset),
                             horizontalArrangement = Arrangement.spacedBy(gap),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             val recent = visibleHistory.take(resumeColumns)
                             if (shelfScope == UnifiedShelfScope.LOCAL && recent.isNotEmpty()) item(
                                 key = "resume-reading", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
-                                Column(Modifier.fillMaxWidth().padding(bottom = if (androidManga) 8.dp else 0.dp)) {
+                                Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                        Text("继续阅读", Modifier.weight(1f),
-                                            style = if (androidManga) MaterialTheme.typography.titleMedium
-                                                else MaterialTheme.typography.titleSmall)
+                                        Text("继续阅读", Modifier.weight(1f).semantics { heading() },
+                                            style = MaterialTheme.typography.titleLarge)
                                         TextButton(onClick = { onCancelOpen(); showHistory = true },
                                             enabled = active,
                                             colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
@@ -506,22 +524,19 @@ fun LibraryScreen(
                                     }
                                     if (desktop) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(gap)) {
                                         recent.forEach { progress -> key(progress.manga.id) {
-                                            Surface(Modifier.width(resumeWidth), shape = RoundedCornerShape(12.dp),
-                                                color = MaterialTheme.colorScheme.surface.copy(alpha = .82f)) {
+                                            Box(Modifier.width(resumeWidth)) {
                                                 val actions = if (active) listOf(
                                                     DesktopMenuAction("继续阅读") { onContinue(progress) },
                                                     DesktopMenuAction("详情与目录") { onDetails(progress.manga) },
                                                     DesktopMenuAction("章节记录") { chapterHistoryManga = progress.manga },
                                                 ) else emptyList()
                                                 DesktopContextMenuArea(actions) {
-                                                    Box(Modifier.padding(horizontal = 10.dp, vertical = 3.dp)) {
-                                                        ContinueRow(progress, repository, onContinue = { if (active) onContinue(it) },
-                                                            onHistory = { if (active) chapterHistoryManga = progress.manga })
-                                                    }
+                                                    ContinueRow(progress, repository, onContinue = { if (active) onContinue(it) },
+                                                        onHistory = { if (active) chapterHistoryManga = progress.manga }, prominent = true)
                                                 }
                                             }
                                         } }
-                                    } else ContinueRow(recent.first(), repository, prominent = androidManga,
+                                    } else ContinueRow(recent.first(), repository, prominent = true,
                                         onContinue = { if (active) onContinue(it) })
                                 }
                             }
@@ -531,15 +546,15 @@ fun LibraryScreen(
                                 key = if (adultProfile) "adult-shelf-section" else "shelf-collection-section", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
-                                Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 3.dp),
+                                Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 3.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                                     if (siteSource != null) ChapterSourceLogo(siteSource.id, siteSource.name, Modifier.size(19.dp))
                                     Text(if (siteSource == null) "我的收藏" else "${siteSource.name}收藏",
-                                        Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
+                                        Modifier.weight(1f, fill = false).semantics { heading() }, style = MaterialTheme.typography.titleLarge,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(visibleFavorites.size.toString() + if (siteShelf?.nextPage != null) "+" else "",
-                                        style = MaterialTheme.typography.labelSmall,
+                                        style = mangaMetricValueStyle(),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.semantics {
                                             contentDescription = "已显示 ${visibleFavorites.size} 本收藏" +
@@ -723,20 +738,24 @@ fun LibraryScreen(
                                                 onLongClickLabel = "详情与目录",
                                                 onLongClick = { onCancelOpen(); managedId = manga.id },
                                                 onClick = { onOpen(manga) })
-                                            .padding(horizontal = 2.dp)) {
-                                            Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), modifier = Modifier.padding(top = 4.dp),
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                fontWeight = FontWeight.Medium,
-                                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                            .padding(start = 1.dp, end = 1.dp, top = 8.dp, bottom = 9.dp)) {
+                                            Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                                                style = MaterialTheme.typography.titleSmall.copy(lineBreak = LineBreak.Heading),
+                                                fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold,
+                                                minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                             // An adopted cloud chapter has no observed local page cursor.
                                             val progressText = preferred?.chapterTitle?.ifBlank { "继续阅读" } ?: saved?.let {
                                                 it.chapterTitle.ifBlank { "继续阅读" } +
                                                     if (it.pageCount > 0) " · ${it.pageIndex + 1}/${it.pageCount}" else ""
                                             } ?: cloudMetadata[manga.id]?.chapterTitle
                                                 ?.takeIf { fromCopy && it.isNotBlank() }?.let { "拷贝 · $it" } ?: "未读"
-                                            Text(mangaNumberText(progressText), modifier = Modifier.padding(top = 2.dp),
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
-                                                lineHeight = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                if (preferred == null && saved != null) ChapterReadMark(saved, size = 12.dp)
+                                                Text(mangaNumberText(progressText), color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    style = MaterialTheme.typography.labelSmall, fontSize = 12.sp,
+                                                    lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            }
                                             if (adultProfile && !remote) MangaBrowseSource(manga,
                                                 Modifier.padding(top = 3.dp))
                                         }

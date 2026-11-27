@@ -1,7 +1,5 @@
 package dev.mangaflow.ui
 
-import dev.mangaflow.typography.MangaFontScene
-
 import dev.mangaflow.ui.platform.*
 
 import dev.mangaflow.platform.*
@@ -12,6 +10,7 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -27,6 +26,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
@@ -219,22 +219,24 @@ internal fun DetailActionDock(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Start) {
                             val progressColor = MaterialTheme.colorScheme.primary
-                            Box(Modifier.size(lerp(32.dp, 20.dp, collapse)), contentAlignment = Alignment.Center) {
+                            Box(Modifier.size(lerp(35.dp, 20.dp, collapse))
+                                .background(progressColor.copy(alpha = .105f * (1f - collapse)), CircleShape),
+                                contentAlignment = Alignment.Center) {
                                 if (content.fraction != null) Canvas(Modifier.matchParentSize().padding(1.dp)) {
-                                    val stroke = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
-                                    drawArc(progressColor.copy(alpha = .14f), -90f, 360f, false, style = stroke)
-                                    drawArc(progressColor.copy(alpha = .85f), -90f, 360f * displayedProgress, false, style = stroke)
+                                    val stroke = Stroke(1.75.dp.toPx(), cap = StrokeCap.Round)
+                                    drawArc(progressColor.copy(alpha = .12f), -90f, 360f, false, style = stroke)
+                                    drawArc(progressColor, -90f, 360f * displayedProgress, false, style = stroke)
                                 }
                                 if (content.busy) MotionBusyIndicator(Modifier.size(lerp(18.dp, 13.dp, collapse)),
                                     color = DetailSecondary, strokeWidth = 1.5.dp)
-                                else Icon(content.icon, null, tint = progressColor,
+                                else Icon(content.icon, null, tint = if (enabled) progressColor else DetailMuted,
                                     modifier = Modifier.size(lerp(22.dp, 16.dp, collapse)))
                             }
-                            Spacer(Modifier.width(lerp(10.dp, 6.dp, collapse)))
+                            Spacer(Modifier.width(lerp(12.dp, 6.dp, collapse)))
                             Column(Modifier.weight(1f).clearAndSetSemantics {}) {
                                 Text(if (collapse < .6f) content.title else content.compactTitle,
-                                    color = DetailForeground, fontSize = (15f - 3f * collapse).sp,
-                                    lineHeight = (21f - 4f * collapse).sp, fontWeight = FontWeight.SemiBold,
+                                    color = DetailForeground, fontSize = (16f - 4f * collapse).sp,
+                                    lineHeight = (22f - 5f * collapse).sp, fontWeight = FontWeight.SemiBold,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 val chapterReveal = (1f - collapse / .6f).coerceIn(0f, 1f)
                                 if (content.caption.isNotBlank() && chapterReveal > 0f) {
@@ -250,8 +252,12 @@ internal fun DetailActionDock(
                                 Box(Modifier.width(42.dp * fontScale * (1f - collapse)).clipToBounds()
                                     .graphicsLayer { alpha = (1f - collapse * 2f).coerceIn(0f, 1f) },
                                     contentAlignment = Alignment.CenterEnd) {
-                                    Text("$percent%", Modifier.clearAndSetSemantics {}, fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), color = DetailSecondary, fontSize = 14.sp,
-                                        fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
+                                    Row(Modifier.clearAndSetSemantics {}) {
+                                        Text(percent.toString(), Modifier.alignByBaseline(), color = DetailForeground,
+                                            style = mangaMetricValueStyle(15.sp, 20.sp), maxLines = 1, softWrap = false)
+                                        Text("%", Modifier.alignByBaseline(), color = DetailSecondary,
+                                            style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
+                                    }
                                 }
                             }
                             trailing(collapse)

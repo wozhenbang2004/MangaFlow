@@ -18,7 +18,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -86,22 +93,26 @@ internal fun DesktopSettingsLayout(
     topPadding: Dp,
     content: @Composable (Dp) -> Unit,
 ) {
-    val labels = listOf("阅读", "外观", "数据", "应用")
+    val pages = listOf("阅读" to Icons.AutoMirrored.Outlined.MenuBook, "外观" to Icons.Outlined.Palette,
+        "数据" to Icons.Outlined.Storage, "应用" to Icons.Outlined.Tune)
+    val labels = pages.map { it.first }
+    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     BoxWithConstraints(Modifier.fillMaxSize().padding(top = topPadding)) {
-        if (maxWidth >= 900.dp) {
+        if (maxWidth >= 900.dp * fontScale) {
             Row(Modifier.fillMaxSize().padding(horizontal = 20.dp),
                 horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                 MotionNavigationColumn(selected, labels.size,
-                    Modifier.width(164.dp).padding(top = 8.dp)) { index, itemModifier ->
+                    Modifier.width(160.dp * fontScale).padding(top = 14.dp)) { index, itemModifier ->
                     val chosen = index == selected
                     MotionTextButton(onClick = { onSelected(index) },
                         modifier = itemModifier.fillMaxWidth().semantics { this.selected = chosen },
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.textButtonColors(
-                            contentColor = if (chosen) MaterialTheme.colorScheme.onSurface
+                            contentColor = if (chosen) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.onSurfaceVariant),
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)) {
-                        Text(labels[index], Modifier.weight(1f),
+                        Icon(pages[index].second, null, Modifier.size(18.dp))
+                        Text(labels[index], Modifier.weight(1f).padding(start = 12.dp),
                             fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal)
                     }
                 }
@@ -113,7 +124,7 @@ internal fun DesktopSettingsLayout(
             Column(Modifier.fillMaxSize()) {
                 MotionTabs(selected, labels, onSelected,
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp).widthIn(max = 480.dp).fillMaxWidth(),
-                    treatment = MotionTabTreatment.Soft, controlHeight = 40.dp)
+                    treatment = MotionTabTreatment.Underline, controlHeight = 44.dp)
                 Box(Modifier.weight(1f).fillMaxWidth()) { content(4.dp) }
             }
         }

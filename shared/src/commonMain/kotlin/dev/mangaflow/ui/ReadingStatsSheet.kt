@@ -21,6 +21,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,9 +36,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.CalendarToday
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -48,9 +48,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -62,6 +66,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
@@ -71,6 +76,7 @@ import dev.mangaflow.storage.ReadingActivity
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.motionPress
 import kotlinx.datetime.LocalDate
@@ -123,12 +129,19 @@ internal fun ReadingStatsSheet(
     }
     val colors = MaterialTheme.colorScheme
     val desktop = platformKind == PlatformKind.DESKTOP
+    val rankMeasurer = rememberTextMeasurer()
+    val rankStyle = mangaMetricValueStyle()
+    val rankDigits = ordered.size.toString().length
+    val rankWidth = remember(rankMeasurer, rankStyle, rankDigits) {
+        rankMeasurer.measure("8".repeat(rankDigits), style = rankStyle).size.width
+    }
+    val rankGutter = with(LocalDensity.current) { rankWidth.toDp() + 8.dp }
 
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background) { dismiss ->
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Text("阅读统计",
-                color = colors.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+                color = colors.onSurface, style = MaterialTheme.typography.titleLarge,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.Close, "关闭阅读统计", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
@@ -159,8 +172,8 @@ internal fun ReadingStatsSheet(
                 ReadingHeatmap(activity, rangeStart, today)
             }
             if (ordered.isNotEmpty()) item(key = "ranking-heading") {
-                Text("${period.label}排行", color = colors.onSurfaceVariant, fontSize = 11.sp,
-                    modifier = Modifier.padding(top = 18.dp, bottom = 4.dp))
+                Text("${period.label}排行", color = colors.onSurface, style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(top = 22.dp, bottom = 6.dp))
             }
             if (ordered.isEmpty()) item(key = "empty") {
                 Row(Modifier.fillMaxWidth().padding(vertical = 24.dp),
@@ -178,7 +191,7 @@ internal fun ReadingStatsSheet(
             itemsIndexed(ordered, key = { _, entry -> entry.manga.id }) { index, entry ->
                 val duration = durations.getValue(entry.manga.id)
                 val share = if (visibleTotal > 0L) (duration.toDouble() / visibleTotal).toFloat().coerceIn(0f, 1f) else 0f
-                ReadingTimeRow(entry, duration, share, index + 1, today, repository) {
+                ReadingTimeRow(entry, duration, share, index + 1, rankGutter, today, repository) {
                     onOpenManga(entry.manga)
                     dismiss()
                 }
@@ -188,29 +201,30 @@ internal fun ReadingStatsSheet(
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun ReadingTimeSummary(millis: Long, activeDays: Int, books: Int, range: String, average: Long? = null) {
     val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 16.dp).clearAndSetSemantics {
-        contentDescription = "${range}阅读 ${readingDuration(millis)}，活跃 $activeDays 天，$books 部作品。仅累计前台阅读时间。"
-    }, verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.Outlined.Schedule, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
-        Spacer(Modifier.width(8.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text("${range}阅读", color = colors.onSurfaceVariant, fontSize = 11.sp)
-            Text(mangaNumberText(readingDuration(millis)), color = colors.onSurface,
-                fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold)
-            if (average != null) Text(mangaNumberText("日均 " + readingDuration(average)),
-                color = colors.onSurfaceVariant, fontSize = 11.sp)
+    val duration = mangaNumberText(readingDuration(millis))
+    val display = remember(duration) {
+        buildAnnotatedString {
+            append(duration)
+            duration.text.forEachIndexed { i, char ->
+                if (char.isDigit()) addStyle(SpanStyle(fontSize = 34.sp, fontWeight = FontWeight.SemiBold), i, i + 1)
+            }
         }
-        Column(Modifier.padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                Icon(Icons.Outlined.CalendarToday, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
-                Text(mangaNumberText("$activeDays 天"), color = colors.onSurfaceVariant, fontSize = 11.sp)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
-                Text(mangaNumberText("$books 部"), color = colors.onSurfaceVariant, fontSize = 11.sp)
-            }
+    }
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 20.dp).clearAndSetSemantics {
+        contentDescription = "${range}阅读 ${duration.text}，活跃 $activeDays 天，$books 部作品。" +
+            (average?.let { "日均 ${readingDuration(it)}。" } ?: "") + "仅累计前台阅读时间。"
+    }) {
+        Text("${range}阅读", color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+        Text(display, color = colors.onSurface, fontSize = 17.sp, lineHeight = 42.sp)
+        FlowRow(Modifier.fillMaxWidth().padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(mangaNumberText("活跃 $activeDays 天"), color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            Text(mangaNumberText("$books 部作品"), color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            if (average != null) Text(mangaNumberText("日均 ${readingDuration(average)}"), color = colors.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -254,8 +268,10 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
     val selectedMillis = daily[selectedDay.toString()] ?: 0L
     val selectedBooks = activity.count { (it.days[selectedDay.toString()] ?: 0L) > 0L }
     val scroll = rememberScrollState()
-    val levels = listOf(colors.onSurface.copy(alpha = .055f), colors.primary.copy(alpha = .20f),
-        colors.primary.copy(alpha = .38f), colors.primary.copy(alpha = .62f), colors.primary.copy(alpha = .90f))
+    val ink = lerp(colors.primary, mangaStatusColors().activity, .38f)
+    val strong = LocalPlatformAccessibilityPreferences.current.increaseContrast
+    val levels = listOf(lerp(colors.surface, colors.onSurface, if (strong) .12f else .065f),
+        lerp(colors.surface, ink, .27f), lerp(colors.surface, ink, .47f), lerp(colors.surface, ink, .72f), ink)
     fun level(millis: Long): Int = when {
         millis <= 0L -> 0
         millis < 15 * 60_000L -> 1
@@ -343,10 +359,10 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
             else -> "${selectedDay.monthNumber}月${selectedDay.dayOfMonth}日"
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(mangaNumberText(dayLabel), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
-            Text(if (selectedBooks > 0) "$selectedBooks 部作品" else "暂无记录", fontSize = 10.sp, color = colors.onSurfaceVariant)
+            Text(mangaNumberText(dayLabel), fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = colors.onSurface)
+            Text(if (selectedBooks > 0) "$selectedBooks 部作品" else "暂无记录", fontSize = 12.sp, color = colors.onSurfaceVariant)
         }
-        Text(mangaNumberText(readingDuration(selectedMillis)), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
+        Text(mangaNumberText(readingDuration(selectedMillis)), fontSize = 15.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -369,6 +385,7 @@ private fun ReadingTimeRow(
     duration: Long,
     share: Float,
     rank: Int,
+    rankGutter: Dp,
     today: LocalDate,
     repository: MangaRepository,
     onOpen: () -> Unit,
@@ -382,22 +399,22 @@ private fun ReadingTimeRow(
         .semantics(mergeDescendants = true) { stateDescription = "占所选时段阅读时间 $shareLabel" }
         .motionPress(interactions, pressedScale = .99f).padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Text(rank.toString().padStart(2, '0'), fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), color = colors.onSurfaceVariant.copy(alpha = .65f),
-            fontSize = 10.sp, modifier = Modifier.width(22.dp).clearAndSetSemantics { })
-        MangaCover(entry.manga, repository, Modifier.width(32.dp).height(44.dp).mangaCoverCard(5.dp))
+        Text(rank.toString(), style = mangaMetricValueStyle(), color = colors.onSurfaceVariant,
+            modifier = Modifier.width(rankGutter).clearAndSetSemantics { })
+        MangaCover(entry.manga, repository, Modifier.width(38.dp).height(52.dp).mangaCoverCard(7.dp, shadowRadius = 5.dp))
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Text(entry.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface, fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                Text(entry.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface,
+                    fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f))
-                Text(mangaNumberText(readingDuration(duration)), color = colors.onSurface, fontSize = 11.sp,
+                Text(mangaNumberText(readingDuration(duration)), color = colors.onSurface, fontSize = 12.sp,
                     fontWeight = FontWeight.Medium, maxLines = 1)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Canvas(Modifier.weight(1f).height(2.dp)) {
+                Canvas(Modifier.weight(1f).height(3.dp)) {
                     val radius = CornerRadius(size.height * .5f)
                     drawRoundRect(colors.onSurface.copy(alpha = .055f), cornerRadius = radius)
                     if (share > 0f) drawRoundRect(colors.primary.copy(alpha = .38f),

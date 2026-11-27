@@ -88,12 +88,13 @@ internal actual fun rememberNativeFeelFeedback(): (FeelEvent) -> Boolean {
 }
 
 @Composable
-internal actual fun MotionDialogWindowPolicy(visible: Boolean) {
+internal actual fun MotionDialogWindowPolicy(visible: Boolean, backgroundDim: Float) {
     val window = (LocalView.current.parent as? DialogWindowProvider)?.window
     SideEffect {
         window?.let { target ->
             val attributes = target.attributes
             if (attributes.windowAnimations != 0) target.setWindowAnimations(0)
+            if (attributes.dimAmount != backgroundDim) target.setDimAmount(backgroundDim)
             // A wrap-content window feeds the panel's measured height back into its
             // percentage viewport limit. Keep the host stable; its child still wraps
             // naturally, and DialogLayout retains its centering/outside-hit bounds.
