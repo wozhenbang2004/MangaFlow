@@ -48,7 +48,13 @@ data class EngineInventory(
     val modelBytes: Long = 0,
     val runtimeBytes: Long = 0,
     val frameModels: List<EngineModel> = emptyList(),
-)
+) {
+    fun readyRealtimeFrameModel(engineId: String?): EngineModel? {
+        if (engines.none { it.id == engineId && it.realtime &&
+                (it.readiness == EngineReadiness.READY_FOR_TRIAL || it.readiness == EngineReadiness.BUILT_IN) }) return null
+        return frameModels.firstOrNull { it.engineId == engineId }
+    }
+}
 
 
 data class EnhancementModelOffer(

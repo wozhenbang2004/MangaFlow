@@ -8,6 +8,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.util.UUID
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -25,6 +26,7 @@ internal suspend fun installAndroidVulkanModel(
     progress: (EngineProgress) -> Unit,
 ) {
     val runtimeId = PanelRuntimeId.CUGAN
+    runtimes.awaitDiscovery()
     val initial = runtimes.states.value.getValue(runtimeId)
     if (!initial.installed || initial.requiresUpdate) {
         runtimes.download(runtimeId)
@@ -37,15 +39,21 @@ internal suspend fun installAndroidVulkanModel(
         check(status.installed && !status.requiresUpdate) { status.error ?: "ncnn Vulkan 组件未能完成安装或更新" }
     }
     check(!runtimes.states.value.getValue(runtimeId).pendingRemoval) { "ncnn Vulkan 组件将在重启后移除" }
-    if (parts.all { it.matches(File(installed, it.name)) }) return
+    val missing = parts.filterNot { it.matches(File(installed, it.name)) }
+    if (missing.isEmpty()) return
     val folder = checkNotNull(installed.parentFile)
     check(folder.isDirectory || folder.mkdirs()) { "无法创建 Vulkan 模型目录" }
     val temporary = File(folder, "download-${UUID.randomUUID()}").also { check(it.mkdir()) }
-    val total = parts.sumOf { it.bytes }
+    val total = missing.sumOf { it.bytes }
     try {
         var count = 0L
         for (part in parts) {
             val output = File(temporary, part.name)
+            if (part !in missing) {
+                Files.copy(File(installed, part.name).toPath(), output.toPath())
+                check(part.matches(output)) { "已有 Vulkan 模型在校验期间发生变化" }
+                continue
+            }
             val connection = URL("$url/${part.name}").openConnection() as HttpURLConnection
             try {
                 connection.instanceFollowRedirects = false
@@ -75,9 +83,16 @@ internal suspend fun installAndroidVulkanModel(
             } finally { connection.disconnect() }
         }
         currentCoroutineContext().ensureActive()
-        // Both members are checked before their version directory becomes visible.
-        if (installed.exists()) check(installed.deleteRecursively()) { "无法移除损坏的旧模型" }
-        Files.move(temporary.toPath(), installed.toPath(), ATOMIC_MOVE)
+        if (installed.isDirectory) {
+            for (part in parts) {
+                val destination = File(installed, part.name)
+                if (!part.matches(destination)) {
+                    Files.move(File(temporary, part.name).toPath(), destination.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
+                }
+            }
+        } else {
+            Files.move(temporary.toPath(), installed.toPath(), ATOMIC_MOVE)
+        }
         check(parts.all { it.matches(File(installed, it.name)) }) { "Vulkan 模型安装尚未确认" }
     } finally { temporary.deleteRecursively() }
 }

@@ -56,6 +56,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     private var sessionIdentity: String? = null
 
     override suspend fun inspect(): EngineInventory = withContext(Dispatchers.IO) {
+        runtimes.awaitDiscovery()
         val installed = models.list()
         val installedVideo = videoModels.list()
         val installedVariants = anime4kVariants.installed()

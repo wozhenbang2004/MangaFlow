@@ -2,6 +2,7 @@
 
 package dev.mangaflow.ui.glass
 
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.skiaPaint
 import dev.mangaflow.platform.PlatformContext
@@ -14,3 +15,5 @@ internal actual fun platformIsLowRamDevice(context: PlatformContext): Boolean =
 internal actual fun applySoftShadowBlur(paint: Paint, radius: Float) {
     paint.skiaPaint.maskFilter = MaskFilter.makeBlur(FilterBlurMode.NORMAL, radius)
 }
+
+internal actual fun sealSoftShadowMask(image: ImageBitmap) = Unit

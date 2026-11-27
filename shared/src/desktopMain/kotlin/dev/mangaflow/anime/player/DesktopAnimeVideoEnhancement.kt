@@ -2,6 +2,7 @@ package dev.mangaflow.anime.player
 
 import dev.mangaflow.enhancement.engine.EngineModel
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,12 +28,14 @@ internal class DesktopAnimeVideoEnhancement(
     private val context: PlatformContext,
     private val scope: CoroutineScope,
     private val renderingActive: StateFlow<Boolean>,
+    private val frameMetrics: () -> AnimePlaybackFrameMetrics?,
     private val isCurrentSession: (MPVHandle, Long, AnimeVideoEnhancementMode) -> Boolean,
     private val update: (Long, AnimeVideoEnhancementState) -> Unit,
 ) {
     private data class Selection(
         val owner: ShaderOwner?, val generation: Long, val mode: AnimeVideoEnhancementMode,
-        val mediaReady: Boolean, val scale: Int, val model: EngineModel?, val allowShaders: Boolean,
+        val mediaReady: Boolean, val scale: Int, val enhanceAtNativeSize: Boolean,
+        val model: EngineModel?, val allowShaders: Boolean,
     )
 
     /** One lock for each actual mpv handle, retained across toggles on that handle. */
@@ -74,11 +77,11 @@ internal class DesktopAnimeVideoEnhancement(
     private var cleanupConfirmed = true
 
     fun configure(handle: MPVHandle?, generation: Long, mode: AnimeVideoEnhancementMode, mediaReady: Boolean,
-        scale: Int, model: EngineModel?, allowShaders: Boolean): Boolean {
+        scale: Int, enhanceAtNativeSize: Boolean, model: EngineModel?, allowShaders: Boolean): Boolean {
         val previous = selection
         val oldOwner = previous?.owner
         val owner = handle?.let { if (oldOwner != null && oldOwner.handle === it) oldOwner else ShaderOwner(it) }
-        val next = Selection(owner, generation, mode, mediaReady, scale, model, allowShaders)
+        val next = Selection(owner, generation, mode, mediaReady, scale, enhanceAtNativeSize, model, allowShaders)
         if (next == previous) return cleanupConfirmed
 
         oldOwner?.ticket = null
@@ -109,7 +112,9 @@ internal class DesktopAnimeVideoEnhancement(
             fun current() = owner.ticket === ticket && isCurrentSession(owner.handle, generation, mode)
             suspend fun clearCurrent(): Boolean = withContext(Dispatchers.IO) { owner.clear(ticket) }
             try {
-                val paths = withContext(Dispatchers.IO) { DesktopAnime4KShaderStore.prepare(context, mode, scale, model) }
+                val paths = withContext(Dispatchers.IO) {
+                    DesktopAnime4KShaderStore.prepare(context, mode, scale, model, enhanceAtNativeSize)
+                }
                 check(paths.isNotEmpty()) { "No enhancement shader was prepared" }
                 val anime4kSize = when {
                     model != null && Anime4KOptionalModels.supports(model.engineId) ->
@@ -125,6 +130,7 @@ internal class DesktopAnimeVideoEnhancement(
                 val argument = paths.joinToString(separator) { it.replace(separator, "\\$separator") }
                 val expectedList = paths.joinToString(separator)
                 var configured = false
+                var configuredAt = 0L
                 var lastSampleTime: Double? = null
                 var budgetOverruns = 0
                 while (current()) {
@@ -165,14 +171,32 @@ internal class DesktopAnimeVideoEnhancement(
                             val replaced = withContext(Dispatchers.IO) { owner.replace(ticket, argument, expectedList) }
                             if (!replaced || !current()) return@launch
                             configured = true
+                            configuredAt = monotonicTimeMillis()
                         } else {
                             check(observed.shaderList == expectedList) {
                                 "The renderer did not confirm the complete shader list"
                             }
                         }
+                        // The embedded VO may not publish shader timings. Reuse the player's
+                        // drop counts, counting only time spent on this exact graph.
+                        val frames = if (enhanceAtNativeSize && renderingActive.value) frameMetrics() else null
+                        val drops = frames?.run { recentDroppedFrames ?: recentOutputDroppedFrames ?: recentDecoderDroppedFrames }
+                        if (frames != null && drops != null && frames.windowDurationMs >= 3_000L &&
+                            monotonicTimeMillis() - configuredAt >= frames.windowDurationMs &&
+                            drops * 1_000L >= frames.windowDurationMs * 4L) {
+                            val cleared = clearCurrent()
+                            if (!current()) return@launch
+                            check(cleared) { "无法关闭已超出预算的模型" }
+                            update(generation, state(mode, AnimeVideoEnhancementPhase.UNAVAILABLE,
+                                "播放持续丢帧，已恢复原始画质", width, height))
+                            return@launch
+                        }
                         if (sample == null) {
+                            val detail = if (enhanceAtNativeSize)
+                                "已配置 2× 超分，画面按窗口尺寸显示。渲染器尚未返回实际输出记录。"
+                            else "着色器配置已确认，暂无可读的增强输出记录。"
                             update(generation, state(mode, AnimeVideoEnhancementPhase.CONFIGURED,
-                                "着色器配置已确认，暂无可读的增强输出记录。", width, height)
+                                detail, width, height)
                                 .copy(modelName = appliedModel))
                         } else {
                             val frameTime = observed.videoPts
@@ -205,6 +229,7 @@ internal class DesktopAnimeVideoEnhancement(
                     delay(500L)
                     if (!renderingActive.value) {
                         renderingActive.first { it }
+                        configuredAt = monotonicTimeMillis()
                         lastSampleTime = null
                         budgetOverruns = 0
                     }

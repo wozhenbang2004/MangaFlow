@@ -4574,6 +4574,7 @@ private fun ReaderPageImage(
                         )
                     }
                     ReaderEnhancedLayer(enhancedAsset, Modifier.matchParentSize(), pagedAlignment,
+                        pagePreviewSize = loadedImage?.requestedSize ?: previewSize,
                         zoom = imageState.zoomableState, spread = spreadViewport,
                         comparisonFraction = comparison?.comparisonFraction,
                         onComparisonFractionChange = comparison?.onComparisonFractionChange)
@@ -4618,6 +4619,7 @@ private fun ReaderPageImage(
                         }
                     }
                     ReaderEnhancedLayer(enhancedAsset, Modifier.matchParentSize(), Alignment.TopCenter,
+                        pagePreviewSize = loadedImage?.requestedSize ?: previewSize,
                         visibleWindow = visibleWindow, comparisonFraction = comparison?.comparisonFraction,
                         onComparisonFractionChange = comparison?.onComparisonFractionChange)
                 }

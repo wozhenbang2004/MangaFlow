@@ -339,7 +339,7 @@ internal fun EnhancementPreparation(content: EnhancementContent, policy: Enhance
     val frameEngine = if (platformKind == PlatformKind.ANDROID) EnhancementEngineIds.ANDROID_RIFE_VULKAN
         else EnhancementEngineIds.DESKTOP_REALTIME_RIFE
     val realtimeFrames = policy.realtimeInterpolationEnabled && policy.frameMode != FrameMode.ORIGINAL &&
-        policy.frameQuality == FrameQuality.BALANCED && inventory.frameModels.any { it.engineId == frameEngine } &&
+        policy.frameQuality == FrameQuality.BALANCED && inventory.readyRealtimeFrameModel(frameEngine) != null &&
         (policy.frameMode != FrameMode.CUSTOM || policy.customFps in 1..(if (platformKind == PlatformKind.ANDROID) 120 else 240))
     val androidRealtimeModel = platformKind == PlatformKind.ANDROID && compatible &&
         (policy.modelId != null || policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA))

@@ -94,11 +94,22 @@ internal class DesktopAnimeJaNaiEnhancement(
                 var lastDropCount: Long? = null
                 var overloadSamples = 0
                 var precedingSpatialPosition: Pair<Pair<Long, Long>, Double>? = null
+                suspend fun waitForInput(phase: AnimeVideoEnhancementPhase, detail: String) {
+                    clearFilter()
+                    targetFps = null
+                    lastDropCount = null
+                    overloadSamples = 0
+                    precedingSpatialPosition = null
+                    state(phase, detail)
+                    delay(if (phase == AnimeVideoEnhancementPhase.WAITING) 400L else 2_000L)
+                    renderingActive.first { it }
+                }
                 while (target == next) {
                     val backend = next.handle
                     val epoch = observationEpoch()
                     val sampledAt = monotonicTimeMillis()
-                    val observation = withContext(Dispatchers.IO) { readObservation(backend) }
+                    val inspectOutput = filter != null
+                    val observation = withContext(Dispatchers.IO) { readObservation(backend, inspectOutput) }
                     if (target != next) return@launch
                     inputWidth = observation.width
                     inputHeight = observation.height
@@ -110,20 +121,21 @@ internal class DesktopAnimeJaNaiEnhancement(
                     val paused = observation.paused
                     when {
                         width == null || height == null || color.isNullOrBlank() || color in setOf("auto", "unknown") -> {
-                            state(AnimeVideoEnhancementPhase.WAITING, "等待解码画面与色彩信息")
-                            delay(400)
-                            renderingActive.first { it }
+                            waitForInput(AnimeVideoEnhancementPhase.WAITING, "等待解码画面与色彩信息")
                             continue
                         }
-                        color !in sdr || width.toLong() * height > 1920L * 1080L || sourceFps == null -> {
-                            clearFilter()
-                            state(AnimeVideoEnhancementPhase.UNAVAILABLE, "当前片源不在 SDR 1080p 与 12–61 FPS 的试用范围")
-                            return@launch
+                        sourceFps == null || format.isNullOrBlank() -> {
+                            waitForInput(AnimeVideoEnhancementPhase.WAITING, "等待片源帧率与解码器就绪")
+                            continue
+                        }
+                        color !in sdr || width.toLong() * height > 1920L * 1080L || sourceFps !in 12.0..61.0 -> {
+                            waitForInput(AnimeVideoEnhancementPhase.UNAVAILABLE, "当前片源不在 SDR 1080p 与 12–61 FPS 的试用范围")
+                            continue
                         }
                         format != "d3d11va" -> {
-                            clearFilter()
-                            state(AnimeVideoEnhancementPhase.UNAVAILABLE, "当前视频未使用 Direct3D 11 硬件解码")
-                            return@launch
+                            // hwdec-current can still name the previous decoder during a live policy change.
+                            waitForInput(AnimeVideoEnhancementPhase.UNAVAILABLE, "当前视频未使用 Direct3D 11 硬件解码")
+                            continue
                         }
                     }
                     val frames = next.frames
@@ -270,18 +282,21 @@ internal class DesktopAnimeJaNaiEnhancement(
     )
 
     /** Native property reads may wait for mpv; their registry-owned lifetime is safe off the UI thread. */
-    private fun readObservation(handle: MPVHandle) = Observation(
-        width = dimension(handle, "video-params/w"),
-        height = dimension(handle, "video-params/h"),
+    private fun readObservation(handle: MPVHandle, inspectOutput: Boolean) = Observation(
+        width = dimension(handle, "video-dec-params/w"),
+        height = dimension(handle, "video-dec-params/h"),
         color = handle.getPropertyString("video-params/gamma")?.lowercase(),
-        sourceFps = handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it in 12.0..61.0 },
+        sourceFps = (handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it > 0 } ?:
+            handle.getPropertyDoubleOrNull("current-tracks/video/demux-fps")?.takeIf { it.isFinite() && it > 0 }),
         hardwareDecoder = handle.getPropertyString("hwdec-current"),
-        paused = handle.getPropertyBooleanOrNull("pause") == true,
-        outputWidth = dimension(handle, "video-out-params/w"),
-        outputHeight = dimension(handle, "video-out-params/h"),
+        paused = inspectOutput && (handle.getPropertyBooleanOrNull("pause") == true ||
+            handle.getPropertyBooleanOrNull("paused-for-cache") == true),
+        outputWidth = if (inspectOutput) dimension(handle, "video-out-params/w") else null,
+        outputHeight = if (inspectOutput) dimension(handle, "video-out-params/h") else null,
         position = handle.getPropertyDoubleOrNull("time-pos")?.takeIf(Double::isFinite),
-        filteredFps = handle.getPropertyDoubleOrNull("estimated-vf-fps")?.takeIf { it.isFinite() && it in 1.0..240.0 },
-        droppedFrames = handle.getPropertyLongOrNull("frame-drop-count")?.takeIf { it >= 0L },
+        filteredFps = if (inspectOutput) handle.getPropertyDoubleOrNull("estimated-vf-fps")
+            ?.takeIf { it.isFinite() && it in 1.0..240.0 } else null,
+        droppedFrames = if (inspectOutput) handle.getPropertyLongOrNull("frame-drop-count")?.takeIf { it >= 0L } else null,
     )
 
     private fun rationalFactor(target: Double, source: Double): Pair<Int, Int>? {

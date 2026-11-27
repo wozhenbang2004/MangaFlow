@@ -248,14 +248,7 @@ internal fun ReaderExperienceStatus(
         currentPage != null -> "第 ${currentPage + 1} 页"
         else -> null
     }
-    val workMaximum = maxOf(preparation.pages.size.toLong(),
-        maxOf(enhancement.running, enhancement.queued, enhancement.assets.size).toLong(),
-        nextChapterPreparation?.let { maxOf(it.requestedPages.toLong(), it.activePages.toLong(),
-            it.queuedPages.toLong(), it.originalReadyPages.toLong(), it.failedPages.toLong(), it.deferredPages.toLong()) + 1L } ?: 0L)
-    val sourceMaximum = standbys.maxOfOrNull { row -> maxOf(row.requestedPages.toLong() + 1L,
-        row.preparedPages.toLong(), row.previewResidentPages.toLong(), row.activePages.toLong() + 1L,
-        row.queuedPages.toLong() + 1L, row.failedPages.toLong()) } ?: 1L
-    val sourceReserve = "8".repeat(sourceMaximum.toString().length)
+    val counterWidths = statusCounterWidths(preparation, enhancement, nextChapterPreparation, standbys)
     val sourceStatus = standbySummary(standbyAvailability, standbys, budget)
     fun inspect(destination: ReaderStatusSection) {
         parent = section
@@ -352,7 +345,7 @@ internal fun ReaderExperienceStatus(
                                         PreparationPages(behindPages, ReaderWork.ORIGINAL)
                                     }
                                     nextChapterPreparation?.let { next ->
-                                        NextWorkRow(next, workMaximum, expandedWork == ReaderWork.NEXT, bodyEnabled) { toggle(ReaderWork.NEXT) }
+                                        NextWorkRow(next, counterWidths.workMaximum, expandedWork == ReaderWork.NEXT, bodyEnabled) { toggle(ReaderWork.NEXT) }
                                         StatusReveal(expandedWork == ReaderWork.NEXT) { NextChapterDetails(next) }
                                     }
                                     ReaderStatusDestination(Icons.Outlined.MoreHoriz, "更多阅读状态", bodyEnabled) { inspect(ReaderStatusSection.MORE) }
@@ -391,7 +384,7 @@ internal fun ReaderExperienceStatus(
                                 ReaderStatusSection.WORK -> {
                                     listOf(ReaderWork.RESOLVE, ReaderWork.ORIGINAL, ReaderWork.PREVIEW).forEach { work ->
                                         val counts = work.counts(preparation)
-                                        WorkDisclosure(work.icon, work.title, counts.active.toLong(), workMaximum,
+                                        WorkDisclosure(work.icon, work.title, counts.active.toLong(), counterWidths.workMaximum,
                                             workSummary(preparation, counts), expandedWork == work, bodyEnabled, counts.failed > 0,
                                             counts.queued.toLong(), counts.complete.toLong(), counts.deferred.toLong(), counts.failed.toLong(),
                                             known = preparation.pages.isNotEmpty(),
@@ -400,7 +393,7 @@ internal fun ReaderExperienceStatus(
                                         StatusReveal(expandedWork == work) { PreparationDetails(preparation, work) }
                                     }
                                     nextChapterPreparation?.let { next ->
-                                        NextWorkRow(next, workMaximum, expandedWork == ReaderWork.NEXT, bodyEnabled) { toggle(ReaderWork.NEXT) }
+                                        NextWorkRow(next, counterWidths.workMaximum, expandedWork == ReaderWork.NEXT, bodyEnabled) { toggle(ReaderWork.NEXT) }
                                         StatusReveal(expandedWork == ReaderWork.NEXT) { NextChapterDetails(next) }
                                     }
                                 }
@@ -457,7 +450,7 @@ internal fun ReaderExperienceStatus(
                                     if (standbys.isEmpty() || !sourceStatus.hasTargets)
                                         StatusExplanation(sourceStatus.detail, error = sourceStatus.mark == ReaderStatusMark.ERROR)
                                     standbys.forEach { row -> key(row.variantId) {
-                                        StandbyDetails(row, sourceReserve, expandedSource == row.variantId, bodyEnabled,
+                                        StandbyDetails(row, counterWidths.sourceReserve, expandedSource == row.variantId, bodyEnabled,
                                             onToggle = { if (bodyEnabled) expandedSource = if (expandedSource == row.variantId) null else row.variantId },
                                             onRetry = if (onRetryStandby != null && !row.manifestQueued && !row.manifestActive &&
                                                 (row.phase in setOf(ReaderSourceStandbyPhase.FAILED, ReaderSourceStandbyPhase.DEFERRED) ||
@@ -492,6 +485,29 @@ internal fun ReaderExperienceStatus(
             }
         }
     }
+}
+
+private data class StatusCounterWidths(val workMaximum: Long, val sourceReserve: String)
+
+private fun statusCounterWidths(
+    preparation: ReaderPreparationState,
+    enhancement: ReaderEnhancementState,
+    next: ReaderNextChapterPreparation?,
+    standbys: List<ReaderSourceStandby>,
+): StatusCounterWidths {
+    var manifestPages = 0
+    var readyOrFailedPages = 0
+    for (row in standbys) {
+        manifestPages = maxOf(manifestPages, maxOf(row.requestedPages, row.activePages, row.queuedPages))
+        readyOrFailedPages = maxOf(readyOrFailedPages, maxOf(row.preparedPages, row.previewResidentPages, row.failedPages))
+    }
+    // A source manifest can add one task beyond the page count, including at Int.MAX_VALUE.
+    val sourceReserve = "8".repeat(maxOf(manifestPages.toLong() + 1L, readyOrFailedPages.toLong()).toString().length)
+    val current = maxOf(preparation.pages.size, maxOf(enhancement.running, enhancement.queued, enhancement.assets.size))
+    if (next == null) return StatusCounterWidths(current.toLong(), sourceReserve)
+    val nextPages = maxOf(maxOf(next.requestedPages, next.activePages, next.originalReadyPages),
+        maxOf(next.queuedPages, next.failedPages, next.deferredPages))
+    return StatusCounterWidths(maxOf(current.toLong(), nextPages.toLong() + 1L), sourceReserve)
 }
 
 private enum class ReaderStatusSection(val title: String) {

@@ -176,6 +176,8 @@ data class AnimePlayerOptions(
     val bufferRefillNearTarget: Boolean = true,
     /** Raw user viewing intent; resource-driven projection changes do not increment it. */
     val realtimeMotionIntent: Long = 0L,
+    /** A manual 2× choice may run a desktop shader even at the source's display size. */
+    val enhanceAtNativeSize: Boolean = false,
 ) {
     /** A small refill band preserves the saved low/high watermarks and bounds request churn. */
     val effectiveBufferRefillMs: Int get() = if (!bufferRefillNearTarget) bufferMinMs else

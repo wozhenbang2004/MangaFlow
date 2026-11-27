@@ -259,20 +259,20 @@ internal fun LiquidGlassSurface(
                         contentNormalBlend(.025f)
                     }
                     GlassSurfaceRole.VIDEO_DOCK -> {
-                        // Brighten the sampled video without covering it with a white plate.
-                        // The pale backing is visible if the capture cannot supply opaque pixels.
-                        backgroundColor(tintColor.copy(alpha = .60f))
-                        tint(tintColor.copy(alpha = .20f))
-                        whitePoint(.47f)
+                        // Preserve the frame colours through the lens. The player draws the local
+                        // contrast scrim above both this sample and a native video surface.
+                        backgroundColor(Color.Transparent)
+                        tint(Color.Transparent)
+                        whitePoint(0f)
                         contrast(0f)
-                        optics { copy(refractionStrength = .76f, refractionDisplacement = 11.dp,
-                            refractionProfile = RefractionProfile.Edge(8.dp), refractionHeightFraction = .24f,
-                            depth = OpticalSizeValue.Fixed(.46f), blurRadius = OpticalSizeValue.Fixed(3.5.dp),
+                        optics { copy(refractionStrength = .55f, refractionDisplacement = 6.dp,
+                            refractionProfile = RefractionProfile.Edge(4.dp), refractionHeightFraction = .20f,
+                            depth = OpticalSizeValue.Fixed(.46f), blurRadius = OpticalSizeValue.Fixed(2.5.dp),
                             refractionDetailIntensity = 0f) }
-                        specularIntensity(.26f)
-                        ambientResponse(.08f)
+                        specularIntensity(.24f)
+                        ambientResponse(.04f)
                         chromaticAberrationStrength(0f)
-                        contentNormalBlend(.05f)
+                        contentNormalBlend(.025f)
                     }
                     else -> Unit
                 }

@@ -87,16 +87,35 @@ internal fun Modifier.browseIntentWarmup(
     return this
 }
 
-private data class BrowseViewport(val first: Int, val last: Int, val scrolling: Boolean)
+private data class BrowseViewport(val first: Int, val last: Int, val backwards: Boolean)
+
+@Composable
+private fun rememberBrowseIndexes(items: List<Manga>) = remember(items) {
+    buildMap(items.size) { items.forEachIndexed { index, manga -> put(manga.id, index) } }
+}
+
+private inline fun <T> coverViewport(
+    visible: List<T>, indexes: Map<String, Int>, backwards: Boolean, key: (T) -> Any,
+): BrowseViewport? {
+    var first = Int.MAX_VALUE
+    var last = -1
+    for (item in visible) {
+        val index = indexes[key(item) as? String ?: continue] ?: continue
+        first = minOf(first, index)
+        last = maxOf(last, index)
+    }
+    return if (last < 0) null else BrowseViewport(first, last, backwards)
+}
 
 @Composable
 internal fun BrowseCoverWarmup(
     items: List<Manga>, repository: MangaRepository, active: Boolean, grid: LazyGridState, columns: Int,
 ) {
-    val indexes = remember(items) { items.mapIndexed { index, manga -> manga.id to index }.toMap() }
-    BrowseCoverWarmup(items, repository, active, grid, columns) {
-        val visible = grid.layoutInfo.visibleItemsInfo.mapNotNull { item -> (item.key as? String)?.let(indexes::get) }
-        BrowseViewport(visible.minOrNull() ?: -1, visible.maxOrNull() ?: -1, grid.isScrollInProgress)
+    if (!active || items.isEmpty()) return
+    val indexes = rememberBrowseIndexes(items)
+    BrowseCoverWarmup(items, repository, grid, columns) {
+        if (grid.isScrollInProgress) null
+        else coverViewport(grid.layoutInfo.visibleItemsInfo, indexes, grid.lastScrolledBackward) { it.key }
     }
 }
 
@@ -104,36 +123,39 @@ internal fun BrowseCoverWarmup(
 internal fun BrowseCoverWarmup(
     items: List<Manga>, repository: MangaRepository, active: Boolean, list: LazyListState,
 ) {
-    val indexes = remember(items) { items.mapIndexed { index, manga -> manga.id to index }.toMap() }
-    BrowseCoverWarmup(items, repository, active, list, 2) {
-        val visible = list.layoutInfo.visibleItemsInfo.mapNotNull { item -> (item.key as? String)?.let(indexes::get) }
-        BrowseViewport(visible.minOrNull() ?: -1, visible.maxOrNull() ?: -1, list.isScrollInProgress)
+    if (!active || items.isEmpty()) return
+    val indexes = rememberBrowseIndexes(items)
+    BrowseCoverWarmup(items, repository, list, 2) {
+        if (list.isScrollInProgress) null
+        else coverViewport(list.layoutInfo.visibleItemsInfo, indexes, list.lastScrolledBackward) { it.key }
     }
 }
 
 /** At most the next row of already-listed covers; this never discovers/fetches other works. */
 @Composable
 private fun BrowseCoverWarmup(
-    items: List<Manga>, repository: MangaRepository, active: Boolean, owner: Any, count: Int,
-    viewport: () -> BrowseViewport,
+    items: List<Manga>, repository: MangaRepository, owner: Any, count: Int,
+    viewport: () -> BrowseViewport?,
 ) {
     val context = LocalMangaContext.current
     val policy = remember(context) { ExperiencePolicyStore.get(context) }
-    LaunchedEffect(context, repository, items, active, owner, count) {
-        if (!active || items.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(context, repository, items, owner, count) {
         val warmed = linkedSetOf<String>()
         policy.state.map { it.browseWarmup }.distinctUntilChanged().collectLatest { allowed ->
             if (!allowed) return@collectLatest
             var previousFirst: Int? = null
-            var backwards = false
+            var wasMoving = false
             snapshotFlow(viewport).collectLatest window@{ visible ->
-                if (visible.first < 0 || visible.last < visible.first) return@window
-                previousFirst?.let { old ->
-                    if (old != visible.first) backwards = visible.first < old
+                if (visible == null) {
+                    // Cancel pending work on scroll start. Ignore layout publications until it settles.
+                    wasMoving = true
+                    return@window
                 }
+                val old = previousFirst
+                val backwards = if (!wasMoving && old != null && visible.first != old) visible.first < old
+                    else visible.backwards
+                wasMoving = false
                 previousFirst = visible.first
-                // Do not spend radio/decode work chasing a fling's transient positions.
-                if (visible.scrolling) return@window
                 delay(180L)
                 val budget = policy.state.value
                 if (!budget.browseWarmup) return@window

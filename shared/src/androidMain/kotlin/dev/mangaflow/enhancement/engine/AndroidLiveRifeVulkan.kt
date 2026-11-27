@@ -23,28 +23,33 @@ internal class AndroidRifeVulkanModels(context: Context) {
     } && runtime.abi != null
     private val ready get() = runtime.states.value.getValue(PanelRuntimeId.CUGAN)
 
-    fun descriptor(model: EngineModel?) = EngineDescriptor(
-        EnhancementEngineIds.ANDROID_RIFE_VULKAN, "RIFE 4.6 · Android Vulkan", VERSION, "MIT / BSD-3-Clause",
-        SOURCE, when {
-            !hardware -> EngineReadiness.UNSUPPORTED
-            !ready.installed || ready.pendingRemoval -> EngineReadiness.NOT_INSTALLED
-            ready.requiresUpdate -> EngineReadiness.FAILED
-            model == null -> EngineReadiness.NEEDS_MODELS
-            else -> EngineReadiness.READY_FOR_TRIAL
-        }, when {
-            !hardware -> "当前应用架构或设备未报告 Vulkan 硬件能力"
-            ready.pendingRemoval -> "Vulkan 组件将在重启后移除"
-            ready.requiresUpdate -> "组件需要更新至 1.2.0；已下载的 RIFE 权重保留，更新后支持原尺寸 1080p SDR 输入"
-            !ready.installed -> "先安装签名 ncnn Vulkan 组件，再准备 RIFE 4.6 权重"
-            model == null -> "下载并校验官方 RIFE 4.6 ncnn 参数和权重"
-            else -> "接受最高 1080p SDR 原尺寸输入，先补帧再画质增强；这是输入范围，实时速度取决于设备与组合负载，超预算保留原帧率"
-        }, setOf(1), setOf(EngineContent.VIDEO), canInstall = hardware && !ready.pendingRemoval &&
-            (!ready.installed || ready.requiresUpdate || model == null), supportsInterpolation = true, realtime = true,
-        downloadBytes = MODEL_BYTES.takeIf { ready.installed && model == null },
-    )
+    fun descriptor(model: EngineModel?): EngineDescriptor {
+        val runtime = ready
+        return EngineDescriptor(
+            EnhancementEngineIds.ANDROID_RIFE_VULKAN, "RIFE 4.6 · Android Vulkan", VERSION, "MIT / BSD-3-Clause",
+            SOURCE, when {
+                !hardware -> EngineReadiness.UNSUPPORTED
+                runtime.requiresUpdate -> EngineReadiness.FAILED
+                !runtime.installed || runtime.pendingRemoval -> EngineReadiness.NOT_INSTALLED
+                model == null -> EngineReadiness.NEEDS_MODELS
+                else -> EngineReadiness.READY_FOR_TRIAL
+            }, when {
+                !hardware -> "当前应用架构或设备未报告 Vulkan 硬件能力"
+                runtime.pendingRemoval -> "Vulkan 组件将在重启后移除"
+                runtime.requiresUpdate && model != null -> "组件需要更新。RIFE 4.6 权重已校验，只需更新签名 Vulkan 组件。"
+                runtime.requiresUpdate -> "组件需要更新。请准备签名 Vulkan 组件和 RIFE 4.6 权重。"
+                !runtime.installed && model != null -> "RIFE 4.6 权重已校验，只需安装签名 Vulkan 组件。"
+                !runtime.installed -> "先安装签名 ncnn Vulkan 组件，再准备 RIFE 4.6 权重"
+                model == null -> "下载并校验官方 RIFE 4.6 ncnn 参数和权重"
+                else -> "接受最高 1080p SDR 原尺寸输入，先补帧再画质增强；这是输入范围，实时速度取决于设备与组合负载，超预算保留原帧率"
+            }, setOf(1), setOf(EngineContent.VIDEO), canInstall = hardware && !runtime.pendingRemoval &&
+                (!runtime.installed || runtime.requiresUpdate || model == null), supportsInterpolation = true, realtime = true,
+            downloadBytes = MODEL_BYTES.takeIf { runtime.installed && model == null },
+        )
+    }
 
     fun model(): EngineModel? {
-        if (!hardware || !ready.installed || ready.pendingRemoval || PARTS.any { !it.matches(File(installed, it.name)) }) return null
+        if (PARTS.any { !it.matches(File(installed, it.name)) }) return null
         return EngineModel("rife-vulkan:4.6-a7532fc", EnhancementEngineIds.ANDROID_RIFE_VULKAN, "RIFE 4.6 · Vulkan",
             installed.canonicalPath, DIGEST, 1, setOf(EngineContent.VIDEO), "MIT", "4.6", MODEL_BYTES,
             inputType = "NCNN_RGB_PAIR_TIME_VKMAT")
@@ -57,6 +62,7 @@ internal class AndroidRifeVulkanModels(context: Context) {
 
     suspend fun open(expected: EngineModel): Long {
         check(!ready.requiresUpdate) { "组件需要更新至 1.2.0；请在补帧组件中更新，已下载的 RIFE 权重会保留" }
+        check(hardware && ready.installed && !ready.pendingRemoval) { "签名 Vulkan 组件尚未准备好" }
         require(model() == expected) { "RIFE 4.6 Vulkan 参数或权重尚未通过本机校验" }
         runtime.ensureLoaded(PanelRuntimeId.CUGAN)
         currentCoroutineContext().ensureActive()

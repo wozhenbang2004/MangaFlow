@@ -19,6 +19,7 @@ actual fun createEnhancementEngine(context: PlatformContext): EnhancementEngine 
 private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEngine {
     private val root = File(context.dataRoot, "enhancement/engines")
     private val runtime = DesktopEngineRuntime(root)
+    private val inventoryDigests = DesktopInventoryDigests()
     private val animeJaNai = DesktopAnimeJaNai(root)
     private val anime4kVariants = dev.mangaflow.anime.player.Anime4KOptionalModels(context)
     private val imports = ImportedEngineModels(File(context.dataRoot, "enhancement/models"), EnhancementEngineIds.MANGAJANAI)
@@ -27,18 +28,19 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
         System.getProperty("os.arch") in setOf("amd64", "x86_64")
 
     override suspend fun inspect(): EngineInventory = withContext(Dispatchers.IO) {
+        val liveModels = if (windows) animeJaNai.models(inventoryDigests::digest) else emptyList()
         val models = installedModels() + DesktopArtCnn.models.takeIf { windows }.orEmpty() +
-            (if (windows) animeJaNai.models() else emptyList()) + anime4kVariants.installed()
-        val frameModels = installedFrameModels(runtime.folder(DesktopEnginePackages.video)) +
-            if (windows) animeJaNai.frames() else emptyList()
+            liveModels + anime4kVariants.installed()
+        val frameModels = installedFrameModels(runtime.folder(DesktopEnginePackages.video), inventoryDigests::digest) +
+            if (windows) animeJaNai.frames(inventoryDigests::digest) else emptyList()
         fun descriptor(pack: DesktopEnginePackage, title: String, video: Boolean): EngineDescriptor {
-            val executable = if (windows) runtime.executable(pack) else null
-            val installed = models.any { it.engineId == pack.id } || video && frameModels.isNotEmpty()
+            val executable = if (windows) runtime.executable(pack, inventoryDigests::digest) else null
+            val installed = models.any { it.engineId == pack.id } || video && frameModels.any { it.engineId == pack.id }
             val ready = when {
                 !windows -> EngineReadiness.UNSUPPORTED
                 executable == null -> EngineReadiness.NOT_INSTALLED
                 !installed -> EngineReadiness.NEEDS_MODELS
-                video && runtime.executable(DesktopEnginePackages.ffmpeg) == null -> EngineReadiness.NEEDS_MODELS
+                video && runtime.executable(DesktopEnginePackages.ffmpeg, inventoryDigests::digest) == null -> EngineReadiness.NEEDS_MODELS
                 else -> EngineReadiness.READY_FOR_TRIAL
             }
             return EngineDescriptor(pack.id, title, pack.version, "GPL-3.0；JaNai 权重按其非商用许可",
@@ -64,8 +66,8 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                 DesktopArtCnn.SOURCE, if (windows) EngineReadiness.BUILT_IN else EngineReadiness.UNSUPPORTED,
                 "真实 C4F16 / C4F32 GPU 模型，原生 2× 亮度超分。渲染器条件与实际执行在播放中显示。",
                 setOf(2), setOf(EngineContent.VIDEO), realtime = true),
-            animeJaNai.runtimeDescriptor(windows),
-            animeJaNai.frameDescriptor(windows),
+            animeJaNai.runtimeDescriptor(windows, liveModels),
+            animeJaNai.frameDescriptor(windows, liveModels.isNotEmpty(), frameModels),
         ) + anime4kEngineDescriptors() + anime4kVariants.descriptors(),
             models, models.sumOf { it.bytes } + frameModels.sumOf { it.bytes }, directoryBytes(root), frameModels)
     }
@@ -215,7 +217,7 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
             if (!folder.isDirectory) emptyList() else folder.walkTopDown().maxDepth(9)
                 .filter { it.isFile && it.extension.equals("onnx", true) &&
                     (it.name.contains("MangaJaNai") || it.name.contains("IllustrationJaNai") || it.name.contains("AnimeJaNai")) }
-                .take(200).mapNotNull { file -> describeInstalledModel(file, engineId) }.toList()
+                .take(200).mapNotNull { file -> describeInstalledModel(file, engineId, inventoryDigests::digest) }.toList()
         }
         // The official setup may use its shared store. Only read model-data directories named in its own runtime manifest.
         val manifests = owned.flatMap { (folder, _) -> if (folder.isDirectory)
@@ -223,20 +225,21 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
         val shared = manifests.flatMap { manifest -> readRuntimeModelDirectories(manifest) }.distinctBy { it.canonicalPath }
             .flatMap { folder -> if (folder.isDirectory) folder.walkTopDown().maxDepth(4).filter {
                 it.isFile && it.extension.equals("onnx", true) && (it.name.contains("MangaJaNai") || it.name.contains("IllustrationJaNai"))
-            }.take(200).mapNotNull { describeInstalledModel(it, EnhancementEngineIds.MANGAJANAI) }.toList() else emptyList() }
+            }.take(200).mapNotNull { describeInstalledModel(it, EnhancementEngineIds.MANGAJANAI, inventoryDigests::digest) }.toList() else emptyList() }
         return (imports.list() + videoImports.list() + found + shared).distinctBy { it.path }
     }
 }
 
-private fun installedFrameModels(directory: File): List<EngineModel> = if (!directory.isDirectory) emptyList() else
-    directory.walkTopDown().maxDepth(9).filter { it.isFile && it.name.matches(Regex("rife_v4\\.[0-9]{1,2}(?:_lite)?(?:_ensemble)?\\.onnx")) }
+private fun installedFrameModels(directory: File, digest: (File) -> String): List<EngineModel> = if (!directory.isDirectory) emptyList() else
+    directory.walkTopDown().maxDepth(9).onEnter { it.canonicalFile == it.absoluteFile }
+        .filter { it.isFile && it.canonicalFile == it.absoluteFile && it.name.matches(Regex("rife_v4\\.[0-9]{1,2}(?:_lite)?(?:_ensemble)?\\.onnx")) }
         .map { file ->
-            val hash = engineSha256(file)
+            val hash = digest(file)
             EngineModel("rife:$hash", EnhancementEngineIds.VIDEOJANAI, file.nameWithoutExtension, file.canonicalPath, hash, 1,
                 setOf(EngineContent.VIDEO), "MIT · RIFE（以组件内许可为准）", "sha256:${hash.take(12)}", file.length(), "RIFE_FRAME_PAIR")
         }.toList()
 
-private fun describeInstalledModel(file: File, engineId: String): EngineModel? = runCatching {
+private fun describeInstalledModel(file: File, engineId: String, digest: (File) -> String): EngineModel? = runCatching {
     val scale = Regex("(?:^|_)([124])x[_-]", RegexOption.IGNORE_CASE).find(file.name)?.groupValues?.get(1)?.toInt()
         ?: return null
     val content = when {
@@ -244,7 +247,7 @@ private fun describeInstalledModel(file: File, engineId: String): EngineModel? =
         file.name.contains("IllustrationJaNai") -> setOf(EngineContent.COLOR, EngineContent.WEBTOON)
         else -> setOf(EngineContent.BLACK_WHITE)
     }
-    val hash = engineSha256(file)
+    val hash = digest(file)
     EngineModel("$engineId:$hash", engineId, file.nameWithoutExtension, file.canonicalPath, hash, scale,
         content, "CC BY-NC 4.0 · the-database（以组件内许可为准）", "sha256:${hash.take(12)}", file.length(),
         if (file.name.contains("fp16")) "NCHW_RGB_FLOAT16" else "NCHW_RGB_FLOAT")

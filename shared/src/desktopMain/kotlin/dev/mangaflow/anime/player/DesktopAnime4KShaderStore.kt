@@ -19,7 +19,8 @@ import java.security.MessageDigest
 
 /** App-owned, immutable-by-version resources; no media/source identity enters paths. */
 internal object DesktopAnime4KShaderStore {
-    fun prepare(context: PlatformContext, mode: AnimeVideoEnhancementMode, scale: Int = 2, model: EngineModel? = null): List<String> {
+    fun prepare(context: PlatformContext, mode: AnimeVideoEnhancementMode, scale: Int, model: EngineModel?,
+        enhanceAtNativeSize: Boolean): List<String> {
         val optional = model?.takeIf { Anime4KOptionalModels.supports(it.engineId) }
         val dedicated = mode == AnimeVideoEnhancementMode.MODEL && optional == null
         val shaders = when {
@@ -30,10 +31,14 @@ internal object DesktopAnime4KShaderStore {
         if (shaders.isEmpty()) return emptyList()
         val root = Path.of(dataDirectory(context).path).toAbsolutePath().normalize()
         val privateRoot = privateDirectory(root.resolve(if (dedicated) "artcnn" else "anime4k"))
-        val directory = privateDirectory(privateRoot.resolve(if (dedicated) DesktopArtCnn.VERSION else Anime4KShaderLibrary.UPSTREAM_COMMIT))
+        val version = if (dedicated) DesktopArtCnn.VERSION else Anime4KShaderLibrary.UPSTREAM_COMMIT
+        val manualUpscale = scale == 2 && enhanceAtNativeSize
+        val directory = privateDirectory(privateRoot.resolve(if (manualUpscale) "$version-manual-2x" else version))
         check(shaders.map { it.first }.distinct().size == shaders.size) { "Duplicate enhancement resource" }
-        return shaders.map { (name, bytes) ->
+        return shaders.map { (name, source) ->
             check(Regex("(?:Anime4K|ArtCNN)_[A-Za-z0-9_]+\\.glsl").matches(name)) { "Invalid enhancement resource" }
+            val bytes = if (manualUpscale && (dedicated || name.startsWith("Anime4K_Upscale_")))
+                enableNativeSize(source, dedicated) else source
             val path = directory.resolve(name)
             val digest = sha256(bytes)
             if (!matches(path, bytes.size, digest)) {
@@ -57,6 +62,18 @@ internal object DesktopAnime4KShaderStore {
             privateFile(path)
             path.toString()
         }
+    }
+
+    private fun enableNativeSize(bytes: ByteArray, artCnn: Boolean): ByteArray {
+        val plane = if (artCnn) "LUMA" else "MAIN"
+        val threshold = if (artCnn) "1.3" else "1.200"
+        val gate = "//!WHEN OUTPUT.w $plane.w / $threshold > OUTPUT.h $plane.h / $threshold > *"
+        val source = bytes.decodeToString()
+        check(gate in source) { "无法确认模型的放大条件" }
+        // Keep the upstream display-size rule for large sources. A requested 2× graph
+        // can also process up to 1080p before mpv resamples to the actual window size.
+        val requested = "$gate $plane.w $plane.h * ${1920 * 1080} > ! +"
+        return source.replace(gate, requested).encodeToByteArray()
     }
 
     private fun privateDirectory(path: Path): Path {

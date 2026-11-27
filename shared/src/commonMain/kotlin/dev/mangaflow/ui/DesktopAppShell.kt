@@ -291,7 +291,7 @@ internal fun DesktopNavigationWorkspace(
             val labels = animateFloatAsState(if (expanded) 1f else 0f,
                 if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
                 label = "desktop-navigation-labels")
-            val wideRail = desktopNavigationLabelWidth(LocalMangaWindow.current.fontScale)
+            val wideRail = desktopNavigationLabelWidth(LocalDensity.current.fontScale.coerceAtLeast(1f))
             if (visible) Box(Modifier.matchParentSize().mangaHazeSource(workspaceBackdrop, zIndex = -1f)
                 .background(MaterialTheme.colorScheme.background)) { wallpaper() }
             // The gallery is measured at its destination width only once. The rail animates over it.
@@ -321,7 +321,7 @@ internal fun DesktopNavigationPane(
     val railHover = remember { MutableInteractionSource() }
     val keyboardPulse = remember { mutableIntStateOf(0) }
     val scroll = rememberScrollState()
-    val fontScale = LocalMangaWindow.current.fontScale
+    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val motion = LocalMotionEnabled.current
     val paper = colors.surfaceContainerLow
     val pages = remember(destinations) { destinations.indices.filter { !destinations[it].utility } }
@@ -560,7 +560,8 @@ internal fun DesktopSearchField(
     val inputInteraction = remember { MutableInteractionSource() }
     val focused by inputInteraction.collectIsFocusedAsState()
     val colors = MaterialTheme.colorScheme
-    val height = maxOf(40.dp, 22.dp * LocalMangaWindow.current.fontScale + 13.dp)
+    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val height = maxOf(40.dp, 22.dp * fontScale + 13.dp)
     val searchLabel = if (!showScopeSelector) "搜索漫画标题" else when (target) {
         SearchTarget.TITLE -> "搜索漫画标题"
         SearchTarget.AUTHOR -> "搜索作者"
@@ -581,7 +582,6 @@ internal fun DesktopSearchField(
         requester.requestFocus()
     }
     BoxWithConstraints(modifier.height(height)) {
-        val fontScale = LocalMangaWindow.current.fontScale
         val showScopeName = showScopeSelector && maxWidth >= 332.dp * fontScale
         val hintRoom = maxWidth >= 416.dp * fontScale
         val keyHint = when {
@@ -618,7 +618,7 @@ internal fun DesktopSearchField(
                         input()
                     }
                 })
-            if (hintRoom) Box(Modifier.width(54.dp * LocalMangaWindow.current.fontScale).clearAndSetSemantics {},
+            if (hintRoom) Box(Modifier.width(54.dp * fontScale).clearAndSetSemantics {},
                 contentAlignment = Alignment.Center) {
                 MotionSwap(keyHint, scaleContent = false) { hint ->
                     if (hint != null) DesktopShortcutHint(hint)
@@ -732,13 +732,14 @@ internal fun DesktopDiscoveryHeader(
     // Move the existing text field (selection, composition and focus) across breakpoint rows.
     val field = remember { movableContentOf<Modifier> { bounds -> inputContent.value(bounds) } }
     val displayed = if (searching) "搜索结果" else title
+    val tabContentWidth = desktopTabContentWidth(tabLabels)
     BoxWithConstraints(modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
         .pointerInput(Unit) {}.semantics { paneTitle = displayed }) {
         val window = LocalMangaWindow.current
         val scale = window.fontScale.coerceAtLeast(1f)
         val inset = MangaLayout.sidePadding(maxWidth)
         val available = (maxWidth - inset * 2).coerceAtLeast(1.dp)
-        val tabWidth = (desktopTabContentWidth(tabLabels) + 8.dp).coerceAtMost(available)
+        val tabWidth = (tabContentWidth + 8.dp).coerceAtMost(available)
         val titleBudget = 132.dp * scale + 78.dp
         val fieldBesideTitle = available >= titleBudget + 240.dp * scale
         val inlineTabs = if (fieldBesideTitle) window.shortHeight && available >= titleBudget + tabWidth + 290.dp * scale
@@ -761,7 +762,11 @@ internal fun DesktopDiscoveryHeader(
                 } else navigation()
                 DesktopPageHeading(displayed, Modifier.weight(1f))
                 if (inlineTabs && !searching) tabs()
-                if (fieldBesideTitle) field(Modifier.width(fieldWidth.value.coerceAtMost(fieldBudget)))
+                if (fieldBesideTitle) field(Modifier.layout { measurable, bounds ->
+                    val width = fieldWidth.value.coerceAtMost(fieldBudget).roundToPx().coerceIn(bounds.minWidth, bounds.maxWidth)
+                    val body = measurable.measure(bounds.copy(minWidth = width, maxWidth = width))
+                    layout(body.width, body.height) { body.placeRelative(0, 0) }
+                })
                 recent()
             }
             if (!fieldBesideTitle) field(Modifier.fillMaxWidth().padding(top = 3.dp))

@@ -45,7 +45,9 @@ import coil3.size.Scale
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.readerPriority
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.imagePlatformContext
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.storage.StorageLock
 import dev.mangaflow.reader.ReaderDetailUnavailable
 import dev.mangaflow.reader.ReaderSpreadViewport
@@ -89,6 +91,7 @@ internal fun ReaderEnhancedLayer(
     asset: ReaderEnhancedPage?,
     modifier: Modifier,
     alignment: Alignment = Alignment.Center,
+    pagePreviewSize: IntSize,
     zoom: ZoomableState? = null,
     spread: ReaderSpreadViewport? = null,
     visibleWindow: (() -> VerticalPageWindow?)? = null,
@@ -111,26 +114,31 @@ internal fun ReaderEnhancedLayer(
         finally { held?.close(); lease = null }
     }
     val liveLease = lease ?: return
-    val request = remember(liveLease) {
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val previewSize = if (desktop) pagePreviewSize else IntSize(1600, 1600)
+    val request = remember(liveLease, previewSize) {
         val reads = mutableListOf<AutoCloseable>()
         val readsLock = StorageLock()
         fun finishRead() = synchronized(readsLock) { if (reads.isNotEmpty()) reads.removeAt(0).close() }
         ImageRequest.Builder(imagePlatformContext(context)).data(liveLease.file.toURI())
             .readerPriority(asset.identity.sourceId).memoryCacheKey("enhanced:${asset.identity.key}")
             .diskCachePolicy(CachePolicy.DISABLED).networkCachePolicy(CachePolicy.DISABLED)
-            .size(1600, 1600).scale(Scale.FIT)
+            .size(previewSize.width, previewSize.height).scale(Scale.FIT)
             .listener(onStart = { synchronized(readsLock) { reads += liveLease.retain() } },
                 onCancel = { finishRead() }, onSuccess = { _, _ -> finishRead() }, onError = { _, _ -> finishRead() })
             .build()
     }
-    val preview = rememberAsyncImagePainter(request)
+    val preview = key(liveLease) { rememberAsyncImagePainter(request) }
     val previewState by preview.state.collectAsState()
     val ready = previewState is AsyncImagePainter.State.Success
+    val canDecodeTiles = ready || (desktop && previewState is AsyncImagePainter.State.Error)
+    val previewPixels by rememberUpdatedState(
+        (previewState as? AsyncImagePainter.State.Success)?.result?.image?.let { IntSize(it.width, it.height) }
+    )
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     var tiles by remember(asset.identity, liveLease) { mutableStateOf<List<EnhancedTileBitmap>>(emptyList()) }
-    // A completed file is not yet a complete drawable viewport. Keep the original
-    // underneath until the preview and every requested visible tile are ready.
-    val displayReady = ready && tiles.isNotEmpty()
+    // Both renderers read the finished enhanced file. On desktop either can supply the first frame.
+    val displayReady = if (desktop) ready || tiles.isNotEmpty() else ready && tiles.isNotEmpty()
     val fraction by rememberUpdatedState(comparisonFraction)
     val liveWindow by rememberUpdatedState(visibleWindow)
     val image = IntSize(asset.width, asset.height)
@@ -169,12 +177,27 @@ internal fun ReaderEnhancedLayer(
                 it.width > 0f && it.height > 0f
         } ?: Rect.Zero
 
-    LaunchedEffect(liveLease, zoom, spread, ready, viewport, alignment) {
-        if (!ready || viewport.width <= 0 || viewport.height <= 0) return@LaunchedEffect
+    fun previewCovers(drawn: Rect): Boolean {
+        val pixels = previewPixels ?: return false
+        val scale = if (spread == null) 1f else {
+            if (spread.viewport.width <= 0) return false
+            runCatching {
+                with(spread.zoom.coordinateSystem) {
+                    unscaledContentBounds.rectIn(CoordinateSpace.Viewport).width / spread.viewport.width
+                }
+            }.getOrNull() ?: return false
+        }
+        if (!scale.isFinite() || scale <= 0f) return false
+        return pixels.width + 0.5f >= minOf(drawn.width * scale, image.width.toFloat()) &&
+            pixels.height + 0.5f >= minOf(drawn.height * scale, image.height.toFloat())
+    }
+
+    LaunchedEffect(liveLease, zoom, spread, canDecodeTiles, viewport, alignment) {
+        if (!canDecodeTiles || viewport.width <= 0 || viewport.height <= 0) return@LaunchedEffect
         val retained = mutableMapOf<EnhancedTile, ImageBitmap>()
         snapshotFlow {
             val drawn = drawingBounds()
-            if (drawn.width <= 0 || drawn.height <= 0) emptyList()
+            if (drawn.width <= 0 || drawn.height <= 0 || (desktop && previewCovers(drawn))) emptyList()
             else {
                 val overlap = visibleBounds().intersect(drawn)
                 if (overlap.width <= 0 || overlap.height <= 0) emptyList() else {
@@ -190,7 +213,13 @@ internal fun ReaderEnhancedLayer(
                 }
             }
         }.distinctUntilChanged().collectLatest { requested ->
-            if (requested.isEmpty()) return@collectLatest
+            if (requested.isEmpty()) {
+                if (desktop) {
+                    retained.clear()
+                    tiles = emptyList()
+                }
+                return@collectLatest
+            }
             retained.keys.retainAll(requested.toSet())
             for (tile in requested) {
                 if (tile in retained) continue
@@ -228,7 +257,7 @@ internal fun ReaderEnhancedLayer(
             } ?: 0f
             clipRect(left = divider, top = 0f, right = size.width, bottom = size.height) {
                 translate(bounds.left, bounds.top) {
-                    with(preview) { draw(Size(bounds.width, bounds.height)) }
+                    if (ready) with(preview) { draw(Size(bounds.width, bounds.height)) }
                     tiles.forEach { decoded ->
                         val rect = decoded.tile.bounds
                         val left = rect.left.toFloat() / image.width * bounds.width

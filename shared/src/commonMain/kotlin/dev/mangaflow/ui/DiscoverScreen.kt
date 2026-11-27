@@ -940,13 +940,15 @@ private fun DiscoveryPane(
     val ranking = state.mode == DiscoveryMode.RANKING
     val recommended = state.mode == DiscoveryMode.RECOMMENDED
     val aggregateAdult = adultProfile && state.sourceScope.startsWith("scoped:*:")
+    val booksBySource = remember(state.items, adultProfile, aggregateAdult, ranking) {
+        if (adultProfile && (aggregateAdult || ranking)) state.items.groupBy(Manga::sourceId) else emptyMap()
+    }
     val displayedBooks = remember(state.items, state.searchSources.keys, aggregateAdult, ranking) {
         if (!aggregateAdult || ranking) state.items
         else {
             // Keep each site's own order. In the combined view a faster response
             // must not bury all the other sites several pages below it.
-            val bySource = state.items.groupBy(Manga::sourceId)
-            val lanes = (state.searchSources.keys + bySource.keys).mapNotNull(bySource::get)
+            val lanes = (state.searchSources.keys + booksBySource.keys).mapNotNull(booksBySource::get)
             buildList(state.items.size) {
                 repeat(lanes.maxOfOrNull { it.size } ?: 0) { index ->
                     lanes.forEach { lane -> lane.getOrNull(index)?.let { add(it) } }
@@ -973,11 +975,18 @@ private fun DiscoveryPane(
     }
     val showFeatured = recommended && (!adultProfile || aggregateAdult) &&
         (featured.isNotEmpty() || state.loading)
-    val mixedSources = adultProfile && state.items.asSequence().map(Manga::sourceId).distinct().take(2).count() > 1
+    val mixedSources = when {
+        !adultProfile -> false
+        booksBySource.isNotEmpty() -> booksBySource.size > 1
+        else -> remember(state.items) {
+            val firstSource = state.items.firstOrNull()?.sourceId
+            state.items.any { it.sourceId != firstSource }
+        }
+    }
     val desktop = platformKind == PlatformKind.DESKTOP
     val androidManga = platformKind == PlatformKind.ANDROID && !adultProfile
     val coverPlaceholders = !ranking && columns != 1 && (androidManga || adultProfile || desktop)
-    val rankGutter = if (ranking) browseRankGutter(state, adultProfile) else 0.dp
+    val rankGutter = if (ranking) browseRankGutter(state.items, booksBySource) else 0.dp
     val pull = rememberBottomPullLoadState(
         key = paneKey,
         enabled = !desktop && active && state.items.isNotEmpty() && state.hasMore && !state.loading &&
@@ -1018,7 +1027,7 @@ private fun DiscoveryPane(
             val info = grid.layoutInfo
             val chromeItems = 1 + (if (ranking && !indexed) 0 else 1) + (if (showFeatured && !adultProfile) 1 else 0) +
                 (if (sourceHeader == null) 0 else 1) +
-                (if (ranking && aggregateAdult) state.items.asSequence().map(Manga::sourceId).distinct().count() else 0)
+                (if (ranking && aggregateAdult) booksBySource.size else 0)
             info.totalItemsCount == count + chromeItems &&
                 (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >=
                     info.totalItemsCount - visibleColumns * 2 - 1
@@ -1247,7 +1256,7 @@ private fun DiscoveryPane(
                 if (adultProfile) {
                     // Each native provider owns its own ordering. Never merge JM/Pica rank
                     // values or draw Copy heat metrics over either provider's list.
-                    state.items.groupBy { it.sourceId }.forEach { (source, sourceItems) ->
+                    booksBySource.forEach { (source, sourceItems) ->
                         if (aggregateAdult) item(key = "rank-provider:$source", span = { GridItemSpan(maxLineSpan) }) {
                             Text(sourceItems.first().sourceName.ifBlank { sourceDisplayName(source) },
                                 style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp, bottom = 2.dp))
@@ -1387,10 +1396,10 @@ private fun browseRankStyle() = mangaMetricValueStyle(14.sp, 20.sp).copy(
     fontWeight = FontWeight.Medium, letterSpacing = .4f.sp)
 
 @Composable
-private fun browseRankGutter(state: BrowseState, perSource: Boolean): Dp {
-    val digits = remember(state.items, perSource) {
-        val largest = if (perSource) state.items.groupingBy(Manga::sourceId).eachCount().values.maxOrNull()
-            else state.items.maxOfOrNull { it.rank ?: 0 }
+private fun browseRankGutter(items: List<Manga>, booksBySource: Map<String, List<Manga>>): Dp {
+    val digits = remember(items, booksBySource) {
+        val largest = if (booksBySource.isNotEmpty()) booksBySource.values.maxOfOrNull { it.size }
+            else items.maxOfOrNull { it.rank ?: 0 }
         (largest ?: 0).toString().length.coerceAtLeast(2)
     }
     val measurer = rememberTextMeasurer()
@@ -1500,18 +1509,19 @@ private fun DesktopBrowsePagination(
     val latestEnabled by rememberUpdatedState(enabled)
     val latestNearEnd by rememberUpdatedState(nearEnd)
     val latestMore by rememberUpdatedState(onMore)
-    val contentKey = browseContentKey(state)
+    val contentKey = remember(state) { browseContentKey(state) }
+    val latestContentKey by rememberUpdatedState(contentKey)
     LaunchedEffect(contentKey, state.updatedAt) {
-        var requestedCount = -1
+        var requestedCount = 0
         snapshotFlow {
             val current = latestState
             val count = current.items.size
-            val eligible = latestEnabled && browseContentKey(current) == contentKey && count > 0 &&
+            val eligible = latestEnabled && latestContentKey == contentKey && count > 0 &&
                 current.hasMore && !current.loading && !current.loadingMore && !current.refreshing &&
                 current.error == null && current.failedPage == null && latestNearEnd(count)
-            eligible to count
-        }.collect { (eligible, count) ->
-            if (eligible && count > requestedCount) {
+            if (eligible) count else 0
+        }.collect { count ->
+            if (count > requestedCount) {
                 requestedCount = count
                 latestMore()
             }

@@ -449,10 +449,20 @@ private fun <T> StateFlow<T>.collectVisibleAsState(visible: Boolean): State<T> {
     return visibleFlow.collectAsStateWithLifecycle(initialValue = source.value)
 }
 
-@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = rememberMangaViewModel()) {
-    val windowSize = LocalMangaWindow.current
+    // The window publishes every resize step. Keep the app's subscriptions and route owners
+    // in a separate restart scope, with exact sizes read only where a surface needs them.
+    val window = rememberUpdatedState(LocalMangaWindow.current)
+    MangaFlowContent(openUpdatesRequest, openDownloadsRequest, onRequestNotifications, model, window)
+}
+
+@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun MangaFlowContent(
+    openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNotifications: () -> Unit,
+    model: MangaViewModel, window: State<MangaWindowSize>,
+) {
     val wallpaperContext = LocalContext.current.applicationContext
     val appVersion = remember(wallpaperContext) { platformVersion(wallpaperContext) }
     val experience = remember(wallpaperContext) { ExperiencePolicyStore.get(wallpaperContext) }
@@ -706,6 +716,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val copyGroupTerms by model.recentCopyGroupTerms.collectVisibleAsState(copyGroupSearch && searchExpanded)
     val copyGroupEnabled = copyGroupSearch && "copy" in model.repository.enabledSources()
     val favorites by model.library.favorites.collectVisibleAsState(reading == null)
+    val favoriteIds = remember(favorites) { favorites.mapTo(HashSet(favorites.size), Manga::id) }
     val history by model.library.history.collectVisibleAsState(reading == null || recentReadingOpen)
     LaunchedEffect(favorites, history, adoptedResumeTargets, account.profile?.username) {
         model.copyShelfSync.onLocalReadingChanged()
@@ -884,13 +895,16 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         if (desktopFindOwner != frame.key) desktopFindOwner = null
     }
     val desktop = platformKind == PlatformKind.DESKTOP
-    val desktopNavigationVisible = desktop && reading == null && windowSize.canDockDesktopNavigation() &&
+    val canDock by remember(window) { derivedStateOf { window.value.canDockDesktopNavigation() } }
+    val canExpand by remember(window) { derivedStateOf { window.value.canExpandDesktopNavigation() } }
+    val desktopNavigationVisible = desktop && reading == null && canDock &&
         !(section == Section.ANIME && animeImmersive)
     val desktopWorkspaceBackdrop = if (desktop) rememberHazeState() else drawerBackdrop
     val desktopRoot = desktopNavigationVisible && frame is Frame.Root
-    val desktopNavigationCanExpand = desktopNavigationVisible && windowSize.canExpandDesktopNavigation()
+    val desktopNavigationCanExpand = desktopNavigationVisible && canExpand
     val desktopNavigationWide = desktopNavigationCanExpand && desktopNavigationMode != 2
-    val desktopNavigationWidth = if (desktopNavigationWide) desktopNavigationLabelWidth(windowSize.fontScale)
+    val density = LocalDensity.current
+    val desktopNavigationWidth = if (desktopNavigationWide) desktopNavigationLabelWidth(density.fontScale.coerceAtLeast(1f))
         else DesktopNavigationRailWidth
     val profileSections = remember(contentProfile) {
         if (contentProfile == ContentProfile.ANIME) {
@@ -1133,7 +1147,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     if (tagSearchVisible) {
         CompositionLocalProvider(LocalMangaMetrics provides displayedMetrics) {
-        val panelHeight = (windowSize.height * .72f - 60.dp).coerceAtLeast(1.dp)
+        val panelHeight = (window.value.height * .72f - 60.dp).coerceAtLeast(1.dp)
         val closeTags: () -> Unit = { tagSearchVisible = false; browseActions.clearSearch() }
         MotionBottomSheet(onDismissRequest = closeTags) { dismiss ->
             Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).navigationBarsPadding()) {
@@ -1164,9 +1178,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     SystemBarAppearance(lightStatus = !darkSystem, lightNavigation = !darkSystem,
         active = frame is Frame.Root && !(section == Section.ANIME && animeImmersive))
 
-    val density = LocalDensity.current
-    val drawerWidth = (296.dp + 48.dp * (windowSize.fontScale - 1f)).coerceAtMost(360.dp)
-        .coerceAtMost((windowSize.width - 24.dp).coerceAtLeast(1.dp))
+    val drawerWidth by remember(window) { derivedStateOf {
+        val size = window.value
+        (296.dp + 48.dp * (size.fontScale - 1f)).coerceAtMost(360.dp)
+            .coerceAtMost((size.width - 24.dp).coerceAtLeast(1.dp))
+    } }
     var measuredDrawerWidth by remember { mutableFloatStateOf(0f) }
     var drawerSheet by remember { mutableStateOf<LayoutCoordinates?>(null) }
     val drawerWidthPx = measuredDrawerWidth.takeIf { it > 0f } ?: with(density) { drawerWidth.toPx() }
@@ -1544,7 +1560,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             active = current.key == frame.key && !currentBack.gesturing && !currentBack.completed,
                             onBack = closeCopyExplore,
                             onOpen = { model.openManga(it) },
-                            isFavorite = { manga -> favorites.any { it.id == manga.id } },
+                            isFavorite = { manga -> manga.id in favoriteIds },
                             onToggleFavorite = model::toggleFavorite,
                         )
                     }
@@ -1669,7 +1685,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         discussionWorks, modifier, bottom, paneActive && sourceDetailsId == null,
                                         profileAccountRevision, recoverProfileAccount) }
                                 } else null,
-                                isFavorite = favorites.any { it.id == current.state.manga.id },
+                                isFavorite = current.state.manga.id in favoriteIds,
                                 progress = history.firstOrNull { it.manga.id == current.state.manga.id },
                                 chapterPositions = chapterPositions,
                                 cloudProgress = copyProgress?.takeIf { it.mangaId == current.state.manga.id &&
@@ -1811,7 +1827,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             }
                         }
                         val contentWidth = if (playerOwnsScreen) {
-                            windowSize.width
+                            window.value.width
                         } else if (desktop && current.section != Section.DISCOVER) {
                             MangaLayout.DesktopWorkspaceWidth
                         } else when (current.section) {
@@ -1821,7 +1837,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             Section.DISCOVER -> when {
                                 !desktop -> MangaLayout.BrowseWidth
                                 LocalMangaWindow.current.width < 760.dp -> LocalMangaWindow.current.width
-                                else -> MangaLayout.desktopBrowseWidth(windowSize.width)
+                                else -> MangaLayout.desktopBrowseWidth(window.value.width)
                             }
                             else -> MangaLayout.BrowseWidth
                         }
@@ -1932,7 +1948,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 } } else null,
                                                 onRetrySourceFilters = retrySourceFilters,
                                                 onOpen = { model.openManga(it) },
-                                                isFavorite = { manga -> favorites.any { it.id == manga.id } },
+                                                isFavorite = { manga -> manga.id in favoriteIds },
                                                 onToggleFavorite = model::toggleFavorite,
                                             )
                                         }
@@ -1957,7 +1973,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                             if (copyGroupEnabled) model.noteCopyGroupResultOpened(manga)
                                                             model.openManga(manga)
                                                         }),
-                                                        desktopShelfAction(favorites.any { it.id == manga.id }) { model.toggleFavorite(manga) },
+                                                        desktopShelfAction(manga.id in favoriteIds) { model.toggleFavorite(manga) },
                                                     ) },
                                                     onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
                                                     onTarget = browseActions::setSearchTarget, onTag = browseActions::toggleSearchTag,

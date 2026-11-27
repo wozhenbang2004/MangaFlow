@@ -26,21 +26,14 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
@@ -215,11 +208,12 @@ internal fun SourceMetricBadges(
 
     val showOverflow = compact || showMore
     val interaction = remember(identity) { MutableInteractionSource() }
-    var stackBounds by remember(identity) { mutableStateOf(Rect.Zero) }
+    val stackAnchor = remember(identity) { PopupAnchor() }
     BoxWithConstraints(modifier) {
         val availableWidth = with(density) { maxWidth.roundToPx() }
-        LaunchedEffect(availableWidth, density.fontScale) {
-            if (fan != null && fan.request?.key === anchorKey) fan.clear()
+        val opened = ownFan
+        if (opened != null) DisposableEffect(opened, availableWidth, density.fontScale) {
+            onDispose { if (fan != null && fan.request === opened) fan.clear() }
         }
         val narrow = compact && maxWidth < 120.dp * fontScale
         val scoreLimit = maxScores.coerceIn(0, scores.size)
@@ -275,8 +269,9 @@ internal fun SourceMetricBadges(
         val disclose = onExpand
         val expandStack = onExpand?.let { details ->
             {
-                if (fan != null && stack.isNotEmpty() && stackBounds.width > 0f && stackBounds.height > 0f) {
-                    fan.open(MetricSourceFanRequest(anchorKey, displayedMetrics, stackBounds,
+                val bounds = stackAnchor.bounds()
+                if (fan != null && stack.isNotEmpty() && bounds != null) {
+                    fan.open(MetricSourceFanRequest(anchorKey, displayedMetrics, bounds,
                         stack.map { item ->
                             MetricSourceFanItem(item.token.sourceId, item.token.fullValue, item.token.description,
                                 item.leftPx, item.widthPx, item.clipStartPx, item.markSize)
@@ -310,11 +305,8 @@ internal fun SourceMetricBadges(
                         contentDescription = stack.joinToString("；") { it.token.description }
                         role = Role.Button
                         onClick("展开其余来源评分") { expandStack(); true }
-                    } else Modifier).onGloballyPositioned {
-                    val position = it.localToScreen(Offset.Zero)
-                    stackBounds = if (position.isSpecified) Rect(position,
-                        Size(it.size.width.toFloat(), it.size.height.toFloat())) else Rect.Zero
-                }
+                    } else Modifier)
+                    .then(if (fan != null && expandStack != null) stackAnchor.modifier else Modifier)
                     .graphicsLayer {
                         val request = fan?.request
                         alpha = if (request != null && request.key === anchorKey && request.popupOrigin != null) 0f else 1f

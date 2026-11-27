@@ -3,9 +3,13 @@ package dev.mangaflow.enhancement.engine
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
+import java.nio.channels.FileChannel
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
 import java.util.Properties
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -30,6 +34,26 @@ internal data class DesktopEnginePackage(
     val bytes: Long,
 )
 
+/** Only used for settings inventory. Installing and opening a native component still re-hash its files. */
+internal class DesktopInventoryDigests {
+    private data class Stamp(val size: Long, val modified: FileTime, val key: Any?)
+    private val entries = object : LinkedHashMap<File, Pair<Stamp, String>>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<File, Pair<Stamp, String>>) = size > 512
+    }
+
+    @Synchronized
+    fun digest(file: File): String {
+        fun stamp() = Files.readAttributes(file.toPath(), BasicFileAttributes::class.java).let {
+            Stamp(it.size(), it.lastModifiedTime(), it.fileKey())
+        }
+        val before = stamp()
+        entries[file]?.takeIf { it.first == before }?.let { return it.second }
+        val digest = engineSha256(file)
+        if (before == stamp()) entries[file] = before to digest
+        return digest
+    }
+}
+
 /** Archive identities are pinned to the official release receipts, not mutable latest URLs. */
 internal object DesktopEnginePackages {
     val manga = DesktopEnginePackage(EnhancementEngineIds.MANGAJANAI, "0.9.3", "mangajanai.exe",
@@ -46,7 +70,7 @@ internal object DesktopEnginePackages {
 internal class DesktopEngineRuntime(private val directory: File) {
     fun folder(pack: DesktopEnginePackage) = File(directory, "${pack.id}-${pack.version}")
 
-    fun executable(pack: DesktopEnginePackage): File? {
+    fun executable(pack: DesktopEnginePackage, digest: (File) -> String = ::engineSha256): File? {
         val folder = folder(pack)
         val receipt = File(folder, "mangaflow-install.properties")
         if (!receipt.isFile) return null
@@ -56,7 +80,7 @@ internal class DesktopEngineRuntime(private val directory: File) {
             val relative = data.getProperty("executable.path") ?: return null
             val executable = File(folder, relative).canonicalFile
             require(executable.toPath().startsWith(folder.canonicalFile.toPath()) && executable.isFile)
-            require(engineSha256(executable) == data.getProperty("executable.sha256"))
+            require(digest(executable) == data.getProperty("executable.sha256"))
             executable
         }.getOrNull()
     }
@@ -89,7 +113,34 @@ internal class DesktopEngineRuntime(private val directory: File) {
         } finally { archive.delete(); if (staging.exists()) staging.deleteRecursively() }
     }
 
-    suspend fun download(pack: DesktopEnginePackage, file: File, progress: (EngineProgress) -> Unit) {
+    suspend fun withVerifiedArchive(pack: DesktopEnginePackage, progress: (EngineProgress) -> Unit,
+        alreadyInstalled: () -> Boolean, install: suspend (File) -> Unit) {
+        val file = File(directory, "${pack.id}-${pack.sha256}.partial")
+        val lock = File(directory, "${pack.id}.download.lock")
+        FileChannel.open(lock.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE, NOFOLLOW_LINKS).use { channel ->
+            checkNotNull(channel.tryLock()) { "另一个漫流进程正在准备该组件" }.use {
+                if (alreadyInstalled()) return
+                check(!Files.exists(file.toPath(), NOFOLLOW_LINKS) || Files.isRegularFile(file.toPath(), NOFOLLOW_LINKS)) {
+                    "组件临时文件不可用"
+                }
+                if (file.length() > pack.bytes) Files.delete(file.toPath())
+                val resumed = file.length() > 0
+                for (attempt in 0..1) {
+                    if (file.length() < pack.bytes) download(pack, file, progress, file.length())
+                    progress(EngineProgress(EngineStage.VERIFY, detail = "校验官方组件归档"))
+                    if (engineSha256(file) == pack.sha256) break
+                    Files.delete(file.toPath())
+                    check(resumed && attempt == 0) { "官方组件归档校验失败" }
+                }
+                currentCoroutineContext().ensureActive()
+                install(file)
+                file.delete()
+            }
+        }
+    }
+
+    private suspend fun download(pack: DesktopEnginePackage, file: File, progress: (EngineProgress) -> Unit,
+        resumeFrom: Long? = null) {
         var url = URI(pack.url).toURL()
         var connection: HttpURLConnection? = null
         try {
@@ -100,6 +151,8 @@ internal class DesktopEngineRuntime(private val directory: File) {
                 val opened = (url.openConnection() as HttpURLConnection).apply {
                     instanceFollowRedirects = false; connectTimeout = 20_000; readTimeout = 30_000
                     setRequestProperty("User-Agent", "MangaFlow-Enhancement/1")
+                    setRequestProperty("Accept-Encoding", "identity")
+                    if (resumeFrom != null && resumeFrom > 0) setRequestProperty("Range", "bytes=$resumeFrom-")
                 }
                 connection = opened
                 val status = opened.responseCode
@@ -109,10 +162,21 @@ internal class DesktopEngineRuntime(private val directory: File) {
                     if (redirect == 6) error("组件下载跳转过多")
                     continue
                 }
-                check(status == 200) { "组件下载失败（HTTP $status）" }
-                var received = 0L
+                val append = resumeFrom != null && resumeFrom > 0 && status == 206 &&
+                    opened.getHeaderField("Content-Range") == "bytes $resumeFrom-${pack.bytes - 1}/${pack.bytes}"
+                if (resumeFrom != null && resumeFrom > 0 && (status == 416 || status == 206 && !append)) {
+                    opened.disconnect()
+                    return download(pack, file, progress, 0L)
+                }
+                check(status == 200 || append) { "组件下载失败（HTTP $status）" }
+                var received = if (append) requireNotNull(resumeFrom) else 0L
+                val declared = opened.contentLengthLong
+                check(declared < 0 || declared == pack.bytes - received) { "组件长度与固定归档不符" }
                 opened.inputStream.use { input ->
-                    Files.newOutputStream(file.toPath(), StandardOpenOption.CREATE_NEW).use { output ->
+                    val output = if (resumeFrom == null) Files.newOutputStream(file.toPath(), StandardOpenOption.CREATE_NEW)
+                    else Files.newOutputStream(file.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                        if (append) StandardOpenOption.APPEND else StandardOpenOption.TRUNCATE_EXISTING, NOFOLLOW_LINKS)
+                    output.use {
                         val buffer = ByteArray(64 * 1024)
                         while (true) {
                             currentCoroutineContext().ensureActive()

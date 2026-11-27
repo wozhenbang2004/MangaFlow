@@ -6077,6 +6077,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         videoEnhancement = if (realtimeEnabled) selected.mode else AnimeVideoEnhancementMode.OFF,
         enhancementScale = if (realtimeEnabled) selected.scale else 1,
         enhancementModel = selected.model.takeIf { realtimeEnabled },
+        enhanceAtNativeSize = platformKind == PlatformKind.DESKTOP && realtimeEnabled &&
+            selected.mode != AnimeVideoEnhancementMode.OFF && selected.scale == 2 &&
+            (policy.tier != QualityTier.AUTO || policy.modelId != null),
         preparedVideoModel = prepared,
         realtimeFrames = realtimeFrames,
         realtimeMotionIntent = realtimeMotionIntent,
@@ -6129,9 +6132,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         val resources = enhancementCenter.resources.usage.value.resources
         if (resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2) return null
-        val model = enhancementCenter.inventory.value.frameModels.firstOrNull {
-            it.engineId == engineId
-        } ?: return null
+        val model = enhancementCenter.inventory.value.readyRealtimeFrameModel(engineId) ?: return null
         val target = when (policy.frameMode) {
             dev.mangaflow.enhancement.FrameMode.FPS60 -> 60.0
             dev.mangaflow.enhancement.FrameMode.FPS120 -> 120.0

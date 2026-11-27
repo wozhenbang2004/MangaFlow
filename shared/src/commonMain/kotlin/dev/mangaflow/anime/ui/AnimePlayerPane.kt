@@ -317,10 +317,9 @@ internal fun AnimePlayerPane(
     val artwork = posterLayer?.takeIf { active && posterLoaded.value &&
         !glassAccessibility.reduceTransparency && !glassAccessibility.increaseContrast }
     val windowsDockRenderer = LocalWindowsVideoDock.current
-    val useWindowsVideoDock = windowsDockRenderer != null
     // Desktop has no firstFrameRendered acknowledgement. Use its current libmpv decoder
     // observations to admit the live Canvas, not a CPU snapshot or a synthetic frame.
-    val videoDockSource = if (windowsDockRenderer == true && active && !obscured && !locked && !panelPresent &&
+    val videoDockSource = if (windowsDockRenderer && active && !obscured && !locked && !panelPresent &&
         chromeMounted && !showStage && showingCurrentPlayback && canControl && playback.canSourceVideoGlass &&
         playback.assetKey != null && playback.episodeId != null &&
         !glassAccessibility.reduceTransparency && !glassAccessibility.increaseContrast) {
@@ -332,6 +331,7 @@ internal fun AnimePlayerPane(
             }
         }
     } else null
+    val controlBackdrop = videoDockSource?.haze ?: artwork
     fun interact() { controlsVisible = true; interactionEpoch++ }
     fun keepTransportVisibility() {
         // A keyboard or bare-video command can acknowledge itself while the movie stays clear.
@@ -853,7 +853,7 @@ internal fun AnimePlayerPane(
 
             val headerInteractive = !headerOverVideo || showChrome
             if (!playback.inPictureInPicture && (!headerOverVideo || chromeMounted)) {
-                val headerArtwork = artwork.takeIf { headerOverVideo }
+                val headerBackdrop = controlBackdrop.takeIf { headerOverVideo }
                 val headerShell = Modifier.align(Alignment.TopStart)
                     .width(if (!fillVideo && headerOverVideo) videoWidth else maxWidth)
                     .onSizeChanged { headerHeight = with(density) { it.height.toDp() } }
@@ -869,7 +869,7 @@ internal fun AnimePlayerPane(
                     .windowInsetsPadding(safeInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
                     .padding(horizontal = 8.dp, vertical = 5.dp)
                 Row(headerShell, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    AnimePlaybackSurface(headerArtwork, Modifier.weight(1f, fill = false).widthIn(max = 440.dp)
+                    AnimePlaybackSurface(headerBackdrop, Modifier.weight(1f, fill = false).widthIn(max = 440.dp)
                         .desktopChromeHitPath(desktop).hoverable(titlePointer, enabled = desktop && hoverEnabled),
                         overVideo = headerOverVideo) {
                         Row(Modifier.heightIn(min = 46.dp).padding(start = 2.dp, end = 14.dp),
@@ -901,9 +901,9 @@ internal fun AnimePlayerPane(
                     val hasHeaderActions = !desktop || fullscreen && canControl && !touchExploration ||
                         !fillVideo && widePlayer && detail != null
                     if (hasHeaderActions) {
-                        AnimePlaybackTopActionSurface(headerArtwork, videoDockSource?.haze,
-                            Modifier.desktopChromeHitPath(desktop).hoverable(headerPointer, enabled = desktop && hoverEnabled), overVideo = headerOverVideo,
-                            windowsVideo = useWindowsVideoDock && headerOverVideo) {
+                        AnimePlaybackSurface(headerBackdrop,
+                            Modifier.desktopChromeHitPath(desktop).hoverable(headerPointer, enabled = desktop && hoverEnabled),
+                            overVideo = headerOverVideo) {
                             Row(Modifier.padding(horizontal = 2.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
                                 if (fullscreen && canControl && !touchExploration) MotionIconButton(onClick = { locked = true },
                                     modifier = Modifier.size(44.dp), tooltip = "锁定触控") {
@@ -965,6 +965,8 @@ internal fun AnimePlayerPane(
                     .padding(horizontal = if (desktop) 14.dp else 8.dp, vertical = if (desktop) 7.dp else 4.dp),
                     contentAlignment = Alignment.BottomCenter) {
                     val hasTimeline = canControl && playback.hasTimeline
+                    val localizedTimelineInk = hasTimeline && !glassAccessibility.reduceTransparency &&
+                        !glassAccessibility.increaseContrast
                     val hasNotice = state.notice != null || playback.notice != null
                     val canOpenLines = episode != null && !inlineWatching && (!showStage || compactStage)
                     val canOpenWatching = !inlineWatching && detail != null
@@ -975,10 +977,10 @@ internal fun AnimePlayerPane(
                         canControl -> 340.dp
                         else -> 18.dp + 44.dp * (1 + (if (canOpenLines) 1 else 0) + (if (canOpenWatching) 1 else 0))
                     }
-                    AnimePlaybackSurface(if (useWindowsVideoDock) videoDockSource?.haze else artwork,
+                    AnimePlaybackSurface(controlBackdrop,
                         Modifier.widthIn(max = dockWidth).fillMaxWidth().desktopChromeHitPath(desktop)
                             .hoverable(transportPointer, enabled = desktop && hoverEnabled),
-                        cornerRadius = if (desktop) 16.dp else 23.dp, windowsVideoDock = useWindowsVideoDock) {
+                        cornerRadius = if (desktop) 16.dp else 23.dp, localizedTimelineInk = localizedTimelineInk) {
                         AnimePlayerControls(player, playback, observations,
                             previous, next, onEpisode, onToggle = { toggle() },
                             onSeekTo = { current, position -> movePlayhead(current, current.positionMs, position, null, null) },
@@ -986,6 +988,7 @@ internal fun AnimePlayerPane(
                             nextPreparation = state.nextEpisodePreparation,
                             workspaceNotice = state.notice, onDismissNotice = controller::dismissNotice,
                             centralTransport = centralTransport, canControl = canControl, desktop = desktop,
+                            localizedTimelineInk = localizedTimelineInk,
                             sourceName = currentOption?.sourceName ?: "本地播放".takeIf { showingCurrentPlayback },
                             onSources = if (canOpenLines) ::showSources else null,
                             fullscreen = fullscreen, onFullscreen = ::toggleFullscreen,
@@ -1370,6 +1373,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
     onSeekTo: (AnimePlayerState, Long) -> Unit,
     onHoldControls: (Boolean) -> Unit, workspaceNotice: String?, onDismissNotice: () -> Unit,
     nextPreparation: AnimeNextEpisodePreparation?, centralTransport: Boolean, canControl: Boolean, desktop: Boolean,
+    localizedTimelineInk: Boolean,
     sourceName: String?, onSources: (() -> Unit)?,
     fullscreen: Boolean, onFullscreen: () -> Unit, onWatching: (() -> Unit)?, watchingFocus: FocusRequester,
     settingsFocus: FocusRequester, onSettings: () -> Unit, onVolume: (Float?) -> Unit,
@@ -1378,6 +1382,8 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
         mutableStateOf<Long?>(null)
     }
     val canSeek = canControl && state.hasTimeline
+    val ink = if (localizedTimelineInk) AnimeTimelineInk else Modifier
+    val trackOutline = if (localizedTimelineInk) MaterialTheme.colorScheme.surface else Color.Unspecified
     val releaseControls by rememberUpdatedState(onHoldControls)
     BoxWithConstraints(modifier) {
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
@@ -1422,7 +1428,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     val timeStyle = MaterialTheme.typography.labelSmall.copy(fontFamily = mangaFontFamily(MangaFontScene.NUMBERS),
                         fontFeatureSettings = "tnum", fontSize = 12.sp, lineHeight = 18.sp)
-                    Text(animeTime(scrub ?: current.positionMs), style = timeStyle, fontSize = 14.sp,
+                    Text(animeTime(scrub ?: current.positionMs), modifier = ink, style = timeStyle, fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold, maxLines = 1, color = MaterialTheme.colorScheme.onSurface)
                     MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(surface = MaterialTheme.colorScheme.onSurface)) {
                         val restoreFocus = timelineFocused
@@ -1440,7 +1446,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                                         if (state.owns(player.state.value)) { onHoldControls(true); scrub = it.toLong() }
                                     },
                                     valueRange = 0f..duration.toFloat(),
-                                    bufferedRange = bufferedRange,
+                                    bufferedRange = bufferedRange, trackOutline = trackOutline,
                                     onValueChangeFinished = {
                                         val requested = scrub
                                         val live = player.state.value
@@ -1458,25 +1464,26 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                             }
                         }
                     }
-                    Text(animeTime(duration), style = timeStyle, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(animeTime(duration), modifier = ink, style = timeStyle, maxLines = 1,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
         val nextEpisode: @Composable () -> Unit = {
             if (nextButton && next != null) MotionIconButton(onClick = { onInteraction(); onEpisode(next) },
-                modifier = Modifier.size(if (desktop) 40.dp else 44.dp), tooltip = nextPreparation?.takeIf { it.episodeId == next.id }
+                modifier = Modifier.size(if (desktop) 40.dp else 44.dp).then(ink), tooltip = nextPreparation?.takeIf { it.episodeId == next.id }
                     ?.let { "下一集 · ${animePreparationLabel(it)}" } ?: if (desktop) "下一集 · N" else "下一集") {
                 Icon(Icons.Outlined.SkipNext, "下一集", Modifier.size(21.dp))
             }
         }
         val transport: @Composable () -> Unit = {
             if (!desktop && previousButton && previous != null) MotionIconButton(onClick = { onInteraction(); onEpisode(previous) },
-                modifier = Modifier.size(44.dp), tooltip = "上一集") {
+                modifier = Modifier.size(44.dp).then(ink), tooltip = "上一集") {
                 Icon(Icons.Outlined.SkipPrevious, "上一集", Modifier.size(21.dp))
             }
             if (playButton) {
                 val playLabel = if (state.ended) "重播" else if (state.playWhenReady) "暂停" else "播放"
-                MotionIconButton(onClick = onToggle, modifier = Modifier.size(44.dp), tooltip = "$playLabel · 空格") {
+                MotionIconButton(onClick = onToggle, modifier = Modifier.size(44.dp).then(ink), tooltip = "$playLabel · 空格") {
                     Box(Modifier.size(33.dp).background(MaterialTheme.colorScheme.onSurface,
                         RoundedCornerShape(50)), contentAlignment = Alignment.Center) {
                         if (state.ended) Icon(Icons.Outlined.Replay, playLabel, Modifier.size(22.dp),
@@ -1487,7 +1494,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                 }
             }
             if (desktop && previousButton && previous != null) MotionIconButton(onClick = { onInteraction(); onEpisode(previous) },
-                modifier = Modifier.size(40.dp), tooltip = "上一集 · P") {
+                modifier = Modifier.size(40.dp).then(ink), tooltip = "上一集 · P") {
                 Icon(Icons.Outlined.SkipPrevious, "上一集", Modifier.size(20.dp))
             }
             if (!desktop) nextEpisode()
@@ -1495,41 +1502,41 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
         Column {
             val notice = workspaceNotice ?: state.notice
             if (notice != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(notice, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                Text(notice, Modifier.weight(1f).wrapContentWidth(Alignment.Start).then(ink), style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (workspaceNotice != null) MotionIconButton(onClick = { onInteraction(); onDismissNotice() },
-                    modifier = Modifier.size(44.dp), tooltip = "关闭提示") {
+                    modifier = Modifier.size(44.dp).then(ink), tooltip = "关闭提示") {
                     Icon(Icons.Outlined.Close, "关闭提示", Modifier.size(18.dp))
                 }
             }
             val utilities: @Composable () -> Unit = {
                 if (showVolume) key(state.sessionGeneration, state.assetKey, state.episodeId) {
-                    DesktopAnimeVolume(observations, showVolumeSlider, onVolume, onInteraction)
+                    DesktopAnimeVolume(observations, showVolumeSlider, onVolume, onInteraction, ink, trackOutline)
                 }
                 if (onSources != null) {
                     val sourceLabel = sourceName?.let { "换线路，当前 $it" } ?: "选择播放线路"
                     if (namedLine && sourceName != null) MotionTextButton(onClick = onSources,
-                        modifier = Modifier.widthIn(max = 138.dp).heightIn(min = 44.dp),
+                        modifier = Modifier.widthIn(max = 138.dp).heightIn(min = 44.dp).then(ink),
                         contentPadding = PaddingValues(horizontal = 7.dp),
                     ) {
                         Icon(Icons.Outlined.SwapHoriz, sourceLabel, Modifier.size(17.dp))
                         Spacer(Modifier.width(5.dp))
                         Text(sourceName, style = MaterialTheme.typography.labelMedium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    } else MotionIconButton(onClick = onSources, modifier = Modifier.size(44.dp), tooltip = sourceLabel) {
+                    } else MotionIconButton(onClick = onSources, modifier = Modifier.size(44.dp).then(ink), tooltip = sourceLabel) {
                         Icon(Icons.Outlined.SwapHoriz, sourceLabel, Modifier.size(20.dp))
                     }
                 }
                 if (onWatching != null) MotionIconButton(onClick = onWatching,
-                    modifier = Modifier.size(44.dp).focusRequester(watchingFocus), tooltip = "选集与评论") {
+                    modifier = Modifier.size(44.dp).then(ink).focusRequester(watchingFocus), tooltip = "选集与评论") {
                     Icon(Icons.Outlined.List, "选集与评论", Modifier.size(22.dp))
                 }
                 if (desktop) MotionIconButton(onClick = onSettings,
-                    modifier = Modifier.size(42.dp).focusRequester(settingsFocus), tooltip = "播放设置") {
+                    modifier = Modifier.size(42.dp).then(ink).focusRequester(settingsFocus), tooltip = "播放设置") {
                     Icon(Icons.Outlined.Settings, "播放设置", Modifier.size(19.dp))
                 }
                 val fullscreenLabel = if (fullscreen) "退出全屏" else "全屏播放"
-                MotionIconButton(onClick = onFullscreen, modifier = Modifier.size(44.dp), tooltip = "$fullscreenLabel · F") {
+                MotionIconButton(onClick = onFullscreen, modifier = Modifier.size(44.dp).then(ink), tooltip = "$fullscreenLabel · F") {
                     Icon(if (fullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
                         fullscreenLabel, Modifier.size(24.dp))
                 }
@@ -1556,18 +1563,20 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
 /** Volume is observed independently of transport and media-time updates. */
 @Composable
 private fun DesktopAnimeVolume(observations: State<AnimePlayerState>, wide: Boolean,
-    onVolume: (Float?) -> Unit, onInteraction: () -> Unit) {
+    onVolume: (Float?) -> Unit, onInteraction: () -> Unit, ink: Modifier, trackOutline: Color) {
     val level by remember(observations) { derivedStateOf { observations.value.volume } }
     val percent = (level * 100f).roundToInt()
     val label = if (level == 0f) "取消静音" else "静音"
-    MotionIconButton(onClick = { onVolume(null); onInteraction() }, modifier = Modifier.size(42.dp)
+    MotionIconButton(onClick = { onVolume(null); onInteraction() }, modifier = Modifier.size(42.dp).then(ink)
         .semantics { stateDescription = "音量 $percent%" }, tooltip = "$label · M，↑ ↓ 调音量") {
         Icon(if (level == 0f) Icons.Outlined.VolumeOff else if (level < .5f) Icons.Outlined.VolumeDown else Icons.Outlined.VolumeUp,
             label, Modifier.size(19.dp))
     }
-    if (wide) MotionSlider(level, onValueChange = { onVolume(it) }, onValueChangeFinished = onInteraction,
-        formatValue = { "${(it * 100).roundToInt()}%" },
-        modifier = Modifier.width(94.dp).padding(end = 8.dp).semantics { contentDescription = "播放音量" })
+    if (wide) MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(surface = MaterialTheme.colorScheme.onSurface)) {
+        MotionSlider(level, onValueChange = { onVolume(it) }, onValueChangeFinished = onInteraction, trackOutline = trackOutline,
+            formatValue = { "${(it * 100).roundToInt()}%" },
+            modifier = Modifier.width(94.dp).padding(end = 8.dp).semantics { contentDescription = "播放音量" })
+    }
 }
 
 internal fun animePreparationLabel(preparation: AnimeNextEpisodePreparation): String = when {

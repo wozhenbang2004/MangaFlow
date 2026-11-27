@@ -96,9 +96,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.semantics.Role
@@ -460,12 +458,8 @@ internal fun DetailCatalog(
                                 span = { chapter -> GridItemSpan(gridUnits /
                                     (if (isVolumeChapter(chapter)) volumeColumns else chapterColumns)) },
                                 contentType = { if (isVolumeChapter(it)) "volume" else "chapter" }) { chapter ->
-                                var downloadAnchor by remember(chapter.logicalId, chapter.id) { mutableStateOf<Rect?>(null) }
-                                val downloadAnchorModifier = Modifier.onGloballyPositioned { coordinates ->
-                                    val origin = coordinates.localToScreen(Offset.Zero)
-                                    if (origin.isSpecified) downloadAnchor = Rect(origin, androidx.compose.ui.geometry.Size(
-                                        coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
-                                }.then(if (landing?.chapterId != chapter.id) Modifier else Modifier.drawWithContent {
+                                val downloadAnchor = remember(chapter.logicalId, chapter.id) { PopupAnchor() }
+                                val downloadAnchorModifier = downloadAnchor.modifier.then(if (landing?.chapterId != chapter.id) Modifier else Modifier.drawWithContent {
                                     drawContent()
                                     val inset = 4.dp.toPx()
                                     drawRoundRect(locateInk.copy(alpha = .17f * locateLight.value),
@@ -513,12 +507,12 @@ internal fun DetailCatalog(
                                             downloadMode = downloadMode,
                                             // One offline variant cannot disable choosing another source.
                                             enabled = true,
-                                            onRead = { onRead(chapter) }, onDownload = { onDownload(chapter, downloadAnchor) },
-                                            onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id }; selectedChapterAnchor = downloadAnchor },
+                                            onRead = { onRead(chapter) }, onDownload = { onDownload(chapter, downloadAnchor.bounds()) },
+                                            onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id }; selectedChapterAnchor = downloadAnchor.bounds() },
                                             sourcesEnabled = !sourceLoading && chapter.variants.isNotEmpty(),
                                             onSources = {
                                                 sourceCloseRequested = false
-                                                sourceChapter = chapter; sourceAnchor = downloadAnchor
+                                                sourceChapter = chapter; sourceAnchor = downloadAnchor.bounds()
                                             },
                                             onCoverError = {
                                                 if (paneActive && coverState.value === cover)
@@ -552,8 +546,8 @@ internal fun DetailCatalog(
                                     sourceEnabled = !sourceLoading,
                                     modifier = downloadAnchorModifier,
                                     onRead = { onRead(chapter) },
-                                    onDownload = { onDownload(chapter, downloadAnchor) },
-                                    onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id }; selectedChapterAnchor = downloadAnchor },
+                                    onDownload = { onDownload(chapter, downloadAnchor.bounds()) },
+                                    onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id }; selectedChapterAnchor = downloadAnchor.bounds() },
                                     onSources = { anchor ->
                                         sourceCloseRequested = false
                                         sourceChapter = chapter; sourceAnchor = anchor
@@ -983,7 +977,7 @@ private fun CatalogSourceEntry(chapter: Chapter, modifier: Modifier = Modifier,
         }
         return
     }
-    var anchor by remember(chapter.logicalId, chapter.id) { mutableStateOf<Rect?>(null) }
+    val anchor = remember(chapter.logicalId, chapter.id) { PopupAnchor() }
     if (platformKind == PlatformKind.DESKTOP) {
         val interaction = remember(chapter.id) { MutableInteractionSource() }
         val source = remember(chapter.id, chapter.sourceId, chapter.variants) {
@@ -1000,14 +994,11 @@ private fun CatalogSourceEntry(chapter: Chapter, modifier: Modifier = Modifier,
         }
         Row(modifier.heightIn(min = 22.dp).clip(RoundedCornerShape(5.dp))
             .clickable(enabled = enabled, interactionSource = interaction, indication = null,
-                role = Role.Button, onClickLabel = "选择本章来源", onClick = { onOpen(anchor) })
+                role = Role.Button, onClickLabel = "选择本章来源", onClick = { onOpen(anchor.bounds()) })
             .motionPress(interaction, enabled = enabled, pressedScale = .97f)
             .semantics(mergeDescendants = true) { contentDescription = source.sourceName + "，" + label },
             horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-            ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(13.dp).onGloballyPositioned { coordinates ->
-                val origin = coordinates.localToScreen(Offset.Zero)
-                if (origin.isSpecified) anchor = Rect(origin, Size(coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
-            }, muted = true)
+            ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(13.dp).then(anchor.modifier), muted = true)
             Text(label, color = DetailSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1)
             Icon(Icons.Outlined.ExpandMore, null, Modifier.size(11.dp), tint = DetailMuted)
         }
@@ -1015,12 +1006,7 @@ private fun CatalogSourceEntry(chapter: Chapter, modifier: Modifier = Modifier,
     }
     Box(modifier, contentAlignment = Alignment.CenterStart) {
         ReaderSourceStack(chapter, compact = true, enabled = enabled,
-            modifier = Modifier.onGloballyPositioned { coordinates ->
-                val origin = coordinates.localToScreen(Offset.Zero)
-                if (origin.isSpecified) anchor = Rect(origin, androidx.compose.ui.geometry.Size(
-                    coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
-            },
-            onOpen = { onOpen(anchor) })
+            modifier = anchor.modifier, onOpen = { onOpen(anchor.bounds()) })
     }
 
 }

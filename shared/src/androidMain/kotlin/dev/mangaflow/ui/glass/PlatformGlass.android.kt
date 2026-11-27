@@ -2,6 +2,7 @@ package dev.mangaflow.ui.glass
 
 import android.app.ActivityManager
 import android.graphics.BlurMaskFilter
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Paint
 import dev.mangaflow.platform.PlatformContext
 
@@ -11,3 +12,5 @@ internal actual fun platformIsLowRamDevice(context: PlatformContext): Boolean =
 internal actual fun applySoftShadowBlur(paint: Paint, radius: Float) {
     paint.asFrameworkPaint().maskFilter = BlurMaskFilter(radius, BlurMaskFilter.Blur.NORMAL)
 }
+
+internal actual fun sealSoftShadowMask(image: ImageBitmap) = Unit

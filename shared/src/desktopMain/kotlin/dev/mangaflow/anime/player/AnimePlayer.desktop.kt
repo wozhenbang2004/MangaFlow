@@ -72,6 +72,7 @@ private class DesktopAnimePlayer(
         context = context,
         scope = playerScope,
         renderingActive = videoRenderingActive,
+        frameMetrics = { state.value.frameMetrics },
         isCurrentSession = { handle, generation, mode ->
             isCurrent(generation) && engine.value?.impl === handle && options.videoEnhancement == mode
         },
@@ -153,6 +154,13 @@ private class DesktopAnimePlayer(
 
     override suspend fun createDecoderStartup(byteLimit: Long): MediampPlayer = createMpv(byteLimit)
 
+    private fun hardwareDecoder(configuration: AnimePlayerOptions): String = when {
+        configuration.preparedVideoModel != null && configuration.realtimeFrames == null &&
+            configuration.enhancementModel?.engineId != EnhancementEngineIds.DESKTOP_REALTIME -> "auto-copy"
+        animeJaNai.usesNativeRuntime() -> "d3d11va"
+        else -> "auto"
+    }
+
     private suspend fun createMpv(startupByteLimit: Long? = null): MediampPlayer {
         var pending: MediampPlayer? = null
         val configuration = options
@@ -160,16 +168,9 @@ private class DesktopAnimePlayer(
         return try {
             withContext(Dispatchers.IO) {
                 // The shipped platform runtime loads off the Swing UI thread.
-                animeJaNai.configureProcess(
-                    requestAlternate = configuration.enhancementModel?.engineId == EnhancementEngineIds.DESKTOP_REALTIME ||
-                        configuration.realtimeFrames != null,
-                    requestOnlineWindow = configuration.preparedVideoModel != null,
-                )
+                animeJaNai.configureProcess()
                 MpvMediampPlayerFactory().create(context, playerScope.coroutineContext) { handle ->
-                    if (animeJaNai.usesNativeRuntime()) handle.option("hwdec", "d3d11va")
-                    if (configuration.preparedVideoModel != null && configuration.realtimeFrames == null &&
-                        configuration.enhancementModel?.engineId != EnhancementEngineIds.DESKTOP_REALTIME)
-                        handle.option("hwdec", "auto-copy")
+                    handle.option("hwdec", hardwareDecoder(configuration))
                     handle.option("cache", "yes")
                     check(handle.option("rebase-start-time", "yes")) { "播放器无法统一视频时间轴" }
                     // Start with a short current-media window; expand only after actual
@@ -242,6 +243,8 @@ private class DesktopAnimePlayer(
 
     override fun onMediaReadyNative() {
         enhancementMediaReady = true
+        // Options may have changed while this handle (or a preroll handle) was opening.
+        applyHardwareDecoder()
         applyVideoEnhancement()
         onPlaybackStateNative()
     }
@@ -364,7 +367,7 @@ private class DesktopAnimePlayer(
     override fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) {
         if (previous.videoEnhancement != next.videoEnhancement || previous.enhancementScale != next.enhancementScale ||
             previous.enhancementModel != next.enhancementModel || previous.realtimeFrames != next.realtimeFrames ||
-            previous.preparedVideoModel != next.preparedVideoModel) {
+            previous.preparedVideoModel != next.preparedVideoModel || previous.enhanceAtNativeSize != next.enhanceAtNativeSize) {
             statisticsRevision++
             frameWindow.reset()
             publish(nativeGeneration) { it.copy(nativeVideoStatistics = null, frameMetrics = null) }
@@ -373,15 +376,21 @@ private class DesktopAnimePlayer(
         if (previous.preparedVideoModel != next.preparedVideoModel || previous.enhancementModel != next.enhancementModel ||
             previous.videoEnhancement != next.videoEnhancement || previous.realtimeFrames != next.realtimeFrames)
             onlinePreparation.clear(retainReusable = true)
-        if (previous.preparedVideoModel != next.preparedVideoModel && next.preparedVideoModel != null) {
-            val handle = engine.value?.impl as? MPVHandle
-            if (next.realtimeFrames == null && next.enhancementModel?.engineId != EnhancementEngineIds.DESKTOP_REALTIME) {
-                if (handle != null && !handle.setPropertyString("hwdec", "auto-copy"))
-                    mutableState.value = state.value.copy(preparedVideoIssue = "当前内核未接受预处理解码方式，请重新打开当前视频")
-            } else mutableState.value = state.value.copy(preparedVideoIssue = "DirectML 实时补帧与在线增强窗口暂不能同时启用")
-        }
+        if (hardwareDecoder(previous) != hardwareDecoder(next)) applyHardwareDecoder()
+        if (previous.preparedVideoModel != next.preparedVideoModel && next.preparedVideoModel != null &&
+            hardwareDecoder(next) != "auto-copy")
+            mutableState.value = state.value.copy(preparedVideoIssue = "DirectML 实时增强与在线增强窗口暂不能同时启用")
         applyBufferPolicy()
         applyVideoEnhancement()
+    }
+
+    private fun applyHardwareDecoder() {
+        val handle = engine.value?.impl as? MPVHandle ?: return
+        val decoder = hardwareDecoder(options)
+        if (handle.getPropertyString("hwdec") == decoder) return
+        nativeEnhancement.release()
+        if (!handle.setPropertyString("hwdec", decoder) && decoder == "auto-copy")
+            mutableState.value = state.value.copy(preparedVideoIssue = "当前内核未接受预处理解码方式，请重新打开当前视频")
     }
 
     private fun applyVideoEnhancement(): Boolean {
@@ -402,6 +411,7 @@ private class DesktopAnimePlayer(
             generation = nativeGeneration,
             mode = options.videoEnhancement,
             scale = options.enhancementScale,
+            enhanceAtNativeSize = windows && options.enhanceAtNativeSize,
             model = options.enhancementModel.takeIf { nativeModel == null },
             mediaReady = enhancementMediaReady,
             allowShaders = nativeModel == null && !windowOwnsVideo,

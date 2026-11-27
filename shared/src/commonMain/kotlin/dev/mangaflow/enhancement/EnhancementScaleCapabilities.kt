@@ -106,7 +106,7 @@ internal fun enhancementOutputScales(content: EnhancementContent, policy: Enhanc
     val realtimeFramesSelected = policy.realtimeInterpolationEnabled &&
         policy.frameMode != FrameMode.ORIGINAL && policy.frameQuality == FrameQuality.BALANCED &&
         (policy.frameMode != FrameMode.CUSTOM || policy.customFps in 1..(if (platformKind == PlatformKind.ANDROID) 120 else 240)) &&
-        inventory.frameModels.any { it.engineId == frameEngine }
+        inventory.readyRealtimeFrameModel(frameEngine) != null
     val onlineAutomatic = tier in setOf(QualityTier.AUTO, QualityTier.BALANCED, QualityTier.FINE, QualityTier.ULTRA) &&
         policy.realtimeEnhancementEnabled && PreparationMode.SMART in policy.preparation && !realtimeFramesSelected
     val onlineEngines = when (platformKind) {

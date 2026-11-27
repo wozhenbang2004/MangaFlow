@@ -136,20 +136,17 @@ private fun ChapterSourceBadgeItem(
 ) {
     val first = variants.first()
     val needsPicker = overflow || variants.size > 1
-    var anchor by remember(chapter.logicalId, first.storageId) { mutableStateOf<Rect?>(null) }
+    val anchor = remember(chapter.logicalId, first.storageId) { PopupAnchor() }
     val interaction = remember { MutableInteractionSource() }
     val description = when {
         overflow -> "${variants.size}个其他来源，选择来源"
         variants.size > 1 -> "${first.sourceName}，${variants.size}个版本，选择版本"
         else -> "使用${first.sourceName}阅读本章"
     }
-    Box(Modifier.size(24.dp).onGloballyPositioned { coordinates ->
-        val origin = coordinates.localToScreen(Offset.Zero)
-        if (origin.isSpecified) anchor = Rect(origin, androidx.compose.ui.geometry.Size(
-            coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
-    }.clickable(enabled = enabled, interactionSource = interaction, indication = null,
+    Box(Modifier.size(24.dp).then(if (needsPicker) anchor.modifier else Modifier)
+        .clickable(enabled = enabled, interactionSource = interaction, indication = null,
         role = Role.Button, onClickLabel = description,
-        onClick = { if (needsPicker) onOpen(anchor) else onReadVariant(chapter, first) })
+        onClick = { if (needsPicker) onOpen(anchor.bounds()) else onReadVariant(chapter, first) })
         .motionPress(interaction, enabled = enabled, pressedScale = .94f)
         .semantics { contentDescription = chapter.title + "，" + description },
         contentAlignment = Alignment.Center) {

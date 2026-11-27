@@ -140,8 +140,9 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
                 canvas.drawOutline(outline, paint)
                 canvas.translate(0f, -offsetY * scale)
                 canvas.drawOutline(outline, ShadowMaskPaint)
+                sealSoftShadowMask(image)
                 mask = image
-                mask?.let { SharedShadowMasks.put(key, CachedShadowMask(it, maskScale)) }
+                SharedShadowMasks.put(key, CachedShadowMask(image, maskScale))
             }
             cachedSpec = spec
             cachedSize = size
@@ -170,3 +171,5 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
 private val ShadowMaskPaint = Paint().apply { blendMode = BlendMode.Clear }
 
 internal expect fun applySoftShadowBlur(paint: Paint, radius: Float)
+
+internal expect fun sealSoftShadowMask(image: ImageBitmap)

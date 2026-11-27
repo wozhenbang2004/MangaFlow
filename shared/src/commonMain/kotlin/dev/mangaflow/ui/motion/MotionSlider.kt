@@ -109,6 +109,7 @@ internal fun MotionSlider(
     onValueChangeFinished: (() -> Unit)? = null,
     formatValue: (Float) -> String = { ((it * 100f).roundToInt() / 100f).toString() },
     bufferedRange: ClosedFloatingPointRange<Float>? = null,
+    trackOutline: Color = Color.Unspecified,
 ) {
     require(valueRange.start.isFinite() && valueRange.endInclusive.isFinite() &&
         valueRange.start <= valueRange.endInclusive) { "Slider range must be finite and ordered" }
@@ -121,6 +122,7 @@ internal fun MotionSlider(
     }?.let { it.start.coerceIn(valueRange)..it.endInclusive.coerceIn(valueRange) }
         ?.takeIf { it.start < it.endInclusive }
     val available = enabled && valueRange.start < valueRange.endInclusive
+    val outlined = trackOutline != Color.Unspecified
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val dragged by interaction.collectIsDraggedAsState()
@@ -216,11 +218,18 @@ internal fun MotionSlider(
                     val thumbWidth = (16f + pressure * 2f).dp.toPx() + abs(bend) * .22f
                     val thumbHeight = (16f - pressure).dp.toPx()
                     val thumbTop = Offset(center.x - thumbWidth / 2f, center.y - thumbHeight / 2f)
-                    if (available && focused) drawRoundRect(
-                        colors.onSurface.copy(alpha = .16f),
-                        topLeft = thumbTop - Offset(4.dp.toPx(), 4.dp.toPx()),
-                        size = Size(thumbWidth + 8.dp.toPx(), thumbHeight + 8.dp.toPx()),
-                        cornerRadius = CornerRadius(12.dp.toPx()), style = Stroke(1.dp.toPx()))
+                    if (available && focused) {
+                        val focusTop = thumbTop - Offset(4.dp.toPx(), 4.dp.toPx())
+                        val focusSize = Size(thumbWidth + 8.dp.toPx(), thumbHeight + 8.dp.toPx())
+                        val radius = CornerRadius(12.dp.toPx())
+                        if (outlined) drawRoundRect(trackOutline, focusTop, focusSize, radius, style = Stroke(3.dp.toPx()))
+                        drawRoundRect(colors.onSurface.copy(alpha = if (outlined) .9f else .16f),
+                            focusTop, focusSize, radius, style = Stroke(1.dp.toPx()))
+                    }
+                    if (outlined) drawRoundRect(trackOutline.copy(alpha = .86f * strength),
+                        topLeft = thumbTop - Offset(1.dp.toPx(), 1.dp.toPx()),
+                        size = Size(thumbWidth + 2.dp.toPx(), thumbHeight + 2.dp.toPx()),
+                        cornerRadius = CornerRadius(thumbHeight / 2f + 1.dp.toPx()))
                     drawRoundRect(colors.onSurface.copy(alpha = .08f * strength),
                         topLeft = thumbTop + Offset(0f, 1.5.dp.toPx()),
                         size = Size(thumbWidth, thumbHeight),
@@ -280,18 +289,20 @@ internal fun MotionSlider(
                     val start = Offset(if (rtl) size.width else 0f, size.height / 2f)
                     val end = Offset(if (rtl) 0f else size.width, size.height / 2f)
                     val thumb = Offset(start.x + (end.x - start.x) * fraction, start.y)
-                    drawLine(colors.onSurface.copy(alpha = if (available) .10f else .055f),
+                    if (outlined) drawLine(trackOutline.copy(alpha = .84f), start, end,
+                        strokeWidth = stroke + 2.dp.toPx(), cap = StrokeCap.Round)
+                    drawLine(colors.onSurface.copy(alpha = if (!available) .055f else if (outlined) .36f else .10f),
                         start, end, strokeWidth = stroke, cap = StrokeCap.Round)
                     buffered?.let { range ->
                         val extent = valueRange.endInclusive - valueRange.start
                         val from = (range.start - valueRange.start) / extent
                         val until = (range.endInclusive - valueRange.start) / extent
-                        drawLine(colors.onSurface.copy(alpha = if (available) .28f else .10f),
+                        drawLine(colors.onSurface.copy(alpha = if (!available) .10f else if (outlined) .52f else .28f),
                             Offset(start.x + (end.x - start.x) * from, start.y),
                             Offset(start.x + (end.x - start.x) * until, start.y),
                             strokeWidth = stroke, cap = StrokeCap.Round)
                     }
-                    drawLine(colors.onSurface.copy(alpha = if (available) .62f else .20f),
+                    drawLine(colors.onSurface.copy(alpha = if (!available) .20f else if (outlined) .94f else .62f),
                         start, thumb, strokeWidth = stroke, cap = StrokeCap.Round)
                 }
             })

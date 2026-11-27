@@ -190,6 +190,8 @@ actual class PanelRuntimeStore private constructor(context: Context) {
 
     actual fun spec(id: PanelRuntimeId): PanelRuntimeSpec = SPECS.getValue(id)
 
+    internal suspend fun awaitDiscovery() = ready.await()
+
     /** The OS owns execution; closing the caller only stops observing the queued transfer. */
     actual suspend fun download(id: PanelRuntimeId): Unit = withContext(Dispatchers.IO) {
         if (spec(id).bundled) return@withContext
