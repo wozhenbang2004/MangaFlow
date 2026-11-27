@@ -144,7 +144,7 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                     }
                 }
             }
-            AnimePaneLayout(modifier = Modifier.weight(1f, fill = false), railWidth = 208.dp,
+            AnimePaneLayout(modifier = Modifier.weight(1f, fill = false), railWidth = 208.dp, selectionKey = filter to selectedWork,
                 minimumWidth = 716.dp, showSidebar = downloadGroups.size > 1, sidebar = {
                     AnimeScrollableList(Modifier.fillMaxSize(), userScrollEnabled = !actionsPresent,
                         contentPadding = PaddingValues(vertical = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {

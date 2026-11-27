@@ -51,6 +51,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -63,8 +64,14 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.semantics
@@ -78,6 +85,9 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.ui.mangaNumberText
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -116,16 +126,26 @@ internal fun MotionSlider(
     val dragged by interaction.collectIsDraggedAsState()
     val focused by interaction.collectIsFocusedAsState()
     val tracking = available && (pressed || dragged)
+    val desktop = platformKind == PlatformKind.DESKTOP
+    var adjustmentKeyDown by remember(interaction) { mutableStateOf(false) }
+    var keyboardChange by remember(interaction, valueRange) { mutableStateOf<Any?>(null) }
+    if (desktop) LaunchedEffect(keyboardChange, focused, tracking, available) {
+        if (!focused || tracking || !available) adjustmentKeyDown = false
+        if (keyboardChange != null) {
+            if (focused && !tracking && available) delay(900L)
+            keyboardChange = null
+        }
+    }
+    val inspectValue = tracking || (desktop && focused && available && keyboardChange != null)
     val motion = LocalMotionEnabled.current
-    val gesture = updateTransition(tracking, label = "slider-contact")
+    val gesture = updateTransition(inspectValue, label = "slider-contact")
     val lift = gesture.animateFloat(transitionSpec = {
         if (!motion) snap() else spring(dampingRatio = if (targetState) .86f else 1f,
             stiffness = if (targetState) MangaMotion.GestureStiffness else MangaMotion.PanelStiffness)
     }, label = "slider-value-lift") { if (it) 1f else 0f }
-    val stretch = gesture.animateFloat(transitionSpec = {
-        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap()
-    }, label = "slider-thumb-pressure") { if (it && motion) 1f else 0f }
-    val showValue = available && (tracking || gesture.currentState || gesture.isRunning)
+    val stretch = animateFloatAsState(if (tracking && motion) 1f else 0f,
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(), label = "slider-thumb-pressure")
+    val showValue = available && (inspectValue || gesture.currentState || gesture.isRunning)
     val feedback = rememberFeelFeedback()
     var edge by remember(interaction, valueRange, tracking) {
         mutableIntStateOf(if (fraction <= .025f) -1 else if (fraction >= .975f) 1 else 0)
@@ -136,8 +156,8 @@ internal fun MotionSlider(
     val label = formatValue(current)
     var lastLabel by remember(valueRange) { mutableStateOf(label) }
     var lastFraction by remember(valueRange) { mutableFloatStateOf(fraction) }
-    if (tracking) SideEffect { lastLabel = label; lastFraction = fraction }
-    val follow = if (motion && showValue) animateFloatAsState(if (tracking) fraction else lastFraction,
+    if (inspectValue) SideEffect { lastLabel = label; lastFraction = fraction }
+    val follow = if (motion && showValue) animateFloatAsState(if (inspectValue) fraction else lastFraction,
         spring(.92f, MangaMotion.NavigationStiffness, visibilityThreshold = .0005f),
         label = "slider-value-follow") else null
     val accessibilityLabel = buffered?.let {
@@ -151,7 +171,7 @@ internal fun MotionSlider(
         // spring are only needed while the user can actually see this label.
         val labelLayout = if (showValue) {
             val textMeasurer = rememberTextMeasurer()
-            val text = mangaNumberText(if (tracking) label else lastLabel)
+            val text = mangaNumberText(if (inspectValue) label else lastLabel)
             val style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp, fontWeight = FontWeight.Medium)
             remember(text, style, textMeasurer, labelWidth) { textMeasurer.measure(text, style = style, maxLines = 1,
                 overflow = TextOverflow.Ellipsis, constraints = Constraints(maxWidth = labelWidth)) }
@@ -171,12 +191,20 @@ internal fun MotionSlider(
                     edge = limit
                 } else if (position >= .025f && position <= .975f) edge = 0
             }
+            if (desktop && adjustmentKeyDown && !tracking && next != current) keyboardChange = Any()
             onValueChange(next)
         },
             valueRange = valueRange, enabled = available,
             onValueChangeFinished = onValueChangeFinished,
             interactionSource = interaction,
-            modifier = Modifier.fillMaxWidth().semantics { stateDescription = accessibilityLabel },
+            modifier = Modifier.fillMaxWidth().then(if (!desktop) Modifier else Modifier.onPreviewKeyEvent { event ->
+                adjustmentKeyDown = event.type == KeyEventType.KeyDown && when (event.key) {
+                    Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown,
+                    Key.MoveHome, Key.MoveEnd, Key.PageUp, Key.PageDown -> true
+                    else -> false
+                }
+                false
+            }).semantics { stateDescription = accessibilityLabel },
             thumb = { _ ->
                 Canvas(Modifier.size(28.dp)) {
                     val center = Offset(size.width / 2f, size.height / 2f)
@@ -221,7 +249,7 @@ internal fun MotionSlider(
                     val bubbleY = center.y - travel * progress
                     val bubbleTop = Offset(bubbleX - half, bubbleY - bubbleHeight / 2f)
                     val bubbleBottom = bubbleY + bubbleHeight / 2f
-                    val bubbleColor = colors.inverseSurface.copy(alpha = alpha)
+                    val bubbleColor = (if (desktop) colors.surfaceContainerHighest else colors.inverseSurface).copy(alpha = alpha)
                     // Bounded vector counterpart of the source's blurred/thresholded connection.
                     link.apply {
                         reset()
@@ -236,9 +264,12 @@ internal fun MotionSlider(
                         close()
                     }
                     drawPath(link, bubbleColor.copy(alpha = alpha * .72f))
+                    if (desktop) drawRoundRect(Color.Black.copy(alpha = .10f * alpha),
+                        topLeft = bubbleTop + Offset(0f, 1.5.dp.toPx()), size = Size(bubbleWidth, bubbleHeight),
+                        cornerRadius = CornerRadius(bubbleHeight / 2f))
                     drawRoundRect(bubbleColor, topLeft = bubbleTop,
                         size = Size(bubbleWidth, bubbleHeight), cornerRadius = CornerRadius(bubbleHeight / 2f))
-                    drawText(labelLayout, colors.inverseOnSurface.copy(alpha = alpha),
+                    drawText(labelLayout, (if (desktop) colors.onSurface else colors.inverseOnSurface).copy(alpha = alpha),
                         topLeft = Offset(bubbleX - labelLayout.size.width / 2f,
                             bubbleY - labelLayout.size.height / 2f))
                 }

@@ -1,5 +1,8 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -15,12 +18,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 
 /** Both slots keep their composition (including an active credential form) across a window resize. */
 @Composable
@@ -147,8 +154,10 @@ internal fun AccountDifferencePanel(
 internal fun Modifier.accountReviewRow(selected: Boolean = false): Modifier {
     if (platformKind != PlatformKind.DESKTOP) return this
     val colors = MaterialTheme.colorScheme
-    return background(if (selected) colors.primary.copy(alpha = .085f) else colors.surfaceContainerLow,
-        RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 8.dp)
+    val background = animateColorAsState(if (selected) colors.primary.copy(alpha = .085f) else colors.surfaceContainerLow,
+        if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "account-review-selection")
+    return drawBehind { drawRoundRect(background.value, cornerRadius = CornerRadius(14.dp.toPx())) }
+        .padding(horizontal = 14.dp, vertical = 8.dp)
 }
 
 /** Local and remote always keep their own heading and order, including at large system font sizes. */

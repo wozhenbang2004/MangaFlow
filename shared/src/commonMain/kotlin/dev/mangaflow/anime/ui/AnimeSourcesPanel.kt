@@ -1153,7 +1153,7 @@ internal fun AnimeSourcesPanel(
                             }
                         }
                     }
-                    AnimePaneLayout(Modifier.weight(1f, fill = false), minimumWidth = 712.dp,
+                    AnimePaneLayout(Modifier.weight(1f, fill = false), minimumWidth = 712.dp, selectionKey = tools to cataloguesExpanded,
                         showSidebar = !overVideo && subjectId != null, sidebar = {
                             AnimeScrollableList(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 item {

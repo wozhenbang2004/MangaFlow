@@ -20,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -30,6 +31,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
+import dev.mangaflow.enhancement.ui.mediaSettingsPage
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.DesktopVerticalScrollbar
@@ -49,6 +51,7 @@ internal fun AnimePaneLayout(
     minimumWidth: Dp = 660.dp,
     railWidth: Dp = 168.dp,
     showSidebar: Boolean = true,
+    selectionKey: Any? = null,
     compactHeader: @Composable () -> Unit = {},
     sidebar: @Composable ColumnScope.() -> Unit,
     content: @Composable ColumnScope.(wide: Boolean) -> Unit,
@@ -65,7 +68,7 @@ internal fun AnimePaneLayout(
                 Column(Modifier.width(side).fillMaxHeight().clip(RoundedCornerShape(17.dp))
                     .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .035f))
                     .selectableGroup().padding(6.dp), content = sidebar)
-                Column(Modifier.weight(1f).fillMaxHeight()) { content(true) }
+                Column(Modifier.weight(1f).fillMaxHeight().mediaSettingsPage(selectionKey ?: Unit, true)) { content(true) }
             }
         } else Column(Modifier.fillMaxWidth()) {
             compactHeader()
@@ -82,7 +85,7 @@ internal fun AnimePaneChoice(label: String, selected: Boolean, onSelect: () -> U
     val fill = animateColorAsState(if (selected) colors.primary.copy(alpha = .095f) else Color.Transparent,
         if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "anime-pane-choice")
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(11.dp))
-        .background(fill.value)
+        .drawBehind { drawRect(fill.value) }
         .selectable(selected, interactionSource = input, indication = null, enabled = enabled,
             role = Role.Tab, onClick = onSelect)
         .motionPress(input, enabled, pressedScale = .985f).padding(horizontal = 9.dp, vertical = 7.dp),

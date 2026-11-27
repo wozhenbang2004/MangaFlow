@@ -113,6 +113,7 @@ internal class ReaderPageRepairController(
     private val scope: CoroutineScope,
     private var viewportWidth: Int,
     private var viewportHeight: Int,
+    private val onManualResult: (ReaderCommandReceipt) -> Unit,
     private val isCurrent: () -> Boolean,
 ) {
     private val policy = ExperiencePolicyStore.get(context)
@@ -414,6 +415,8 @@ internal class ReaderPageRepairController(
                     selection.pages[selection.targetIndex], selection.headers, prepared.page))
                 selectionLease?.invoke(); selectionLease = null
                 mutableState.value = mutableState.value.copy(selection = null, reason = null)
+                onManualResult(ReaderCommandReceipt(ReaderCommandKind.REPAIR,
+                    "已替换第 ${selection.primaryIndex + 1} 页 · ${selection.variant.sourceName.ifBlank { selection.variant.sourceId }}"))
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) { selectionFailure(generation, failure.message ?: "对齐未能保存", false) }
         }
@@ -430,9 +433,16 @@ internal class ReaderPageRepairController(
                 leases.remove(index)?.invoke()
                 mutableState.value = mutableState.value.copy(replacements = mutableState.value.replacements - index,
                     selection = null, switchReady = null, reason = null)
+                onManualResult(ReaderCommandReceipt(ReaderCommandKind.REPAIR, "已撤回第 ${index + 1} 页的替换"))
                 attempted.remove(index)
             } catch (cancel: CancellationException) { throw cancel }
-            catch (failure: Exception) { if (generation == revision) mutableState.value = mutableState.value.copy(reason = failure.message) }
+            catch (failure: Exception) {
+                if (generation == revision && valid()) {
+                    val reason = failure.message ?: "暂未撤回本页替换"
+                    mutableState.value = mutableState.value.copy(reason = reason)
+                    if (mutableState.value.selection == null) onManualResult(ReaderCommandReceipt(ReaderCommandKind.ISSUE, reason))
+                }
+            }
         }
     }
 

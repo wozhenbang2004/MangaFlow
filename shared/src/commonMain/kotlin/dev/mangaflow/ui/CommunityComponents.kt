@@ -11,6 +11,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -79,6 +80,9 @@ import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.platform.LocalAccessibilityManager
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -102,10 +106,12 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.rememberDelayedBusy
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -373,7 +379,7 @@ private fun CommentUnavailableNotice(sources: List<ReviewSource>, allUnavailable
                 fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
             exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0)) +
                 fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
-            Column(Modifier.fillMaxWidth()) {
+            Column(Modifier.fillMaxWidth().motionInputGate(expanded)) {
                 sources.forEach { source -> key(source.id) { CommentLoadNotice(source, onRetry) } }
             }
         }
@@ -546,10 +552,19 @@ private fun CommentContent(
     val canTranslate = revealed && hasForeignText
     val contentInteraction = remember(review.id, sourceId) { MutableInteractionSource() }
     val context = LocalContext.current
+    var clipboardResult by remember(sourceId, review.id, translationText) { mutableStateOf<Boolean?>(null) }
+    var clipboardRequest by remember(sourceId, review.id, translationText) { mutableIntStateOf(0) }
+    if (desktop && clipboardResult != null) {
+        val accessibility = LocalAccessibilityManager.current
+        LaunchedEffect(clipboardRequest, accessibility) {
+            delay(accessibility?.calculateRecommendedTimeoutMillis(2800L, containsText = true) ?: 2800L)
+            clipboardResult = null
+        }
+    }
     val actions = if (desktop && revealed && translationText.isNotBlank()) listOf(
         DesktopMenuAction("复制评论原文") {
-            val copied = copyText(context, "评论原文", translationText)
-            showPlatformMessage(context, if (copied) "已复制评论原文" else "暂时无法复制评论")
+            clipboardResult = copyText(context, "评论原文", translationText)
+            clipboardRequest++
         },
     ) else emptyList()
     Row(modifier.fillMaxWidth().animateContentSize(
@@ -567,9 +582,31 @@ private fun CommentContent(
                         color = foreground, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                     if (sourceId != null) Box(Modifier.align(Alignment.CenterVertically)) { CommentSourceBadge(sourceId) }
-                    if (review.date.isNotBlank()) Text(compactCommentDate(review.date),
-                        Modifier.align(Alignment.CenterVertically).semantics { contentDescription = review.date },
-                        color = muted, style = mangaMetricValueStyle(12.sp, 18.sp))
+                    if (review.date.isNotBlank() || clipboardResult != null) {
+                        val result = clipboardResult
+                        val announcement = when (result) {
+                            true -> "已复制评论原文"
+                            false -> "暂时无法复制评论"
+                            null -> review.date
+                        }
+                        Box(Modifier.align(Alignment.CenterVertically).clearAndSetSemantics {
+                            contentDescription = announcement
+                            if (result != null) liveRegion = LiveRegionMode.Polite
+                        }) {
+                            MotionSwap(result, scaleContent = false) { shown ->
+                                val label = when (shown) {
+                                    true -> "已复制原文"
+                                    false -> "复制失败"
+                                    null -> compactCommentDate(review.date)
+                                }
+                                Text(label, color = when (shown) {
+                                    true -> mangaStatusColors().success
+                                    false -> MaterialTheme.colorScheme.error
+                                    null -> muted
+                                }, style = mangaMetricValueStyle(12.sp, 18.sp))
+                            }
+                        }
+                    }
                 }
                 if (canTranslate) CommentTranslationAction(translationText, muted)
                 if (actions.isNotEmpty()) DesktopMoreButton(actions, "评论操作")
@@ -725,6 +762,7 @@ private fun CommentReplies(
 ) {
     var expanded by remember { mutableStateOf(false) }
     var rows by remember { mutableStateOf<List<MangaReview>>(emptyList()) }
+    var arriving by remember { mutableStateOf(emptySet<String>()) }
     var nextPage by remember { mutableStateOf<Int?>(null) }
     var loaded by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
@@ -734,6 +772,9 @@ private fun CommentReplies(
     var request by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
     val fetchReplies by rememberUpdatedState(loadReplies)
+    val motion = LocalMotionEnabled.current
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val animateReplies by rememberUpdatedState(motion && desktop)
 
     fun load(page: Int) {
         if (busy) return
@@ -745,6 +786,10 @@ private fun CommentReplies(
                 val result = fetchReplies(source, review, page)
                 currentCoroutineContext().ensureActive()
                 if (version == requestVersion) {
+                    if (animateReplies && result.items.isNotEmpty()) {
+                        val existing = rows.mapTo(hashSetOf()) { it.id }
+                        arriving = result.items.mapTo(linkedSetOf()) { it.id } - existing
+                    }
                     rows = (if (page == 0) result.items else rows + result.items).distinctBy { it.id }
                     nextPage = result.nextPage
                     error = result.error
@@ -764,7 +809,11 @@ private fun CommentReplies(
         }
     }
 
-    val motion = LocalMotionEnabled.current
+    val arrival = if (arriving.isNotEmpty() && motion) remember(arriving) { Animatable(0f) } else null
+    if (arriving.isNotEmpty()) LaunchedEffect(arrival, motion) {
+        arrival?.animateTo(1f, tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
+        arriving = emptySet()
+    }
     val chevron = animateFloatAsState(if (expanded) 180f else 0f,
         tween(if (motion) MangaMotion.Quick else 0), label = "comment-replies-chevron")
     val interaction = remember { MutableInteractionSource() }
@@ -778,6 +827,7 @@ private fun CommentReplies(
                 requestVersion++
                 request?.cancel()
                 busy = false
+                arriving = emptySet()
             }
         }).motionPress(interaction, pressedScale = .98f)
         .heightIn(min = if (platformKind == PlatformKind.DESKTOP) 34.dp else 28.dp).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -799,13 +849,18 @@ private fun CommentReplies(
             verticalArrangement = Arrangement.spacedBy(9.dp)) {
             rows.forEach { reply ->
                 key(source.subjectId, review.id, reply.id) {
-                    CommentContent(reply, Modifier, foreground, muted, showReplyCount = true,
+                    val entrance = if (arrival != null && reply.id in arriving) Modifier.graphicsLayer {
+                        alpha = .68f + .32f * arrival.value
+                        translationY = (1f - arrival.value) * 5.dp.toPx()
+                    } else Modifier
+                    CommentContent(reply, entrance, foreground, muted, showReplyCount = true,
                         sourceId = source.id, compactReply = true)
                 }
             }
             if (error != null) CommentFailure(error.orEmpty(), busy) { load(failedPage) }
-            if (busy) SmallLoading()
-            else if (loaded && rows.isEmpty() && error == null) {
+            val showBusy = if (desktop) rememberDelayedBusy(busy) else busy
+            if (showBusy) SmallLoading()
+            else if (!busy && loaded && rows.isEmpty() && error == null) {
                 Text("暂无可展示的回复", color = muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
             }
             if (!busy && error == null && nextPage != null) TextButton(onClick = { nextPage?.let(::load) },

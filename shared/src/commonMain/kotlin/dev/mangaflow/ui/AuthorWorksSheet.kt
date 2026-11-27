@@ -75,7 +75,7 @@ internal fun AuthorWorksSheet(
                 Column(Modifier.weight(1f).padding(vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(state.name, style = browseTitleStyle(23.sp, 30.sp), modifier = Modifier.semantics { heading() })
                     if (state.items.isNotEmpty() || desktop && state.loading) Text(
-                        if (state.items.isEmpty()) "正在查找作者作品…" else mangaNumberText("已载入 ${state.items.size} 部作品"),
+                        mangaNumberText(if (state.items.isEmpty()) "正在查找作者作品…" else "已载入 ${state.items.size} 部作品"),
                         style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
                 }
                 MotionIconButton(onClick = dismiss) { Icon(Icons.Outlined.Close, "关闭作者作品", Modifier.size(20.dp)) }

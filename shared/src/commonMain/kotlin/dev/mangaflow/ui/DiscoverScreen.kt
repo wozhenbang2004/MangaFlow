@@ -15,6 +15,8 @@ import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
@@ -178,6 +180,7 @@ import dev.mangaflow.ui.motion.bottomPullLoad
 import dev.mangaflow.ui.motion.rememberBottomPullLoadState
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import dev.mangaflow.ui.glass.mangaHazeSource
@@ -423,10 +426,46 @@ internal fun DiscoverySearchResults(
     // A restricted search can narrow its sources before the first query.
     if (awaitingKeyword && !selectingTags && !selectingCopyGroup && !adultProfile) return
     val showResults = search.isSearch && !selectingTags && !awaitingKeyword
+    val searchFocus = if (desktopMainContent) LocalDesktopSearchFocus.current else null
+    val rowTargets = if (searchFocus != null) remember(retainedResults) { mutableMapOf<String, FocusRequester>() } else null
+    val canFocusResults = contentActive && showResults && search.items.isNotEmpty()
+    if (searchFocus != null && rowTargets != null && canFocusResults) DisposableEffect(searchFocus, retainedResults) {
+        val enter: () -> Boolean = {
+            val layout = retainedResults.layoutInfo
+            val rows = layout.visibleItemsInfo
+            // Prefer the first entirely visible work. A short window may only show a partial row.
+            val target = rows.firstNotNullOfOrNull { info ->
+                if (info.offset >= layout.viewportStartOffset && info.offset + info.size <= layout.viewportEndOffset)
+                    (info.key as? String)?.let(rowTargets::get) else null
+            } ?: rows.firstNotNullOfOrNull { (it.key as? String)?.let(rowTargets::get) }
+            if (target == null) false else { target.requestFocus(); true }
+        }
+        searchFocus.results = enter
+        onDispose { if (searchFocus.results === enter) searchFocus.results = null }
+    }
+    val initialSearchWait = showResults && search.items.isEmpty() &&
+        (search.loading || search.refreshing || search.loadingMore)
+    val slowSearch = desktopMainContent && rememberDelayedBusy(initialSearchWait && contentActive)
+    val desktopMotion = desktopMainContent && contentActive && LocalMotionEnabled.current
+    // Only a wait long enough to be visible gets an arrival. A cache hit or a
+    // change in result count must not replay an entrance for the whole list.
+    val awaitingInk = if (desktopMotion) animateFloatAsState(if (slowSearch) 1f else 0f,
+        tween(if (slowSearch) MangaMotion.Quick else MangaMotion.Content, easing = MangaMotion.EnterEasing),
+        label = "desktop-search-arrival") else null
+    val arrival = if (awaitingInk == null) Modifier else Modifier.graphicsLayer {
+        compositingStrategy = CompositingStrategy.ModulateAlpha
+        alpha = 1f - .20f * awaitingInk.value
+        translationY = 4.dp.toPx() * awaitingInk.value
+    }
+    var firstBatch by remember(searchKey) { mutableStateOf<Set<String>?>(null) }
+    if (desktopMainContent && federated && resultKeys.isNotEmpty() && firstBatch == null) {
+        SideEffect { firstBatch = resultKeys.toSet() }
+    }
+    val animateMatches = desktopMotion && federated && firstBatch != null && !retainedResults.isScrollInProgress
     val showCacheStatus = showResults && backdrop != null && !adultProfile
     val showSourceSummary = federated && search.searchSources.isNotEmpty() && sourceControls == null
     val showSummary = showSourceSummary ||
-        (showResults && search.items.isNotEmpty()) || showCacheStatus
+        (showResults && (desktopMainContent || search.items.isNotEmpty())) || showCacheStatus
     BrowseCoverWarmup(search.items, repository,
         contentActive && showResults, retainedResults)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
@@ -496,7 +535,11 @@ internal fun DiscoverySearchResults(
                         if (showSourceSummary) SearchSourceSummary(search.searchSources, onRetry, Modifier.weight(1f),
                             showNames = index)
                         else Spacer(Modifier.weight(1f))
-                        if (showResults && search.items.isNotEmpty()) Row(
+                        if (desktopMainContent && showResults && search.items.isEmpty() && initialSearchWait) {
+                            Text("正在查找作品…", modifier = Modifier.semantics {
+                                liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite
+                            }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else if (showResults && search.items.isNotEmpty()) Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(5.dp),
                             modifier = Modifier.semantics(mergeDescendants = true) {
@@ -517,14 +560,14 @@ internal fun DiscoverySearchResults(
                     }
                 }
             }
-            if (index && showResults && search.items.isNotEmpty())
+            if (index && showResults && (search.items.isNotEmpty() || initialSearchWait))
                 DesktopIndexLabels("正文来源", if (adultProfile) null else "热度与评分", modifier = Modifier.padding(end = 12.dp))
             when {
                 selectingTags || awaitingKeyword || !search.isSearch -> Unit
                 desktopMainContent && search.items.isEmpty() -> DesktopSearchFeedback(
-                    search, index, adultProfile, contentActive, onEditQuery,
+                    search, index, adultProfile, contentActive, slowSearch, onEditQuery,
                     onRetry, onMore, onTarget, onTag,
-                    Modifier.weight(1f).fillMaxWidth())
+                    Modifier.weight(1f).fillMaxWidth().then(arrival))
                 search.loading && search.items.isEmpty() -> Box(
                     Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center,
                 ) { CircularProgressIndicator(Modifier.size(20.dp).semantics { contentDescription = "正在查找漫画" },
@@ -552,43 +595,61 @@ internal fun DiscoverySearchResults(
                         else TextButton(onClick = onMore, enabled = contentActive) { Text("继续筛选") }
                     }
                 }
-                else -> Box(Modifier.fillMaxWidth().weight(1f, fill = desktopMainContent).motionInputGate(contentActive)) {
+                else -> Box(Modifier.fillMaxWidth().weight(1f, fill = desktopMainContent).then(arrival).motionInputGate(contentActive)) {
                     LazyColumn(
                         state = retainedResults,
                         userScrollEnabled = contentActive,
-                        modifier = Modifier.fillMaxWidth().then(if (desktopMainContent) Modifier.fillMaxHeight() else Modifier),
+                        modifier = Modifier.fillMaxWidth().then(if (desktopMainContent) Modifier.fillMaxHeight() else Modifier)
+                            .desktopSearchPaneKey(searchFocus?.field?.takeIf { canFocusResults }?.let { field ->
+                                { field.requestFocus(); true }
+                            }),
                         contentPadding = PaddingValues(end = if (desktopMainContent) 12.dp else 0.dp, bottom = 4.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         items(search.items, key = Manga::id, contentType = { "search-result" }) { manga ->
-                            DesktopBrowseActions(desktopActions?.invoke(manga).orEmpty(), contentActive) {
-                                val direct = if (federated) search.sourceMatches[manga.id].orEmpty().ifEmpty { listOf(manga) }
-                                    else emptyList()
-                                val aligned = if (adultProfile) emptyList() else search.alignedTagSources[manga.id].orEmpty()
-                                if (index) {
-                                    val subtitle = remember(manga, search.query) {
-                                        val alias = manga.alternativeTitles.firstOrNull { search.query.isNotBlank() &&
-                                            !manga.title.contains(search.query, ignoreCase = true) &&
-                                            it.contains(search.query, ignoreCase = true) }
-                                        listOfNotNull(alias, manga.authors.take(3).joinToString(" / ").takeIf { it.isNotBlank() })
-                                            .joinToString("  ·  ")
-                                    }
-                                    DesktopBrowseIndexRow(manga, repository, "search-$searchKey", subtitle,
-                                        detail = {
-                                            if (direct.isNotEmpty()) SearchSourceMarks(direct, Modifier.fillMaxWidth(),
-                                                openSource, aligned, search.searchTarget == SearchTarget.TAG, showNames = true)
-                                            else MangaBrowseSource(manga)
-                                        }, figure = if (adultProfile) null else ({
-                                            MangaMetricBadges(manga, foreground = browseNoteColor(), compact = true,
-                                                plain = true, showMore = false)
-                                        })) { openResult(manga) }
-                                } else SearchResultRow(manga, repository, "search-$searchKey",
-                                    horizontalInset = if (tagsOnly) 0.dp else 6.dp,
-                                    adultProfile = adultProfile,
-                                    bodySources = direct, alignedSources = aligned,
-                                    tagSearch = search.searchTarget == SearchTarget.TAG,
-                                    onSource = if (federated) openSource else null) { openResult(manga) }
+                            val rowFocus = if (rowTargets != null) {
+                                val requester = remember(manga.id) { FocusRequester() }
+                                DisposableEffect(retainedResults, manga.id, requester) {
+                                    rowTargets[manga.id] = requester
+                                    onDispose { if (rowTargets[manga.id] === requester) rowTargets.remove(manga.id) }
+                                }
+                                Modifier.focusRequester(requester)
+                            } else Modifier
+                            val placement = if (animateMatches) Modifier.animateItem(
+                                fadeInSpec = if (firstBatch?.contains(manga.id) == false) tween(MangaMotion.Quick) else null,
+                                fadeOutSpec = null,
+                                placementSpec = spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) else Modifier
+                            val row: @Composable () -> Unit = {
+                                DesktopBrowseActions(desktopActions?.invoke(manga).orEmpty(), contentActive) {
+                                    val direct = if (federated) search.sourceMatches[manga.id].orEmpty().ifEmpty { listOf(manga) }
+                                        else emptyList()
+                                    val aligned = if (adultProfile) emptyList() else search.alignedTagSources[manga.id].orEmpty()
+                                    if (index) {
+                                        val subtitle = remember(manga, search.query) {
+                                            val alias = manga.alternativeTitles.firstOrNull { search.query.isNotBlank() &&
+                                                !manga.title.contains(search.query, ignoreCase = true) &&
+                                                it.contains(search.query, ignoreCase = true) }
+                                            listOfNotNull(alias, manga.authors.take(3).joinToString(" / ").takeIf { it.isNotBlank() })
+                                                .joinToString("  ·  ")
+                                        }
+                                        DesktopBrowseIndexRow(manga, repository, "search-$searchKey", subtitle, modifier = rowFocus,
+                                            detail = {
+                                                if (direct.isNotEmpty()) SearchSourceMarks(direct, Modifier.fillMaxWidth(),
+                                                    openSource, aligned, search.searchTarget == SearchTarget.TAG, showNames = true)
+                                                else MangaBrowseSource(manga)
+                                            }, figure = if (adultProfile) null else ({
+                                                MangaMetricBadges(manga, foreground = browseNoteColor(), compact = true,
+                                                    plain = true, showMore = false)
+                                            })) { openResult(manga) }
+                                    } else SearchResultRow(manga, repository, "search-$searchKey", modifier = rowFocus,
+                                        horizontalInset = if (tagsOnly) 0.dp else 6.dp,
+                                        adultProfile = adultProfile,
+                                        bodySources = direct, alignedSources = aligned,
+                                        tagSearch = search.searchTarget == SearchTarget.TAG,
+                                        onSource = if (federated) openSource else null) { openResult(manga) }
+                                }
                             }
+                            if (desktopMainContent) Box(placement) { row() } else row()
                         }
                         if (search.hasMore || search.loadingMore) {
                             item(key = "search-more") {
@@ -630,7 +691,7 @@ internal fun DiscoverySearchResults(
 }
 
 @Composable
-private fun DesktopSearchFeedback(search: BrowseState, index: Boolean, adult: Boolean, active: Boolean,
+private fun DesktopSearchFeedback(search: BrowseState, index: Boolean, adult: Boolean, active: Boolean, showSkeleton: Boolean,
     onEdit: (() -> Unit)?, onRetry: () -> Unit, onMore: () -> Unit, onTarget: (SearchTarget) -> Unit,
     onTag: (MangaTag) -> Unit, modifier: Modifier = Modifier) {
     val loading = search.loading || search.refreshing || search.loadingMore
@@ -638,17 +699,12 @@ private fun DesktopSearchFeedback(search: BrowseState, index: Boolean, adult: Bo
     val allFailed = search.searchSources.isNotEmpty() && failures.size == search.searchSources.size
     val scroll = rememberScrollState()
     Box(modifier) {
-        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 10.dp)) {
+        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)) {
             if (loading) {
-                val waiting = search.searchSources.values.filter { it.loading }.joinToString("、") { it.sourceName }
-                Text(if (waiting.isBlank()) "正在查找作品…" else "正在查询 ${waiting}",
-                    Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
-                        .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
-                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-                repeat(4) {
+                if (showSkeleton) repeat(4) {
                     if (index) DesktopBrowsePlaceholder(0.dp, !adult, null)
-                    else DiscoveryListPlaceholder(false, 0.dp, null)
+                    else SearchResultPlaceholder()
                 }
             } else {
                 val tag = search.selectedTags.lastOrNull().takeIf { search.searchTarget == SearchTarget.TAG }
@@ -1309,6 +1365,8 @@ private fun DiscoveryPane(
 }
 
 private val BrowseListCoverHeight = 92.dp
+private val SearchResultCoverHeight = 78.dp
+private val SearchResultCoverFrame = Modifier.size(width = 54.dp, height = SearchResultCoverHeight)
 private val BrowseRankCoverHeight = 98.dp
 private val BrowseListCoverFrame = Modifier.size(width = 64.dp, height = BrowseListCoverHeight)
 private val BrowseRankCoverFrame = Modifier.size(width = 68.dp, height = BrowseRankCoverHeight)
@@ -1499,14 +1557,28 @@ internal fun DesktopBrowseActions(
 }
 
 @Composable
+private fun SearchResultPlaceholder() {
+    val ink = MaterialTheme.colorScheme.onSurface
+    Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 7.dp).clearAndSetSemantics {}) {
+        Spacer(SearchResultCoverFrame.background(ink.copy(alpha = .065f), RoundedCornerShape(8.dp)))
+        Column(Modifier.weight(1f).padding(start = 13.dp, end = 44.dp).heightIn(min = SearchResultCoverHeight),
+            verticalArrangement = Arrangement.SpaceBetween) {
+            Spacer(Modifier.height(34.dp).placeholderLines(ink.copy(alpha = .075f), .70f, .45f))
+            Spacer(Modifier.height(16.dp).placeholderLines(ink.copy(alpha = .045f), .32f))
+        }
+    }
+}
+
+@Composable
 private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement: String,
     horizontalInset: Dp = 6.dp, bodySources: List<Manga> = emptyList(),
     alignedSources: List<Manga> = emptyList(), tagSearch: Boolean = false,
-    adultProfile: Boolean = false, onSource: ((List<Manga>) -> Unit)? = null, onOpen: () -> Unit) {
+    adultProfile: Boolean = false, onSource: ((List<Manga>) -> Unit)? = null,
+    modifier: Modifier = Modifier, onOpen: () -> Unit) {
     val transition = LocalMangaCoverTransition.current
     val interaction = remember { MutableInteractionSource() }
     Row(
-        Modifier.fillMaxWidth()
+        modifier.fillMaxWidth()
             .browseIntentWarmup(manga, repository, interaction)
             .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = "查看${manga.title}", onClick = {
@@ -1517,10 +1589,10 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
             .padding(horizontal = horizontalInset, vertical = 7.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        MangaCover(manga, repository, Modifier.width(54.dp).height(78.dp).mangaSharedCover(manga.id, placement)
+        MangaCover(manga, repository, SearchResultCoverFrame.mangaSharedCover(manga.id, placement)
             .mangaCoverCard(8.dp, shadowRadius = 6.dp))
         val secondary = browseNoteColor()
-        Column(Modifier.weight(1f).heightIn(min = 78.dp).padding(start = 13.dp,
+        Column(Modifier.weight(1f).heightIn(min = SearchResultCoverHeight).padding(start = 13.dp,
             end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp),
             verticalArrangement = Arrangement.SpaceBetween) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {

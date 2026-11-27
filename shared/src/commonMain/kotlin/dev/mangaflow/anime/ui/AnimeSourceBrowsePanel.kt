@@ -279,7 +279,7 @@ private fun AnimeSourceFilters(visible: Boolean, category: LanercCategory?, sele
                             Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                         }
                     })
-                AnimePaneLayout(Modifier.weight(1f, fill = false), minimumWidth = 604.dp, sidebar = {
+                AnimePaneLayout(Modifier.weight(1f, fill = false), minimumWidth = 604.dp, selectionKey = current?.key, sidebar = {
                     AnimeScrollableList(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         items(filters, key = { it.key }) { filter ->
                             val value = selected[filter.key]

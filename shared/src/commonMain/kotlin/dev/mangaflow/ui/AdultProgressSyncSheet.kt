@@ -1,5 +1,8 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.items
@@ -30,6 +33,9 @@ import dev.mangaflow.storage.AdultProgressWork
 import dev.mangaflow.storage.ChapterProgress
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionButton
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 
@@ -71,14 +77,28 @@ internal fun AdultProgressSyncSheet(
                 MotionButton(onClick = { configureAfterExit = true; dismiss() }, enabled = !state.busy) {
                     Text("配置 WebDAV", fontSize = 12.sp)
                 }
-            } else if (state.busy) QuietLoading(
-                if (state.applying) "正在保存已确认的位置…" else "正在比较本机和 WebDAV…")
-            state.error?.let { Text(it, fontSize = 12.sp, color = colors.error) }
-            state.completed?.let { Text(it, fontSize = 12.sp, color = colors.onSurfaceVariant) }
+            }
+            if (platformKind == PlatformKind.DESKTOP) {
+                val status = when {
+                    !configuration.configured -> null
+                    state.busy -> PreferenceNotice(if (state.applying) "正在保存已确认的位置…" else "正在比较本机和 WebDAV…",
+                        PreferenceNoticeKind.WORKING)
+                    state.error != null -> state.error?.let { PreferenceNotice(it, PreferenceNoticeKind.ERROR) }
+                    state.completed != null -> state.completed?.let { PreferenceNotice(it, PreferenceNoticeKind.DONE) }
+                    state.compared && state.differences.isEmpty() -> PreferenceNotice("可同步的阅读位置已一致。", PreferenceNoticeKind.DONE)
+                    else -> null
+                }
+                PreferenceOperationFeedback(status)
+            } else {
+                if (configuration.configured && state.busy) QuietLoading(
+                    if (state.applying) "正在保存已确认的位置…" else "正在比较本机和 WebDAV…")
+                state.error?.let { Text(it, fontSize = 12.sp, color = colors.error) }
+                state.completed?.let { Text(it, fontSize = 12.sp, color = colors.onSurfaceVariant) }
+            }
             if (state.unavailableWorks > 0)
                 Text("远端有 ${state.unavailableWorks} 部作品需要当前设备识别其成人来源，已原样保留。",
                     fontSize = 11.sp, color = colors.onSurfaceVariant)
-            if (state.compared && state.differences.isEmpty()) {
+            if (platformKind != PlatformKind.DESKTOP && state.compared && state.differences.isEmpty()) {
                 Text("可同步的阅读位置已一致。", fontSize = 12.sp, color = colors.onSurfaceVariant)
             }
             if (hasDifferences) {
@@ -176,11 +196,13 @@ internal fun AdultProgressSyncSheet(
 private fun ProgressVersionChoice(side: String, position: String, action: String, present: Boolean,
     chosen: Boolean, enabled: Boolean, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val surface by animateColorAsState(if (chosen) colors.primaryContainer else colors.surface,
+        if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "progress-version-choice")
     MotionTextButton(onClick = onClick, enabled = present && enabled,
         modifier = Modifier.fillMaxWidth().semantics { selected = chosen },
         shape = RoundedCornerShape(10.dp),
         colors = ButtonDefaults.textButtonColors(
-            containerColor = if (chosen) colors.primaryContainer else colors.surface,
+            containerColor = surface,
             contentColor = if (chosen) colors.onPrimaryContainer else colors.onSurface,
             disabledContainerColor = colors.surface, disabledContentColor = colors.onSurfaceVariant),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
@@ -189,7 +211,9 @@ private fun ProgressVersionChoice(side: String, position: String, action: String
             Text(position, style = MaterialTheme.typography.bodySmall)
             if (present) Text(action, style = MaterialTheme.typography.labelSmall)
         }
-        if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(16.dp))
+        MotionSwap(chosen, Modifier.size(16.dp)) { marked ->
+            if (marked) Icon(Icons.Outlined.Check, null, Modifier.size(16.dp))
+        }
     }
 }
 

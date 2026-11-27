@@ -116,6 +116,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -831,7 +832,7 @@ fun DetailScreen(
         // Both overlays sample the artwork, poster and moving content; neither is part of its own source.
         Box(toolbarWidth.align(Alignment.TopCenter)) {
             ArtworkToolbar(header, compact = desktopDetail || collapsedHero, fixedArtwork = desktopDetail,
-                title = current.title, backdrop = readingBackdrop, favorite = isFavorite,
+                manga = current, backdrop = readingBackdrop, favorite = isFavorite,
                 coverFailed = coverFailed, active = active, coverLight = lightDetail,
                 comments = activeSection == 1, commentCount = commentCount,
                 onBack = onBack, onIntroduction = { fullIntroduction = true },
@@ -883,7 +884,7 @@ private fun ArtworkToolbar(
     header: TopAppBarState,
     compact: Boolean,
     fixedArtwork: Boolean,
-    title: String,
+    manga: Manga,
     backdrop: HazeState,
     favorite: Boolean,
     coverFailed: Boolean,
@@ -929,7 +930,7 @@ private fun ArtworkToolbar(
                             fontWeight = FontWeight.SemiBold)
                         commentCount?.let { Text(it, color = DetailSecondary, fontSize = 11.sp) }
                     }
-                    Text(title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                    Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                         color = if (showComments) DetailSecondary else DetailForeground,
                         fontSize = if (showComments) 11.sp else 15.sp,
                         lineHeight = if (showComments) 15.sp else 20.sp,
@@ -942,14 +943,17 @@ private fun ArtworkToolbar(
         onOpenTracking?.let { open ->
             ArtworkAction(Icons.Outlined.CloudSync, "漫画账号进度", backdrop, glassAlpha, tint, glassTone, open)
         }
-        ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-            if (favorite) "从书架移除" else "加入书架", backdrop, glassAlpha, tint, glassTone, onToggleFavorite)
+        key(manga.sourceId, manga.id) {
+            ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+                if (favorite) "从书架移除" else "加入书架", backdrop, glassAlpha, tint, glassTone, onToggleFavorite,
+                favorite = favorite)
+        }
     }
 }
 
 @Composable
 private fun ArtworkAction(icon: ImageVector, description: String, backdrop: HazeState, glassAlpha: Float,
-    tint: Color, glassTone: Color, onClick: () -> Unit) {
+    tint: Color, glassTone: Color, onClick: () -> Unit, favorite: Boolean? = null) {
     val interaction = remember { MutableInteractionSource() }
     Box(Modifier.size(48.dp)
         .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
@@ -962,11 +966,33 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
                 }, cornerRadius = 20.dp, elevation = 0.dp, role = GlassSurfaceRole.ARTWORK,
                 interactionSource = interaction, preferSource = true, surfaceColor = glassTone, contentColor = tint,
                 softCard = false) {}
-            MotionSwap(icon, Modifier.size(21.dp)) { shown ->
+            if (favorite != null && platformKind == PlatformKind.DESKTOP) ArtworkBookmark(favorite, description, tint)
+            else MotionSwap(icon, Modifier.size(21.dp)) { shown ->
                 Icon(shown, description, tint = tint, modifier = Modifier.size(21.dp))
             }
         }
         DesktopIconTooltip(description, interaction, enabled = true)
+    }
+}
+
+@Composable
+private fun ArtworkBookmark(saved: Boolean, label: String, tint: Color) {
+    val motion = LocalMotionEnabled.current
+    val target = if (saved) 1f else 0f
+    val fill = animateFloatAsState(target, if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
+        label = "shelf-bookmark-fill")
+    Box(Modifier.size(21.dp).clearAndSetSemantics {
+        contentDescription = label
+        stateDescription = if (saved) "已加入书架" else "未加入书架"
+    }) {
+        Icon(Icons.Outlined.BookmarkBorder, null, Modifier.matchParentSize().drawWithContent {
+            val edge = size.height * (1f - if (motion) fill.value else target)
+            if (edge > 0f) clipRect(bottom = edge) { this@drawWithContent.drawContent() }
+        }, tint = tint)
+        Icon(Icons.Filled.Bookmark, null, Modifier.matchParentSize().drawWithContent {
+            val edge = size.height * (1f - if (motion) fill.value else target)
+            if (edge < size.height) clipRect(top = edge) { this@drawWithContent.drawContent() }
+        }, tint = tint)
     }
 }
 

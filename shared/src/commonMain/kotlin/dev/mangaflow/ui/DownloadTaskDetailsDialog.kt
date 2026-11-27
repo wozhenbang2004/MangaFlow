@@ -47,6 +47,7 @@ import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionInputGate
 
@@ -125,13 +126,18 @@ internal fun DownloadTaskDetails(
                         .padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Icon(when (shown.status) {
-                                DownloadStatus.COMPLETED -> Icons.Outlined.CheckCircle
-                                DownloadStatus.FAILED -> Icons.Outlined.ErrorOutline
-                                DownloadStatus.PAUSED -> Icons.Outlined.Pause
-                                DownloadStatus.QUEUED, DownloadStatus.WAITING -> Icons.Outlined.Schedule
-                                DownloadStatus.RUNNING -> Icons.Outlined.Download
-                            }, null, Modifier.size(18.dp), tint = tone)
+                            val mark: @Composable (DownloadStatus) -> Unit = { phase ->
+                                Icon(when (phase) {
+                                    DownloadStatus.COMPLETED -> Icons.Outlined.CheckCircle
+                                    DownloadStatus.FAILED -> Icons.Outlined.ErrorOutline
+                                    DownloadStatus.PAUSED -> Icons.Outlined.Pause
+                                    DownloadStatus.QUEUED, DownloadStatus.WAITING -> Icons.Outlined.Schedule
+                                    DownloadStatus.RUNNING -> Icons.Outlined.Download
+                                }, null, Modifier.size(18.dp), tint = downloadStatusColor(phase))
+                            }
+                            if (platformKind == PlatformKind.DESKTOP) key(shown.id, shown.createdAt) {
+                                MotionSwap(shown.status, Modifier.size(18.dp), content = mark)
+                            } else mark(shown.status)
                             Text(downloadTransferPhaseLabel(shown, now), style = MaterialTheme.typography.titleSmall,
                                 color = tone)
                         }
@@ -143,10 +149,13 @@ internal fun DownloadTaskDetails(
                             Text(mangaNumberText(saved), Modifier.alignByBaseline(),
                                 style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
                         }
-                        if (shown.totalPages > 0) LinearProgressIndicator(
-                            progress = { (shown.completedPages.toFloat() / shown.totalPages).coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth().height(4.dp),
-                            color = tone, trackColor = colors.onSurface.copy(alpha = .09f))
+                        if (shown.totalPages > 0) {
+                            val savedFraction = (shown.completedPages.toFloat() / shown.totalPages).coerceIn(0f, 1f)
+                            if (platformKind == PlatformKind.DESKTOP) key(shown.id, shown.createdAt, shown.totalPages) {
+                                ManagementProgressTrack(savedFraction, "章节已保存页数", tone, Modifier.fillMaxWidth().height(4.dp))
+                            } else LinearProgressIndicator(progress = { savedFraction }, modifier = Modifier.fillMaxWidth().height(4.dp),
+                                color = tone, trackColor = colors.onSurface.copy(alpha = .09f))
+                        }
                         Text("原始下载 · ${downloadBytes(shown.downloadedBytes)}", style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant)
                     }

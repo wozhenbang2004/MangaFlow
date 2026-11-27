@@ -184,7 +184,6 @@ import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.update.UpdatePhase
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.async
@@ -417,6 +416,29 @@ private val Frame.depth: Int get() = when (this) {
     Frame.CopyExplore -> 1
     is Frame.Detail -> 2
     is Frame.Reader -> 3
+}
+
+/** Only the new section body is mounted. Sidebar shortcuts, pointer clicks and Back/Forward
+ * all arrive here through the committed destination, after the shell has chosen its owner. */
+@Composable
+private fun Modifier.desktopSectionArrival(profile: String, index: Int, available: Boolean): Modifier {
+    if (platformKind != PlatformKind.DESKTOP || index < 0) return this
+    val motion = LocalMotionEnabled.current
+    var previous by remember(profile) { mutableIntStateOf(index) }
+    val travel = remember(profile, index) {
+        Animatable(if (motion && available) index.compareTo(previous).toFloat() else 0f)
+    }
+    SideEffect { previous = index }
+    LaunchedEffect(travel, motion, available) {
+        if (!motion || !available) travel.snapTo(0f)
+        else if (travel.value != 0f) travel.animateTo(0f, tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
+    }
+    val moving by remember(travel) { derivedStateOf { travel.value != 0f } }
+    return if (!motion || !available || !moving) this else graphicsLayer {
+        val fraction = travel.value
+        translationY = 10.dp.toPx() * fraction
+        alpha = 1f - .18f * kotlin.math.abs(fraction)
+    }
 }
 
 /** Keep the last drawn snapshot while its page is covered; resubscription receives current data. */
@@ -829,8 +851,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
 
-    LaunchedEffect(Unit) { model.events.collectLatest { snackbar.showSnackbar(it) } }
-    LaunchedEffect(Unit) { PlatformNotices.messages.collectLatest { snackbar.showSnackbar(it) } }
+    LaunchedEffect(model, snackbar) { model.events.presentMangaNotices(snackbar) }
+    LaunchedEffect(snackbar) { PlatformNotices.messages.presentMangaNotices(snackbar) }
     LaunchedEffect(openUpdatesRequest) {
         if (openUpdatesRequest > 0) {
             tagSearchVisible = false
@@ -1854,7 +1876,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 // The full backdrop includes the pixels beneath the menu button.
                                 // Settings reserves chrome inside its scrolling content, so it
                                 // can pass beneath the floating header without an inset clip.
-                                Box(Modifier.fillMaxSize()) {
+                                Box(Modifier.fillMaxSize().desktopSectionArrival(current.profile,
+                                    desktopSections.indexOfFirst { it.section == current.section && !it.experience },
+                                    available = desktopNavigationVisible && !rootHandoff && !playerOwnsScreen)) {
                                 // Discovery retains its own complete per-query grid keys. Replacing
                                 // this host for every feed/filter discarded its in-flight UI state.
                                 savedState.SaveableStateProvider(current.key) {

@@ -520,8 +520,6 @@ fun ReaderScreen(
     val inspectorOpen = showSettings || showChapters || showPageNavigator
     val panelBlocksReading = !dockedPanels && (showSettings || showChapters)
     val pageNavigatorBlocking = showPageNavigator && !dockedPanels
-    val wideReaderChrome = desktop && readerWindow.width - (if (dockedPanels && inspectorOpen) panelWidth else 0.dp) >=
-        790.dp * readerFontScale
     var retainedInspector by remember { mutableStateOf(ReaderInspector.CHAPTERS) }
     val inspector = when {
         showSettings -> ReaderInspector.SETTINGS
@@ -538,8 +536,9 @@ fun ReaderScreen(
     var bottomChromeFocused by remember { mutableStateOf(false) }
     val chromeEngaged = desktop && (topChromeHovered || bottomChromeHovered || topChromeFocused || bottomChromeFocused)
     var keyboardFocusRestore by remember { mutableIntStateOf(0) }
-    var downloadMessage by remember(chapterId) { mutableStateOf<String?>(null) }
-    var displayedDownloadMessage by remember(chapterId) { mutableStateOf("") }
+    var actionReceipt by remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId) {
+        mutableStateOf<ReaderCommandReceipt?>(null)
+    }
     var progressInteracting by remember(chapterId) { mutableStateOf(false) }
     val dimPreview = remember { mutableStateOf<Float?>(null) }
     var imageVisible by remember(chapterId) { mutableStateOf(false) }
@@ -756,7 +755,8 @@ fun ReaderScreen(
     val repairs = remember(manga.id, sourceIdentity, pages, headers, repository, downloadStore) {
         val ownedPages = pages
         ReaderPageRepairController(adultImageContext, manga.id, chapter, ownedPages, headers,
-            repository, downloadStore, scope, repairViewportWidth, repairViewportHeight) {
+            repository, downloadStore, scope, repairViewportWidth, repairViewportHeight,
+            onManualResult = { if (desktop) actionReceipt = it }) {
             latestReadingIdentity == (manga.id to sourceIdentity) && latestPrimaryPages === ownedPages && latestRepairActive
         }
     }
@@ -826,19 +826,22 @@ fun ReaderScreen(
     var sourceArrivalPending by remember(manga.id) { mutableStateOf(false) }
     LaunchedEffect(sourceIdentity, motionEnabled) {
         val previous = lastVisibleSource
-        sourceArrivalPending = motionEnabled && previous != null &&
+        sourceArrivalPending = (desktop || motionEnabled) && previous != null &&
             (previous.sourceId != sourceIdentity.sourceId || previous.sourceMangaId != sourceIdentity.sourceMangaId ||
                 (previous.logicalId == sourceIdentity.logicalId && previous.chapterId != sourceIdentity.chapterId))
-        sourceArrival.snapTo(if (sourceArrivalPending) 0f else 1f)
+        sourceArrival.snapTo(if (!desktop && sourceArrivalPending) 0f else 1f)
     }
     LaunchedEffect(sourceIdentity, imageVisible, loading, error, motionEnabled) {
-        if (!motionEnabled || error != null) {
+        if ((!desktop && !motionEnabled) || error != null) {
             sourceArrival.snapTo(1f)
             sourceArrivalPending = false
         } else if (imageVisible && !loading) {
             lastVisibleSource = sourceIdentity
             if (sourceArrivalPending) {
-                sourceArrival.animateTo(1f, tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
+                if (desktop) {
+                    val name = currentSourceName.orEmpty().ifBlank { sourceDisplayName(chapter.sourceId) }
+                    actionReceipt = ReaderCommandReceipt(ReaderCommandKind.SOURCE, "当前来源 · $name")
+                } else sourceArrival.animateTo(1f, tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
                 sourceArrivalPending = false
             }
         }
@@ -933,19 +936,29 @@ fun ReaderScreen(
     }
     val currentSpread = remember(pages, spreadGroups, pageIndex) {
         if (pages.isEmpty()) null
-        else if (spreadGroups.isNotEmpty()) spreadGroups.firstOrNull { it.contains(pageIndex) }
+        else if (spreadGroups.isNotEmpty()) spreadGroups.getOrNull(spreadGroups.indexOfReaderPage(pageIndex))
         else PageSpread(pageIndex.coerceIn(pages.indices))
     }
     val currentPicture = currentSpread?.let { picture(it.first, it.last) }
     val currentPictureCollected = currentPicture?.key?.let { key -> pageCollections.any { it.key == key } } == true
     fun togglePicture(first: Int, last: Int = first) {
         picture(first, last)?.let { collection ->
-            val existed = pageCollections.any { it.key == collection.key }
+            val existed = libraryStore.pageCollections.value.any { it.key == collection.key }
             libraryStore.togglePageCollection(collection)
-            downloadMessage = if (existed) "已取消画面收藏" else if (collection.spread) "已收藏跨页画面" else "已收藏画面"
+            val collected = libraryStore.pageCollections.value.any { it.key == collection.key }
+            if (collected != existed) actionReceipt = ReaderCommandReceipt(ReaderCommandKind.COLLECTION,
+                if (!collected) "已取消画面收藏" else if (collection.spread) "已收藏跨页画面" else "已收藏画面")
         }
     }
 
+    fun returnToReadingPosition() {
+        val previous = returnLocation ?: return
+        val current = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
+        targetOffset = previous.scrollOffset
+        targetPage = previous.pageIndex
+        returnLocation = current
+        keyboardFocusRestore++
+    }
     fun closeReaderSettings() {
         dimPreview.value?.takeIf { it != preferences.dimAmount }?.let { amount ->
             updatePreferences(preferences.copy(dimAmount = amount))
@@ -1003,8 +1016,7 @@ fun ReaderScreen(
             resolvePage = resolvePage,
             currentPage = pageIndex,
             pageInformation = {
-                ReaderPageResolutionInfo(pages, headers, chapter.sourceId, pageIndex,
-                    showSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage && preferences.mode != ReadingMode.VERTICAL,
+                ReaderPageResolutionInfo(pages, headers, chapter.sourceId, pageIndex, currentSpread,
                     enhancementEnabled = enhancementPolicy.tier != QualityTier.ORIGINAL, enhancement = enhancementState,
                     replacements = repairState.replacements, enhancementSources = enhancementSources)
             },
@@ -1015,7 +1027,7 @@ fun ReaderScreen(
             onToggleCollection = { togglePicture(it) },
             backdrop = readerBackdrop,
             onSelect = { destination ->
-                if (destination != pageIndex) {
+                if (destination != pageIndex && currentSpread?.contains(destination) != true) {
                     returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
                     targetOffset = 0
                     targetPage = destination
@@ -1125,7 +1137,7 @@ fun ReaderScreen(
             pages = loaded
             if (sourcePage != null) sourcePagePending = false
             restartPending = false
-            if (!restartSaved) downloadMessage = "阅读位置暂未保存，可继续阅读"
+            if (!restartSaved) actionReceipt = ReaderCommandReceipt(ReaderCommandKind.ISSUE, "阅读位置暂未保存，可继续阅读")
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -1148,7 +1160,7 @@ fun ReaderScreen(
                 libraryStore.migratePageBookmarks(migrationManga, migrationChapter, migrationPages)
             }
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { downloadMessage = "旧画面收藏暂未迁移，原记录已保留" }
+        catch (_: Exception) { actionReceipt = ReaderCommandReceipt(ReaderCommandKind.ISSUE, "旧画面收藏暂未迁移，原记录已保留") }
     }
 
     LaunchedEffect(chapterId, pageIndex, pages.isNotEmpty()) {
@@ -1167,13 +1179,6 @@ fun ReaderScreen(
     }
     LaunchedEffect(controlsVisible, active, leavingReader) {
         if (!controlsVisible || !active || leavingReader) showReaderActions = false
-    }
-    LaunchedEffect(downloadMessage) {
-        downloadMessage?.let {
-            displayedDownloadMessage = it
-            delay(4500)
-            downloadMessage = null
-        }
     }
     LaunchedEffect(preferences.dimAmount) { dimPreview.value = null }
     LaunchedEffect(immersive, active) {
@@ -1197,6 +1202,19 @@ fun ReaderScreen(
     var keyboardFocused by remember { mutableStateOf(false) }
     var keyboardSerial by remember(sourceIdentity) { mutableIntStateOf(0) }
     var keyboardRequest by remember(sourceIdentity) { mutableStateOf<ReaderKeyboardRequest?>(null) }
+    fun requestTurn(action: ReaderKeyboardAction) {
+        val serial = ++keyboardSerial
+        val first = keyboardRequest?.takeIf { it.action == action }?.firstSerial ?: serial
+        keyboardRequest = ReaderKeyboardRequest(serial, action, first)
+    }
+    val requestedPage = targetPage
+    val requestedOffset = targetOffset
+    val consumeRequestedPage: () -> Unit = {
+        if (targetPage == requestedPage && targetOffset == requestedOffset) {
+            targetPage = null
+            targetOffset = 0
+        }
+    }
     val desktopCanvasReady = desktop && readerForeground && !leavingReader && !panelBlocksReading &&
         !showPanelModels && !showEnhancement && !compareEnhancement && !showComments && !showSpreadAdjustment &&
         !pageNavigatorBlocking && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking &&
@@ -1238,7 +1256,7 @@ fun ReaderScreen(
                     controlsVisible = !controlsVisible
                     true
                 } else if (keyboardTurnOwned && readingEligible) {
-                    keyboardRequest = ReaderKeyboardRequest(++keyboardSerial, action)
+                    requestTurn(action)
                     true
                 } else false
             } ?: false
@@ -1264,7 +1282,7 @@ fun ReaderScreen(
             if (waiting) rescuePages[index] = true else rescuePages.remove(index)
         }) {
     ReaderWorkspace(
-        panelVisible = dockedPanels && inspectorOpen,
+        canDock = dockedPanels, panelVisible = inspectorOpen,
         panelWidth = panelWidth,
         panel = {
             Column(Modifier.fillMaxSize()) {
@@ -1297,7 +1315,9 @@ fun ReaderScreen(
                 else { showChapters = false; keyboardFocusRestore++ }
             }
         },
-    ) {
+    ) { inspectorMounted ->
+    val wideReaderChrome = desktop &&
+        readerWindow.width - (if (inspectorMounted) panelWidth else 0.dp) >= 790.dp * readerFontScale
     val cutout = WindowInsets.displayCutout
     Box(Modifier.fillMaxSize().then(keyboardModifier).then(mouseReveal).drawBehind {
         // A full page already paints its paper. Only gutters and the brief handoff expose this backing.
@@ -1365,7 +1385,7 @@ fun ReaderScreen(
                             experienceBudget.nextChapterPages else 0,
                         preferences = preferences, initialPage = pageIndex, initialPanel = cursor.panelIndex,
                         targetPage = targetPage,
-                        onTargetConsumed = { targetPage = null; targetOffset = 0 },
+                        onTargetConsumed = consumeRequestedPage,
                         onLocation = { index, panel -> pageIndex = index; cursor.panelIndex = panel; cursor.scrollOffset = 0 },
                         onSave = { index, panel -> libraryStore.saveProgress(manga, chapter, index, chapterPageCount,
                             updateRecent = recentConfirmed && chapterId == chapter.id && active && !leavingReader,
@@ -1420,13 +1440,26 @@ fun ReaderScreen(
                         targetOffset = targetOffset,
                         keyboardRequest = keyboardRequest.takeIf { keyboardTurnOwned },
                         onKeyboardConsumed = { serial -> if (keyboardRequest?.serial == serial) keyboardRequest = null },
-                        onTargetConsumed = { targetPage = null; targetOffset = 0 },
+                        onPositioned = { span, origin ->
+                            if (desktop && active && !leavingReader) {
+                                if (origin != null) returnLocation = origin
+                                val range = if (span.second == null) "${span.first + 1}" else "${span.first + 1}–${span.last + 1}"
+                                actionReceipt = ReaderCommandReceipt(ReaderCommandKind.POSITION, "已定位到第 $range 页")
+                            }
+                        },
+                        onBoundary = { last ->
+                            if (desktop && active && !leavingReader) actionReceipt = ReaderCommandReceipt(
+                                ReaderCommandKind.EDGE, if (last) "已到本章末页" else "已到本章首页")
+                        },
+                        onTargetConsumed = consumeRequestedPage,
                         onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
                         onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, chapterPageCount, offset,
                             clearLegacyLongImagePosition = preferences.mode == ReadingMode.VERTICAL,
                             updateRecent = recentConfirmed && chapterId == chapter.id && active && !leavingReader) },
                         onReadingNavigation = {
                             if (chapterId == chapter.id && readingEligible) recentConfirmed = true
+                            if (actionReceipt?.kind == ReaderCommandKind.POSITION || actionReceipt?.kind == ReaderCommandKind.EDGE)
+                                actionReceipt = null
                         },
                         longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
                         onVisibleImageChanged = { visible ->
@@ -1710,12 +1743,12 @@ fun ReaderScreen(
                     ReaderDockGroups(desktop, progress = {
                         if (pages.isNotEmpty()) key(chapterId) {
                             ReaderProgressSlider(
-                                pageIndex = pageIndex, pages = pages, pendingPage = targetPage,
+                                pageIndex = pageIndex, pages = pages, pendingPage = targetPage, currentSpread = currentSpread,
                                 showSpreadRange = preferences.panelEngine == PanelEngine.OFF &&
                                     preferences.doublePage && preferences.mode != ReadingMode.VERTICAL,
                                 enabled = readerToolsVisible,
                                 onSeek = { destination ->
-                                    if (destination != pageIndex) {
+                                    if (destination != pageIndex && currentSpread?.contains(destination) != true) {
                                         returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
                                         targetOffset = 0
                                         targetPage = destination
@@ -1731,7 +1764,7 @@ fun ReaderScreen(
                                             forwardOnLeft = preferences.mode != ReadingMode.VERTICAL && preferences.swipeRightForNext(desktop = true),
                                             previousEnabled = mayTurn && (currentSpread?.first ?: pageIndex) > 0,
                                             nextEnabled = mayTurn && (currentSpread?.last ?: pageIndex) < pages.lastIndex,
-                                        ) { action -> keyboardRequest = ReaderKeyboardRequest(++keyboardSerial, action) }
+                                        ) { action -> requestTurn(action) }
                                     }
                                     if (canChooseSource || sourceLoading) Box(
                                         Modifier.width(44.dp).heightIn(min = 44.dp)
@@ -1833,9 +1866,11 @@ fun ReaderScreen(
                                                     prepared.headers, expectedEntry, route = route)
                                             else { downloadStore.enqueue(manga, chapterToSave, prepared.pages,
                                                 prepared.headers, route = route); true }
-                                            if (saved) downloadMessage = "正在保存本章，可继续阅读"
+                                            if (saved) actionReceipt = ReaderCommandReceipt(ReaderCommandKind.DOWNLOAD, "正在保存本章，可继续阅读")
                                         } catch (cancelled: CancellationException) { throw cancelled }
-                                        catch (failure: Exception) { downloadMessage = failure.message ?: "无法保存本章" }
+                                        catch (failure: Exception) {
+                                            actionReceipt = ReaderCommandReceipt(ReaderCommandKind.ISSUE, failure.message ?: "无法保存本章")
+                                        }
                                         finally { savingChapter = false }
                                     }
                                 }
@@ -1915,12 +1950,7 @@ fun ReaderScreen(
                                             if (returnLocation != null) {
                                                 CompactMenuAction(Icons.AutoMirrored.Rounded.Undo, "返回刚才的位置", enabled = showReaderActions) {
                                                     showReaderActions = false
-                                                    returnLocation?.let { previous ->
-                                                        val current = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
-                                                        targetOffset = previous.scrollOffset
-                                                        targetPage = previous.pageIndex
-                                                        returnLocation = current
-                                                    }
+                                                    returnToReadingPosition()
                                                 }
                                             }
                                         }
@@ -2002,17 +2032,14 @@ fun ReaderScreen(
                 ReaderComparisonControls(enhancementDivider) { comparisonTarget = null }
             }
         }
-        AnimatedVisibility(
-            visible = downloadMessage != null,
-            modifier = Modifier.align(Alignment.Center),
-            enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)),
-            exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)),
-        ) {
-            LiquidGlassSurface(readerBackdrop, Modifier.padding(32.dp), role = GlassSurfaceRole.POPOVER,
-                cornerRadius = 16.dp, softCard = true) {
-                Text(downloadMessage ?: displayedDownloadMessage, Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
-                    color = colors.onSurface, fontSize = 13.sp)
-            }
+        key(manga.id, sourceIdentity) {
+            ReaderCommandNotice(actionReceipt, active = readerForeground && !leavingReader, desktop = desktop,
+                backdrop = readerBackdrop, modifier = if (desktop) Modifier.align(Alignment.TopEnd)
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                    .padding(start = 12.dp, end = 14.dp, top = if (readerToolsVisible) 74.dp else 15.dp)
+                else Modifier.align(Alignment.Center).padding(32.dp),
+                onExpire = { if (actionReceipt === it) actionReceipt = null },
+                onReturn = if (returnLocation != null && desktopCanvasReady) ::returnToReadingPosition else null)
         }
     }
     }
@@ -2171,6 +2198,8 @@ private fun ChapterPages(
     targetOffset: Int,
     keyboardRequest: ReaderKeyboardRequest?,
     onKeyboardConsumed: (Int) -> Unit,
+    onPositioned: (PageSpread, ReaderReturnLocation?) -> Unit,
+    onBoundary: (last: Boolean) -> Unit,
     onTargetConsumed: () -> Unit,
     onLocation: (Int, Int) -> Unit,
     onSave: (Int, Int) -> Unit,
@@ -2189,6 +2218,8 @@ private fun ChapterPages(
 ): ReaderPrefetchViewport {
     val save by rememberUpdatedState(onSave)
     val readingNavigation by rememberUpdatedState(onReadingNavigation)
+    val positioned by rememberUpdatedState(onPositioned)
+    val boundary by rememberUpdatedState(onBoundary)
     val location by rememberUpdatedState(onLocation)
     val visibleImageChanged by rememberUpdatedState(onVisibleImageChanged)
     val nearEnd by rememberUpdatedState(onNearEnd)
@@ -2363,36 +2394,49 @@ private fun ChapterPages(
                 .debounce(450).distinctUntilChanged().collect { (index, offset, restoringNow) -> if (!restoringNow) save(index, offset) }
         }
         LaunchedEffect(targetPage, targetOffset) {
-            targetPage?.let {
+            val requested = targetPage ?: return@LaunchedEffect
+            try {
                 readingNavigation()
                 restoring = false
-                val index = it.coerceIn(0, pages.lastIndex)
+                val index = requested.coerceIn(0, pages.lastIndex)
                 val offset = targetOffset.coerceAtLeast(0)
                 recordNavigation(index, offset)
-                withoutScrollDirection(rebase = false) { list.scrollToItem(index, offset) }
-                onTargetConsumed()
-            }
+                withoutScrollDirection(rebase = false) {
+                    if (platformKind == PlatformKind.DESKTOP && keyboardMotion && offset == 0 &&
+                        index != list.firstVisibleItemIndex && list.layoutInfo.visibleItemsInfo.any { item -> item.index == index })
+                        list.animateScrollToItem(index)
+                    else list.scrollToItem(index, offset)
+                }
+                positioned(PageSpread(index), null)
+            } finally { onTargetConsumed() }
         }
         LaunchedEffect(keyboardRequest?.serial, active, restoring) {
             val request = keyboardRequest ?: return@LaunchedEffect
             if (!active || restoring) return@LaunchedEffect
             try {
                 readingNavigation()
-                suspend fun moveTo(index: Int) {
+                suspend fun moveTo(index: Int, jump: Boolean = false) {
                     val target = index.coerceIn(0, pages.lastIndex)
+                    val origin = ReaderReturnLocation(list.firstVisibleItemIndex.coerceIn(pages.indices), list.firstVisibleItemScrollOffset)
                     recordNavigation(target)
                     withoutScrollDirection(rebase = false) {
-                        if (keyboardMotion) list.animateScrollToItem(target)
+                        if (keyboardMotion && (!jump || list.layoutInfo.visibleItemsInfo.any { it.index == target }))
+                            list.animateScrollToItem(target)
                         else list.scrollToItem(target)
+                    }
+                    if (jump) {
+                        if (list.firstVisibleItemIndex != origin.pageIndex || list.firstVisibleItemScrollOffset != origin.scrollOffset)
+                            positioned(PageSpread(target), origin)
+                        else boundary(request.action == ReaderKeyboardAction.LAST_PAGE)
                     }
                 }
                 when (request.action) {
-                    ReaderKeyboardAction.FIRST_PAGE -> moveTo(0)
-                    ReaderKeyboardAction.LAST_PAGE -> moveTo(pages.lastIndex)
+                    ReaderKeyboardAction.FIRST_PAGE -> moveTo(0, jump = true)
+                    ReaderKeyboardAction.LAST_PAGE -> moveTo(pages.lastIndex, jump = true)
                     ReaderKeyboardAction.PREVIOUS_PAGE -> when {
                         list.firstVisibleItemScrollOffset > 0 -> moveTo(list.firstVisibleItemIndex)
                         list.firstVisibleItemIndex > 0 -> moveTo(list.firstVisibleItemIndex - 1)
-                        else -> onPrevious?.invoke()
+                        else -> onPrevious?.invoke() ?: boundary(false)
                     }
                     ReaderKeyboardAction.NEXT_PAGE -> when {
                         list.firstVisibleItemIndex < pages.lastIndex -> moveTo(list.firstVisibleItemIndex + 1)
@@ -2400,14 +2444,15 @@ private fun ChapterPages(
                             val step = (list.layoutInfo.viewportEndOffset - list.layoutInfo.viewportStartOffset) * .85f
                             if (keyboardMotion) list.animateScrollBy(step) else list.scrollBy(step)
                         }
-                        else -> onNext?.invoke()
+                        else -> onNext?.invoke() ?: boundary(true)
                     }
                     ReaderKeyboardAction.SCROLL_UP, ReaderKeyboardAction.SCROLL_DOWN -> {
                         val forward = request.action == ReaderKeyboardAction.SCROLL_DOWN
                         if (if (forward) list.canScrollForward else list.canScrollBackward) {
                             val step = (list.layoutInfo.viewportEndOffset - list.layoutInfo.viewportStartOffset) * .85f * if (forward) 1 else -1
                             if (keyboardMotion) list.animateScrollBy(step) else list.scrollBy(step)
-                        } else if (forward) onNext?.invoke() else onPrevious?.invoke()
+                        } else if (forward) onNext?.invoke() ?: boundary(true)
+                        else onPrevious?.invoke() ?: boundary(false)
                     }
                     ReaderKeyboardAction.TOGGLE_CONTROLS, ReaderKeyboardAction.PAGE_NAVIGATOR -> Unit
                 }
@@ -2512,25 +2557,51 @@ private fun ChapterPages(
             groups.indexOfReaderPage(startPage).coerceAtLeast(0)
         }
         val pager = rememberPagerState(initialPage = startingGroup, pageCount = { groups.size })
+        val latestKey by rememberUpdatedState(keyboardRequest)
+        var intendedGroup by remember(pager) { mutableStateOf<Int?>(null) }
+        var lastStartedKey by remember(pager) { mutableIntStateOf(0) }
         LaunchedEffect(keyboardRequest?.serial, active) {
-            val request = keyboardRequest ?: return@LaunchedEffect
-            if (!active) return@LaunchedEffect
+            val request = keyboardRequest
+            if (request == null || !active) { intendedGroup = null; return@LaunchedEffect }
             try {
                 readingNavigation()
-                val destination = when (request.action) {
+                // Repeated desktop keys can arrive before the previous spring crosses a page.
+                // Count the presses since the last handled key and continue from that turn's intent.
+                val steps = (request.serial - maxOf(request.firstSerial - 1, lastStartedKey)).coerceAtLeast(1)
+                lastStartedKey = request.serial
+                val from = (intendedGroup ?: pager.currentPage).coerceIn(groups.indices)
+                val rawDestination = when (request.action) {
                     ReaderKeyboardAction.FIRST_PAGE -> 0
                     ReaderKeyboardAction.LAST_PAGE -> groups.lastIndex
-                    ReaderKeyboardAction.PREVIOUS_PAGE, ReaderKeyboardAction.SCROLL_UP -> pager.currentPage - 1
-                    ReaderKeyboardAction.NEXT_PAGE, ReaderKeyboardAction.SCROLL_DOWN -> pager.currentPage + 1
-                    ReaderKeyboardAction.TOGGLE_CONTROLS, ReaderKeyboardAction.PAGE_NAVIGATOR -> pager.currentPage
+                    ReaderKeyboardAction.PREVIOUS_PAGE, ReaderKeyboardAction.SCROLL_UP -> from - steps
+                    ReaderKeyboardAction.NEXT_PAGE, ReaderKeyboardAction.SCROLL_DOWN -> from + steps
+                    ReaderKeyboardAction.TOGGLE_CONTROLS, ReaderKeyboardAction.PAGE_NAVIGATOR -> from
                 }
+                val origin = pager.settledPage.coerceIn(groups.indices)
+                // Finish landing at the boundary before a separate input can open a different chapter.
+                val destination = when {
+                    rawDestination < 0 && origin > 0 -> 0
+                    rawDestination > groups.lastIndex && origin < groups.lastIndex -> groups.lastIndex
+                    else -> rawDestination
+                }
+                val jump = request.action == ReaderKeyboardAction.FIRST_PAGE || request.action == ReaderKeyboardAction.LAST_PAGE
                 when {
-                    destination < 0 -> onPrevious?.invoke()
-                    destination > groups.lastIndex -> onNext?.invoke()
-                    keyboardMotion -> pager.animateScrollToPage(destination)
-                    else -> pager.scrollToPage(destination)
+                    destination < 0 -> onPrevious?.invoke() ?: boundary(false)
+                    destination > groups.lastIndex -> onNext?.invoke() ?: boundary(true)
+                    else -> {
+                        intendedGroup = destination
+                        if (keyboardMotion && kotlin.math.abs(destination - origin) <= 1) pager.animateScrollToPage(destination)
+                        else pager.scrollToPage(destination)
+                        if (jump && pager.settledPage == destination) {
+                            if (origin != destination) positioned(groups[destination], ReaderReturnLocation(groups[origin].first, 0))
+                            else boundary(request.action == ReaderKeyboardAction.LAST_PAGE)
+                        }
+                    }
                 }
-            } finally { onKeyboardConsumed(request.serial) }
+            } finally {
+                if (latestKey?.serial == request.serial) intendedGroup = null
+                onKeyboardConsumed(request.serial)
+            }
         }
         val dragging by pager.interactionSource.collectIsDraggedAsState()
         LaunchedEffect(dragging) { if (dragging) readingNavigation() }
@@ -2573,7 +2644,9 @@ private fun ChapterPages(
                         if (keyboardMotion) pager.animateScrollToPage(destination) else pager.scrollToPage(destination)
                     }
                 } else if (step > 0 && longSwipe && atEnd && endReady) {
-                    onNext?.invoke()
+                    onNext?.invoke() ?: boundary(true)
+                } else if (step < 0 && destination < 0 && onPrevious == null) {
+                    boundary(false)
                 }
             }
         }
@@ -2621,12 +2694,17 @@ private fun ChapterPages(
             }
         }
         LaunchedEffect(targetPage, groups) {
-            targetPage?.let { imageIndex ->
+            val imageIndex = targetPage ?: return@LaunchedEffect
+            try {
                 readingNavigation()
                 val groupIndex = groups.indexOfReaderPage(imageIndex.coerceIn(0, pages.lastIndex))
-                if (groupIndex >= 0) pager.scrollToPage(groupIndex)
-                onTargetConsumed()
-            }
+                if (groupIndex >= 0) {
+                    if (desktop && keyboardMotion && kotlin.math.abs(pager.settledPage - groupIndex) == 1)
+                        pager.animateScrollToPage(groupIndex)
+                    else pager.scrollToPage(groupIndex)
+                    if (pager.settledPage == groupIndex) positioned(groups[groupIndex], null)
+                }
+            } finally { onTargetConsumed() }
         }
         DisposableEffect(pager, groups) {
             onDispose {
@@ -4613,13 +4691,14 @@ private fun ReaderPageNavigatorDialog(
                     Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         OutlinedTextField(value = input, onValueChange = { value ->
-                            if (value.length <= pages.size.toString().length && value.all { it in '0'..'9' }) input = value
+                            input = value.trim().take(12)
                         }, modifier = Modifier.weight(1f).focusRequester(numberFocus).onPreviewKeyEvent { event ->
                             if (event.key == Key.Enter || event.key == Key.NumPadEnter) {
                                 if (event.type == KeyEventType.KeyDown) go()
                                 true
                             } else false
-                        }, singleLine = true, label = { Text("跳到页码") },
+                        }, singleLine = true, isError = input.isNotEmpty() && destination == null,
+                            label = { Text(if (input.isNotEmpty() && destination == null) "请输入 1–${pages.size} 的页码" else "跳到页码") },
                             placeholder = { Text("${currentPage + 1} / ${pages.size}") },
                             textStyle = MaterialTheme.typography.bodyMedium, shape = RoundedCornerShape(12.dp))
                         TextButton(onClick = go, enabled = visible && destination != null) { Text("前往") }
@@ -4706,6 +4785,7 @@ private fun ReaderProgressSlider(
     pageIndex: Int,
     pages: List<Page>,
     pendingPage: Int?,
+    currentSpread: PageSpread?,
     showSpreadRange: Boolean,
     enabled: Boolean,
     onSeek: (Int) -> Unit,
@@ -4723,12 +4803,10 @@ private fun ReaderProgressSlider(
     val pageCount = pages.size
     val lastPage = (pageCount - 1).coerceAtLeast(0)
     val shown = (preview ?: pendingPage?.toFloat() ?: pageIndex.toFloat()).coerceIn(0f, lastPage.toFloat())
-    val enhancement = LocalReaderEnhancementPresentation.current
-    val spread = enhancement?.state?.visiblePages?.takeIf {
-        showSpreadRange && it.size == 2 && pageIndex in it && enhancement.state.currentPage == pageIndex &&
-            preview == null && pendingPage == null
+    val spread = currentSpread?.takeIf {
+        showSpreadRange && it.second != null && it.contains(pageIndex) && preview == null && pendingPage == null
     }
-    val pageLabel = if (spread != null) "${spread.min() + 1}–${spread.max() + 1}" else "${shown.roundToInt() + 1}"
+    val pageLabel = if (spread != null) "${spread.first + 1}–${spread.last + 1}" else "${shown.roundToInt() + 1}"
     val colors = MaterialTheme.colorScheme
     val labelStyle = MaterialTheme.typography.labelLarge.copy(fontFamily = mangaFontFamily(MangaFontScene.NUMBERS),
         fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold, fontFeatureSettings = "tnum")
@@ -4764,7 +4842,8 @@ private fun ReaderProgressSlider(
             onValueChangeFinished = {
                 preview?.let {
                     val destination = it.roundToInt().coerceIn(0, lastPage)
-                    if (destination != (pendingPage ?: pageIndex)) feedback.perform(FeelEvent.Selection)
+                    if (destination != (pendingPage ?: pageIndex) && currentSpread?.contains(destination) != true)
+                        feedback.perform(FeelEvent.Selection)
                     onSeek(destination)
                 }
                 preview = null
@@ -4795,12 +4874,11 @@ private fun ReaderProgressSlider(
 
 @Composable
 private fun ReaderPageResolutionInfo(pages: List<Page>, headers: Map<String, String>, sourceId: String,
-    pageIndex: Int, showSpread: Boolean, enhancementEnabled: Boolean, enhancement: ReaderEnhancementState,
+    pageIndex: Int, spread: PageSpread?, enhancementEnabled: Boolean, enhancement: ReaderEnhancementState,
     replacements: Map<Int, ReaderPageReplacement>, enhancementSources: Map<Int, ReaderEnhancementSourceReceipt>) {
     if (pageIndex !in pages.indices) return
-    val shownIndices = enhancement.visiblePages.takeIf {
-        showSpread && it.size == 2 && pageIndex in it && enhancement.currentPage == pageIndex
-    }?.sorted() ?: listOf(pageIndex)
+    val shownIndices = spread?.takeIf { it.second != null && it.contains(pageIndex) }
+        ?.let { listOf(it.first, it.last) } ?: listOf(pageIndex)
     val dimensionRevision by ReaderDimensionCache.revision.collectAsStateWithLifecycle()
     val sourceReceipts = shownIndices.associateWith { enhancementSources[it] }
     val resolutions = remember(shownIndices, pages, headers, sourceId, dimensionRevision,

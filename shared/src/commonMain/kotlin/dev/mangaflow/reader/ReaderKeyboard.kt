@@ -19,4 +19,4 @@ class ReaderKeyboardConfiguration(
 
 val LocalReaderKeyboard = staticCompositionLocalOf<ReaderKeyboardConfiguration?> { null }
 
-internal data class ReaderKeyboardRequest(val serial: Int, val action: ReaderKeyboardAction)
+internal data class ReaderKeyboardRequest(val serial: Int, val action: ReaderKeyboardAction, val firstSerial: Int)

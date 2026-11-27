@@ -1,5 +1,9 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.VectorConverter
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -12,9 +16,27 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
@@ -30,6 +52,9 @@ import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
 
@@ -98,12 +123,13 @@ internal fun DesktopBrowseIndexRow(
     ordinalWidth: Dp = 0.dp,
     ordinal: @Composable () -> Unit = {},
     onLongClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
     onOpen: () -> Unit,
 ) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
     Column(Modifier.fillMaxWidth()) {
-        DesktopIndexColumns(Modifier.browseIntentWarmup(manga, repository, interaction)
+        DesktopIndexColumns(modifier.browseIntentWarmup(manga, repository, interaction)
             .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = "查看${manga.title}", onLongClickLabel = if (onLongClick != null) "漫画操作" else null,
                 onLongClick = onLongClick, onClick = {
@@ -140,17 +166,74 @@ internal fun DesktopFilterHeading(text: String) {
 internal fun DesktopFilterOptions(heading: String, labels: List<String>, selection: Int, enabled: Boolean,
     onChoose: (Int) -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val motion = LocalMotionEnabled.current
+    val contrast = LocalPlatformAccessibilityPreferences.current.increaseContrast
+    val direction = LocalLayoutDirection.current
+    val focuses = remember(labels) { List(labels.size) { FocusRequester() } }
+    var measured by remember(labels) { mutableStateOf<Pair<Int, Rect>?>(null) }
+    var lastIndex by remember(labels) { mutableIntStateOf(-1) }
+    val marker = remember(labels) { Animatable(Rect.Zero, Rect.VectorConverter) }
+    val ink = remember(labels) { Animatable(1f) }
+    val wash = colors.primary.copy(alpha = if (contrast) .21f else .11f)
+    val target = measured?.takeIf { it.first == selection }?.second
+    LaunchedEffect(selection, target, motion) {
+        if (!motion || selection !in labels.indices) {
+            lastIndex = -1
+            return@LaunchedEffect
+        }
+        if (target == null) return@LaunchedEffect
+        val previous = lastIndex
+        lastIndex = selection
+        val destinationOnSameRow = previous >= 0 && marker.value.center.y in target.top..target.bottom
+        if (previous >= 0 && previous != selection && destinationOnSameRow) {
+            ink.snapTo(1f)
+            marker.animateTo(target, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness))
+        } else {
+            // A resize follows the new layout immediately; changing rows settles at the
+            // destination without painting a diagonal path across unrelated filters.
+            marker.snapTo(target)
+            if (previous >= 0 && previous != selection) {
+                ink.snapTo(.36f)
+                ink.animateTo(1f, tween(MangaMotion.Quick))
+            } else ink.snapTo(1f)
+        }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         DesktopFilterHeading(heading)
-        FlowRow(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(3.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        FlowRow(Modifier.fillMaxWidth().selectableGroup().drawBehind {
+            val box = marker.value
+            if (motion && lastIndex >= 0 && selection in labels.indices && box.width > 0f) {
+                val inset = minOf(4.dp.toPx(), box.height * .12f)
+                val height = (box.height - 2f * inset).coerceAtLeast(0f)
+                drawRoundRect(wash.copy(alpha = wash.alpha * ink.value), Offset(box.left, box.top + inset),
+                    Size(box.width, height), CornerRadius(height / 2f))
+            }
+        }, horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             labels.forEachIndexed { index, label ->
                 val chosen = index == selection
+                val bounds = if (chosen && motion) Modifier.onGloballyPositioned { coords ->
+                    val origin = coords.positionInParent()
+                    measured = index to Rect(origin.x, origin.y, origin.x + coords.size.width, origin.y + coords.size.height)
+                } else Modifier
                 MotionTextButton(onClick = { if (!chosen) onChoose(index) }, enabled = enabled,
-                    modifier = Modifier.heightIn(min = 32.dp).semantics { role = Role.RadioButton; selected = chosen },
+                    modifier = Modifier.heightIn(min = 32.dp).then(bounds).focusRequester(focuses[index])
+                        .onPreviewKeyEvent { event ->
+                            if (!enabled || event.isCtrlPressed || event.isAltPressed || event.isMetaPressed || event.isShiftPressed) false
+                            else {
+                                val next = when (event.key) {
+                                    Key.MoveHome -> 0
+                                    Key.MoveEnd -> labels.lastIndex
+                                    Key.DirectionLeft -> index + if (direction == LayoutDirection.Ltr) -1 else 1
+                                    Key.DirectionRight -> index + if (direction == LayoutDirection.Ltr) 1 else -1
+                                    else -> return@onPreviewKeyEvent false
+                                }.coerceIn(0, labels.lastIndex)
+                                if (event.type == KeyEventType.KeyDown && next != index) focuses[next].requestFocus()
+                                true
+                            }
+                        }.semantics { role = Role.RadioButton; selected = chosen },
                     contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp),
                     colors = ButtonDefaults.textButtonColors(
-                        containerColor = if (chosen) colors.primary.copy(alpha = .11f) else androidx.compose.ui.graphics.Color.Transparent,
+                        containerColor = if (chosen && (!motion || lastIndex < 0)) wash else Color.Transparent,
                         contentColor = if (chosen) colors.primary else colors.onSurface)) {
                     Text(label, style = MaterialTheme.typography.bodySmall,
                         fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal, maxLines = 2,

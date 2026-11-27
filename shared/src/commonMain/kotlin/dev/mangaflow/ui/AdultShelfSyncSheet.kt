@@ -29,6 +29,7 @@ import dev.mangaflow.account.AdultShelfSyncState
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTextButton
 
 /** Source-owned comparison. Read-only until an explicit per-row choice. */
@@ -45,6 +46,7 @@ internal fun AdultShelfSyncSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    var cancelRequested by remember(state.revision) { mutableStateOf(false) }
     var chosen by remember(state.revision) { mutableStateOf<Map<String, AdultFavoriteChoice>>(emptyMap()) }
     var confirmRemoval by remember(state.revision) { mutableStateOf(false) }
     var openAccountAfterExit by remember { mutableStateOf(false) }
@@ -68,7 +70,7 @@ internal fun AdultShelfSyncSheet(
                 Icon(Icons.Outlined.Sync, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
                 Text("${sourceName}收藏差异", Modifier.weight(1f).padding(start = 7.dp),
                     style = MaterialTheme.typography.titleMedium)
-                if (state.busy) MotionTextButton(onClick = onCancel) {
+                if (state.busy) MotionTextButton(onClick = { cancelRequested = true; onCancel() }) {
                     Text("取消", fontSize = 12.sp)
                 } else MotionIconButton(onClick = onCheck, tooltip = "重新读取${sourceName}收藏",
                     modifier = Modifier.size(40.dp)) {
@@ -84,17 +86,31 @@ internal fun AdultShelfSyncSheet(
                 Text("本机 ${state.localCount}  ·  $sourceName ${state.remoteCount}  ·  差异 ${state.differences.size}",
                     fontSize = 12.sp, color = colors.onSurfaceVariant)
             }
-            if (state.busy) QuietLoading(if (state.applying) "正在执行已确认的变更…" else "正在读取${sourceName}收藏…")
-            state.error?.let {
-                Text(it, fontSize = 12.sp, color = colors.error)
-            }
-            state.completed?.let {
-                Text(it, fontSize = 12.sp, color = colors.onSurfaceVariant)
+            if (platformKind == PlatformKind.DESKTOP) {
+                val status = when {
+                    state.busy -> PreferenceNotice(if (state.applying) "正在执行已确认的变更…" else "正在读取${sourceName}收藏…",
+                        PreferenceNoticeKind.WORKING)
+                    state.error != null -> PreferenceNotice(state.error,
+                        if (cancelRequested) PreferenceNoticeKind.INFO else PreferenceNoticeKind.ERROR)
+                    state.completed != null -> PreferenceNotice(state.completed, PreferenceNoticeKind.DONE)
+                    state.checked && state.differences.isEmpty() -> PreferenceNotice("本机书架中的${sourceName}作品已与站点收藏对齐。",
+                        PreferenceNoticeKind.DONE)
+                    else -> null
+                }
+                PreferenceOperationFeedback(status)
+            } else {
+                if (state.busy) QuietLoading(if (state.applying) "正在执行已确认的变更…" else "正在读取${sourceName}收藏…")
+                state.error?.let {
+                    Text(it, fontSize = 12.sp, color = colors.error)
+                }
+                state.completed?.let {
+                    Text(it, fontSize = 12.sp, color = colors.onSurfaceVariant)
+                }
             }
             if (state.loginRequired && !state.busy) {
                 MotionTextButton(onClick = { openAccountAfterExit = true; dismiss() }) { Text("登录${sourceName}", fontSize = 12.sp) }
             }
-            if (state.checked && state.differences.isEmpty()) {
+            if (platformKind != PlatformKind.DESKTOP && state.checked && state.differences.isEmpty()) {
                 Text("本机书架中的${sourceName}作品已与站点收藏对齐。",
                     fontSize = 12.sp, color = colors.onSurfaceVariant)
             }
@@ -187,7 +203,9 @@ private fun AdultShelfChoice(
                 else -> colors.surfaceVariant
             }),
         contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp)) {
-        Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
+        if (platformKind == PlatformKind.DESKTOP) MotionSwap(chosen, Modifier.size(14.dp)) { marked ->
+            if (marked) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp))
+        } else Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
             if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp))
         }
         Spacer(Modifier.width(5.dp))

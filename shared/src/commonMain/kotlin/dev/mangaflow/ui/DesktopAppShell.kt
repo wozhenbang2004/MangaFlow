@@ -6,6 +6,8 @@ import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
@@ -56,10 +58,16 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -99,6 +107,7 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionNavigationColumn
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.motionInputGate
@@ -110,6 +119,20 @@ internal data class DesktopDestination(
 )
 
 internal val DesktopNavigationRailWidth = 64.dp
+
+/** The search field and its result list live in separate slots of this window. */
+internal class DesktopSearchFocus {
+    var field by mutableStateOf<FocusRequester?>(null)
+    var results by mutableStateOf<(() -> Boolean)?>(null)
+}
+
+internal val LocalDesktopSearchFocus = staticCompositionLocalOf<DesktopSearchFocus?> { null }
+
+internal fun Modifier.desktopSearchPaneKey(target: (() -> Boolean)?): Modifier = if (target == null) this else
+    onPreviewKeyEvent { event ->
+        if (event.key != Key.F6 || event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) false
+        else if (event.type == KeyEventType.KeyUp) target() else true
+    }
 
 internal fun desktopNavigationLabelWidth(fontScale: Float): Dp =
     (218.dp + 66.dp * (fontScale - 1f)).coerceIn(218.dp, 276.dp)
@@ -255,7 +278,8 @@ internal fun DesktopNavigationWorkspace(
                 .background(MaterialTheme.colorScheme.background)) { wallpaper() }
             // The gallery is measured at its destination width only once. The rail animates over it.
             Box(Modifier.fillMaxSize().padding(start = if (visible) sidebarWidth else 0.dp).clipToBounds()) {
-                MangaAdaptiveLayout(content)
+                val searchFocus = remember { DesktopSearchFocus() }
+                CompositionLocalProvider(LocalDesktopSearchFocus provides searchFocus) { MangaAdaptiveLayout(content) }
             }
             if (visible) Box(Modifier.align(Alignment.CenterStart).layout { measurable, bounds ->
                 val live = DesktopNavigationRailWidth + (wideRail - DesktopNavigationRailWidth) * labels.value.coerceIn(0f, 1f)
@@ -404,7 +428,7 @@ private fun DesktopScopePicker(profile: ContentProfile, onSelect: (ContentProfil
                 contentAlignment = Alignment.Center) { Icon(profile.icon, null, Modifier.size(18.dp), tint = colors.primary) }
             Text(profile.title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium,
                 color = colors.onSurface, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
+            DesktopMenuChevron(open)
         }
         DesktopActionPopup(open, ContentProfile.entries.map { entry ->
             DesktopMenuAction(entry.title, icon = entry.icon, selected = profile == entry) {
@@ -453,6 +477,49 @@ private val SearchTarget.scopeIcon get() = when (this) {
     SearchTarget.TRANSLATION_GROUP -> Icons.Outlined.Translate
 }
 
+@Composable
+private fun DesktopMenuChevron(open: Boolean) {
+    val turn = animateFloatAsState(if (open) 180f else 0f,
+        if (LocalMotionEnabled.current) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
+        label = "desktop-menu-chevron")
+    Icon(Icons.Outlined.ExpandMore, null, Modifier.size(15.dp).graphicsLayer { rotationZ = turn.value },
+        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
+internal fun Modifier.desktopFieldFocusLine(focused: Boolean, accent: Color): Modifier {
+    val amount = animateFloatAsState(if (focused) 1f else 0f,
+        if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "field-focus")
+    val ink = if (LocalPlatformAccessibilityPreferences.current.increaseContrast) MaterialTheme.colorScheme.onSurface else accent
+    return drawBehind {
+        val progress = amount.value.coerceIn(0f, 1f)
+        if (progress > 0f) {
+            val width = (size.width - 18.dp.toPx()).coerceAtLeast(0f) * progress
+            val stroke = 2.dp.toPx()
+            drawRoundRect(ink.copy(alpha = progress), Offset((size.width - width) / 2f, size.height - stroke),
+                Size(width, stroke), CornerRadius(stroke / 2f))
+        }
+    }
+}
+
+/** The affordance changes inside its own slot, preserving caret and pointer positions. */
+@Composable
+internal fun DesktopFieldClear(visible: Boolean, enabled: Boolean, label: String, extent: Dp, onClick: () -> Unit) {
+    val motion = LocalMotionEnabled.current
+    Box(Modifier.size(extent), contentAlignment = Alignment.Center) {
+        AnimatedVisibility(visible,
+            enter = fadeIn(if (motion) tween(MangaMotion.Quick) else snap()) +
+                scaleIn(if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(), initialScale = .82f),
+            exit = fadeOut(if (motion) tween(MangaMotion.Quick) else snap()) +
+                scaleOut(if (motion) tween(MangaMotion.Quick) else snap(), targetScale = .88f)) {
+            MotionIconButton(onClick = onClick, enabled = enabled && visible, tooltip = label,
+                modifier = Modifier.size(extent).motionInputGate(visible)) {
+                Icon(Icons.Outlined.Close, label, Modifier.size(17.dp))
+            }
+        }
+    }
+}
+
 /** The beUI-derived search input remains compact; its actual results belong to the workspace. */
 @Composable
 internal fun DesktopSearchField(
@@ -472,14 +539,17 @@ internal fun DesktopSearchField(
     translationGroupAvailable: Boolean = true,
 ) {
     val requester = remember { FocusRequester() }
+    val searchFocus = LocalDesktopSearchFocus.current
+    DisposableEffect(searchFocus, requester, active) {
+        if (searchFocus != null && active) searchFocus.field = requester
+        onDispose { if (searchFocus != null && searchFocus.field === requester) searchFocus.field = null }
+    }
     val focus = LocalFocusManager.current
     var scopeOpen by remember { mutableStateOf(false) }
     val inputInteraction = remember { MutableInteractionSource() }
     val focused by inputInteraction.collectIsFocusedAsState()
     val colors = MaterialTheme.colorScheme
     val height = maxOf(40.dp, 22.dp * LocalMangaWindow.current.fontScale + 13.dp)
-    val focusAmount = animateFloatAsState(if (focused) 1f else 0f,
-        if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "search-field-focus")
     val searchLabel = when {
         !showScopeSelector -> "搜索漫画标题"
         target == SearchTarget.TRANSLATION_GROUP -> "搜索汉化组名称"
@@ -499,19 +569,15 @@ internal fun DesktopSearchField(
         focus.clearFocus(force = true)
     }
     BoxWithConstraints(modifier.height(height)) {
-        val showKeyHint = !focused && query.isBlank() && maxWidth >= 328.dp * LocalMangaWindow.current.fontScale
+        val hintRoom = maxWidth >= 356.dp * LocalMangaWindow.current.fontScale
+        val keyHint = when {
+            focused && searchFocus?.results != null -> "F6 结果"
+            !focused && query.isBlank() -> "Ctrl+K"
+            else -> null
+        }
         val fieldPaper = lerp(colors.surface, colors.onSurfaceVariant, .062f)
-        val focusInk = if (LocalPlatformAccessibilityPreferences.current.increaseContrast) colors.onSurface else colors.primary
-        Box(Modifier.matchParentSize().clip(RoundedCornerShape(10.dp)).background(fieldPaper).drawBehind {
-            val progress = focusAmount.value.coerceIn(0f, 1f)
-            if (progress > 0f) {
-                val gutter = 9.dp.toPx()
-                val width = (size.width - gutter * 2f).coerceAtLeast(0f) * progress
-                val thickness = 2.dp.toPx()
-                drawRoundRect(focusInk.copy(alpha = progress), Offset((size.width - width) / 2f, size.height - thickness),
-                    Size(width, thickness), CornerRadius(thickness / 2f))
-            }
-        })
+        Box(Modifier.matchParentSize().clip(RoundedCornerShape(10.dp)).background(fieldPaper)
+            .desktopFieldFocusLine(focused && active, colors.primary))
         Row(Modifier.fillMaxSize().padding(start = 2.dp, end = 3.dp),
             verticalAlignment = Alignment.CenterVertically) {
             val searchAction = if (query.isBlank()) "输入关键词" else "搜索"
@@ -526,6 +592,7 @@ internal fun DesktopSearchField(
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { submit() }),
                 modifier = Modifier.weight(1f).height(height).padding(end = 8.dp)
+                    .desktopSearchPaneKey(searchFocus?.results)
                     .focusRequester(requester).onFocusChanged { if (it.isFocused) onOpen() }
                     .semantics { contentDescription = searchLabel },
                 decorationBox = { input ->
@@ -535,21 +602,28 @@ internal fun DesktopSearchField(
                         input()
                     }
                 })
-            if (showKeyHint) Text("Ctrl+K", Modifier.padding(end = 6.dp).clearAndSetSemantics {},
-                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, maxLines = 1)
-            if (query.isNotEmpty() || copyOnly) MotionIconButton(onClick = {
-                scopeOpen = false; onClear()
-            }, enabled = active, modifier = Modifier.size(44.dp), tooltip = "清空搜索") {
-                Icon(Icons.Outlined.Close, "清空搜索", Modifier.size(17.dp))
+            if (hintRoom) Box(Modifier.width(54.dp * LocalMangaWindow.current.fontScale).clearAndSetSemantics {},
+                contentAlignment = Alignment.Center) {
+                MotionSwap(keyHint, scaleContent = false) { hint ->
+                    if (hint != null) Text(hint, style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant, maxLines = 1)
+                }
+            }
+            DesktopFieldClear(query.isNotEmpty() || copyOnly, active, "清空搜索", 40.dp) {
+                scopeOpen = false
+                onClear()
             }
             if (showScopeSelector) {
                 Box {
                     MotionIconButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
-                        modifier = Modifier.size(44.dp), tooltip = "搜索范围：" + target.scopeTitle) {
+                        modifier = Modifier.size(44.dp).semantics { contentDescription = "搜索范围：" + target.scopeTitle },
+                        tooltip = "搜索范围：" + target.scopeTitle) {
                         Box(Modifier.size(32.dp).background(
                             if (scopeOpen) colors.primaryContainer else colors.surface.copy(alpha = 0f), RoundedCornerShape(12.dp)),
                             contentAlignment = Alignment.Center) {
-                            Icon(target.scopeIcon, "搜索范围：" + target.scopeTitle, Modifier.align(Alignment.Center).size(18.dp))
+                            MotionSwap(target, Modifier.align(Alignment.Center)) { scope ->
+                                Icon(scope.scopeIcon, null, Modifier.size(18.dp))
+                            }
                             if (copyOnly || target == SearchTarget.TRANSLATION_GROUP)
                                 BodySourceMark("copy", "拷贝", Modifier.align(Alignment.BottomEnd).padding(4.dp).size(8.dp))
                         }
@@ -651,7 +725,7 @@ private fun DesktopBrowseMenu(selected: Int, labels: List<String>, onSelect: (In
             .semantics { contentDescription = "切换浏览方式，当前$current" }
             .heightIn(min = 36.dp).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(current, style = MaterialTheme.typography.labelLarge, color = colors.primary, maxLines = 1)
-            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
+            DesktopMenuChevron(open)
         }
         DesktopActionPopup(open, labels.mapIndexed { index, label ->
             DesktopMenuAction(label, selected = index == selected) { onSelect(index) }

@@ -18,7 +18,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -60,23 +59,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.semantics.ProgressBarRangeInfo
-import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import dev.mangaflow.data.MangaRepository
@@ -105,8 +97,8 @@ internal fun DownloadBookRow(
     onSelect: () -> Unit,
     onManage: () -> Unit,
     onExpand: () -> Unit,
-    onPause: (DownloadEntry) -> Unit,
-    onRetry: (DownloadEntry) -> Unit,
+    onPause: (List<DownloadEntry>) -> Unit,
+    onRetry: (List<DownloadEntry>) -> Unit,
     onDetails: (() -> Unit)? = null,
     onRemove: (() -> Unit)? = null,
     inspectMode: Boolean = false,
@@ -244,7 +236,7 @@ internal fun DownloadChapterRow(
                 DownloadEnhancementSummary(listOf(entry), enhancementTasks, if (managing) null else onInspect)
             }
             if (managing) DownloadSelection(selected, onSelect)
-            else DownloadTransferAction(listOf(entry), refreshingIds, onPause, onRetry)
+            else DownloadTransferAction(listOf(entry), refreshingIds, { group -> group.forEach(onPause) }, { group -> group.forEach(onRetry) })
             if (desktop) DesktopMoreButton(actions, "章节下载操作")
         }
         if (!managing && onInspect == null && entry.error.isNotBlank()) DownloadFailureDetails(entry.error)
@@ -274,11 +266,9 @@ private fun DownloadEnhancementSummary(entries: List<DownloadEntry>, tasks: List
     if (pairs.isEmpty()) return
     val observed = pairs.firstOrNull { it.second.phase in setOf(EnhancementTaskPhase.RUNNING,
         EnhancementTaskPhase.WAITING, EnhancementTaskPhase.QUEUED) } ?: pairs.first()
-    val total = pairs.sumOf { it.second.totalPages.toLong() }
+    val total = pairs.sumOf { it.second.totalPages.toLong() }.takeIf { pairs.all { (_, task) -> task.totalPages > 0 } }
     val completed = pairs.sumOf { it.second.completedPages.toLong() }
-    val fraction = if (total > 0L) (completed.toFloat() / total).coerceIn(0f, 1f) else 0f
-    val progress by animateFloatAsState(fraction,
-        tween(if (LocalMotionEnabled.current) MangaMotion.Quick else 0), label = "chapter-enhancement-progress")
+    val pages = if (total != null) "$completed / $total 页" else "已处理 $completed 页"
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Column(Modifier.fillMaxWidth().then(if (onInspect != null) Modifier.clickable(
@@ -288,17 +278,16 @@ private fun DownloadEnhancementSummary(entries: List<DownloadEntry>, tasks: List
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
-            Text(mangaNumberText("增强 $completed / $total 页 · ${chapterEnhancementPhase(observed.second.phase)}"),
+            Text(mangaNumberText("增强 $pages · ${chapterEnhancementPhase(observed.second.phase)}"),
                 style = MaterialTheme.typography.labelSmall, color = if (observed.second.phase == EnhancementTaskPhase.FAILED)
                     colors.error else colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        if (pairs.any { it.second.phase != EnhancementTaskPhase.COMPLETED }) Box(Modifier.fillMaxWidth().height(4.dp)
-            .semantics { contentDescription = "整章增强已完成页面"; progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f) }
-            .drawBehind {
-                val y = size.height / 2f
-                drawLine(colors.primary.copy(alpha = .12f), Offset(0f, y), Offset(size.width, y), 2.dp.toPx(), StrokeCap.Round)
-                if (progress > 0f) drawLine(colors.primary.copy(alpha = .8f), Offset(0f, y), Offset(size.width * progress, y), 2.dp.toPx(), StrokeCap.Round)
-            })
+        if (total != null && pairs.any { it.second.phase != EnhancementTaskPhase.COMPLETED }) {
+            key(pairs.map { (_, task) -> Triple(task.id, task.generation, task.totalPages) }) {
+                ManagementProgressTrack(completed.toFloat() / total, "整章增强已完成页面", colors.primary,
+                    Modifier.fillMaxWidth().padding(vertical = 1.dp).height(2.dp))
+            }
+        }
     }
 }
 
@@ -423,7 +412,7 @@ private fun DownloadSelection(selected: Boolean, onClick: () -> Unit) {
 /** Transfer state retains its current pause/source-refresh/retry behavior, now without a full row menu. */
 @Composable
 private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: Set<String>,
-    onPause: (DownloadEntry) -> Unit, onRetry: (DownloadEntry) -> Unit) {
+    onPause: (List<DownloadEntry>) -> Unit, onRetry: (List<DownloadEntry>) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val finished = entries.all { it.status == DownloadStatus.COMPLETED }
     val pausable = entries.filter { it.status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING) && !it.needsSourceRefresh }
@@ -441,7 +430,7 @@ private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: 
     val enabled = !busy && !finished && state != null
     val action = if (finished) Modifier else Modifier.clip(RoundedCornerShape(50)).clickable(
         enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button,
-        onClick = { if (pausable.isNotEmpty()) pausable.forEach(onPause) else retryable.forEach(onRetry) })
+        onClick = { if (pausable.isNotEmpty()) onPause(pausable) else onRetry(retryable) })
         .motionPress(interaction, enabled)
     Box(Modifier.size(44.dp).then(action), contentAlignment = Alignment.Center) {
         when {
@@ -468,27 +457,15 @@ private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: 
 internal fun DownloadProgressLine(entries: List<DownloadEntry>) {
     val knownProgress = downloadCurrentPageFraction(entries) ?: return
     val observed = downloadObservedEntry(entries) ?: return
-    val motion = LocalMotionEnabled.current
-    // A new page / retry starts at its actual fraction instead of running the old bar backwards.
-    val progress = key(observed.id, observed.createdAt, observed.progress.pageIndex,
-        observed.progress.generation, observed.progress.transferId) {
-        animateFloatAsState(knownProgress, if (motion) tween(MangaMotion.Quick, easing = LinearEasing) else snap(),
-            label = "download-real-progress")
+    key(observed.id, observed.createdAt, observed.progress.pageIndex, observed.progress.generation,
+        observed.progress.transferId, observed.progress.expectedBytes) {
+        ManagementProgressTrack(knownProgress, "当前图片接收进度", mangaStatusColors().activity,
+            Modifier.fillMaxWidth().padding(bottom = 3.dp).height(3.dp))
     }
-    val color = mangaStatusColors().activity
-    Box(Modifier.fillMaxWidth().padding(bottom = 3.dp).height(3.dp).clip(RoundedCornerShape(2.dp))
-        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)).semantics {
-            contentDescription = "当前图片接收进度"
-            progressBarRangeInfo = ProgressBarRangeInfo(knownProgress, 0f..1f)
-        }.drawBehind {
-            val fill = size.width * progress.value
-            val x = if (layoutDirection == LayoutDirection.Rtl) size.width - fill else 0f
-            if (fill > 0f) drawRoundRect(color, Offset(x, 0f), Size(fill, size.height), CornerRadius(size.height / 2f))
-        })
 }
 
 private fun downloadKnownProgress(entries: List<DownloadEntry>): Float? {
     if (entries.isEmpty() || entries.any { it.totalPages <= 0 }) return null
-    val total = entries.sumOf { it.totalPages }
-    return (entries.sumOf { it.completedPages }.toFloat() / total).coerceIn(0f, 1f)
+    val total = entries.sumOf { it.totalPages.toLong() }
+    return (entries.sumOf { it.completedPages.toLong() }.toFloat() / total).coerceIn(0f, 1f)
 }

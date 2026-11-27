@@ -47,6 +47,7 @@ import dev.mangaflow.ui.motion.MotionSlider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
@@ -110,7 +111,7 @@ internal fun WallpaperSettings(
     val colors = MaterialTheme.colorScheme
     val motion = LocalMotionEnabled.current
     val desktop = platformKind == PlatformKind.DESKTOP
-    var showOriginal by rememberSaveable(selected.mediaPath) { mutableStateOf(false) }
+    var previewMode by rememberSaveable(selected.mediaPath) { mutableStateOf(WallpaperPreviewMode.APPLIED) }
     var importMenu by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -154,7 +155,7 @@ internal fun WallpaperSettings(
     }
     fun adjust(transform: (WallpaperAdjustment) -> WallpaperAdjustment) {
         val path = editingPath ?: selected.mediaPath ?: return
-        showOriginal = false
+        if (previewMode == WallpaperPreviewMode.ORIGINAL) previewMode = WallpaperPreviewMode.APPLIED
         if (editingPath == null) { editingPath = path; store.setEditing(editOwner, true) }
         try { store.updateAdjustment(path, persist = false, transform = transform) }
         catch (failure: Exception) { notice = failure.message ?: "调节未能应用，请重试。" }
@@ -179,9 +180,9 @@ internal fun WallpaperSettings(
     PreferenceWorkspace(modifier, preview = {
       Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         val preview = if (selected.kind == WallpaperKind.VIDEO) selected.posterPath else selected.mediaPath
-        if (desktop && current != null) MotionTabs(selected = if (showOriginal) 1 else 0,
-            labels = listOf("应用效果", if (selected.kind == WallpaperKind.VIDEO) "原始封面" else "原图"),
-            onSelect = { showOriginal = it == 1 }, modifier = Modifier.fillMaxWidth(),
+        if (desktop && current != null && !preview.isNullOrBlank()) MotionTabs(selected = previewMode.ordinal,
+            labels = listOf("应用效果", "对照", if (selected.kind == WallpaperKind.VIDEO) "原始封面" else "原图"),
+            onSelect = { previewMode = WallpaperPreviewMode.entries[it] }, modifier = Modifier.fillMaxWidth(),
             treatment = MotionTabTreatment.Underline, controlHeight = 38.dp)
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val previewHeight = when {
@@ -210,15 +211,18 @@ internal fun WallpaperSettings(
                         tint = colors.onSurfaceVariant)
                     Text("暂无视频封面", Modifier.align(Alignment.BottomCenter).padding(8.dp),
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                } else if (desktop && showOriginal) {
-                    AsyncImage(model = preview, contentDescription = current.name, contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize())
+                } else if (desktop && preview != null) {
+                    key(preview) {
+                        DesktopWallpaperPreview(preview, selected.kind, selected.adjustment, previewMode, current.name, Modifier.fillMaxSize())
+                    }
                 } else {
                     WallpaperPreview(preview, selected.kind, selected.adjustment, Modifier.fillMaxSize())
-                    if (selected.kind == WallpaperKind.VIDEO) Icon(Icons.Outlined.VideoFile, "视频壁纸",
-                        Modifier.align(Alignment.BottomStart).padding(8.dp).size(22.dp)
-                            .background(colors.surface.copy(alpha = .85f), RoundedCornerShape(6.dp)).padding(3.dp),
-                        tint = colors.onSurface)
+                }
+                if (current != null && selected.kind == WallpaperKind.VIDEO &&
+                    (!desktop || !preview.isNullOrBlank() && previewMode == WallpaperPreviewMode.APPLIED)) {
+                    Icon(Icons.Outlined.VideoFile, "视频壁纸", Modifier.align(Alignment.BottomStart)
+                        .padding(8.dp).size(22.dp).background(colors.surface.copy(alpha = .85f), RoundedCornerShape(6.dp))
+                        .padding(3.dp), tint = colors.onSurface)
                 }
             }
         }
@@ -317,7 +321,7 @@ internal fun WallpaperSettings(
                         track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
                     MotionIconButton(enabled = !importing && current != null, onClick = {
                         finishAdjustment()
-                        showOriginal = false
+                        if (previewMode == WallpaperPreviewMode.ORIGINAL) previewMode = WallpaperPreviewMode.APPLIED
                         selected.mediaPath?.let { path -> change(FeelEvent.Confirm) { store.resetAdjustment(path) } }
                     }, modifier = Modifier.size(44.dp)) {
                         Icon(Icons.Outlined.Restore, "还原当前壁纸调节", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
@@ -355,7 +359,7 @@ internal fun WallpaperSettings(
                             1 -> if (selected.kind == WallpaperKind.IMAGE) {
                                 MotionTabs(selected = if (adjustment.fit == WallpaperFit.FILL) 0 else 1,
                                     labels = listOf("填充", "完整"), onSelect = { index ->
-                                        showOriginal = false
+                                        if (previewMode == WallpaperPreviewMode.ORIGINAL) previewMode = WallpaperPreviewMode.APPLIED
                                         selected.mediaPath?.let { path -> change(null) {
                                             store.updateAdjustment(path) { it.copy(fit = if (index == 0) WallpaperFit.FILL else WallpaperFit.FIT) }
                                         } }

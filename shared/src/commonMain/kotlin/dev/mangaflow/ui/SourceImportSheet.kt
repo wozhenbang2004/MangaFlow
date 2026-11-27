@@ -24,8 +24,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -58,10 +56,8 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -93,6 +89,7 @@ import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.motionInputGate
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
@@ -118,7 +115,8 @@ internal fun SourceImportSheet(
     val operationStates by operations.state.collectAsStateWithLifecycle()
     val installOperation = remember(operationStates) { operations.find(UserOperationKeys.SOURCE_INSTALL) }
     var submittedInstallId by remember { mutableStateOf<String?>(null) }
-    var installNotice by remember { mutableStateOf<String?>(null) }
+    var rejectedInstallId by remember { mutableStateOf<String?>(null) }
+    var installNotice by remember { mutableStateOf<ManagementNotice?>(null) }
     val runtimes = remember(context) { PanelRuntimeStore.get(context) }
     val runtimeStates by runtimes.states.collectAsStateWithLifecycle()
     val engine = runtimeStates[PanelRuntimeId.QUICKJS] ?: PanelRuntimeState()
@@ -144,7 +142,15 @@ internal fun SourceImportSheet(
     }
     var prepared by remember { mutableStateOf<ScriptSourcePackage?>(null) }
     var previewBusy by remember { mutableStateOf<String?>(null) }
-    val busy = previewBusy ?: installOperation?.takeIf { it.active }?.let { "正在后台安装，可关闭此页…" }
+    var cancelPreviewRequested by remember { mutableStateOf(false) }
+    val activeInstall = installOperation?.takeIf { it.active }
+    val busy = previewBusy?.let { if (cancelPreviewRequested) "正在取消预览" else it } ?: activeInstall?.let {
+        when {
+            it.id == rejectedInstallId -> "另一个安装任务正在执行，当前来源尚未提交"
+            it.phase == ApplicationOperationPhase.QUEUED -> "安装已排队，可关闭此页"
+            else -> "正在后台安装，可关闭此页"
+        }
+    }
     var failure by remember { mutableStateOf<String?>(null) }
     var activeJob by remember { mutableStateOf<Job?>(null) }
     var completedName by remember { mutableStateOf<String?>(null) }
@@ -162,21 +168,26 @@ internal fun SourceImportSheet(
         focus.clearFocus(force = true)
         keyboard?.hide()
         failure = null
+        installNotice = null
+        cancelPreviewRequested = false
         previewBusy = label
-        activeJob = scope.launch {
+        val job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 block()
             } catch (timeout: TimeoutCancellationException) {
                 failure = "操作超时，请检查网络或稍后重试。"
             } catch (cancel: CancellationException) {
+                if (cancelPreviewRequested) installNotice = ManagementNotice("预览已取消，可以重新选择来源", ManagementSignal.CANCELLED)
                 throw cancel
             } catch (error: Exception) {
                 failure = error.message?.takeIf(String::isNotBlank) ?: "来源导入未完成，请重试。"
             } finally {
                 previewBusy = null
+                cancelPreviewRequested = false
                 activeJob = null
             }
         }
+        activeJob = job.takeIf { it.isActive }
     }
 
     val filePicker = rememberOpenDocumentPicker { uri ->
@@ -230,11 +241,11 @@ internal fun SourceImportSheet(
     }, backdrop = backdrop, containerColor = colors.surface.copy(alpha = .97f), desktopWidth = 920.dp) { dismiss ->
         LaunchedEffect(installOperation?.id, installOperation?.phase) {
             val operation = installOperation ?: return@LaunchedEffect
-            if (operation.active) return@LaunchedEffect
+            if (operation.active || (operation.id != submittedInstallId && operations.result<String>(operation.id) == null)) return@LaunchedEffect
             when (operation.phase) {
                 ApplicationOperationPhase.SUCCEEDED -> operations.result<String>(operation.id)?.let { result ->
                     val name = result.await()
-                    installNotice = "$name 已安装并启用"
+                    installNotice = ManagementNotice("$name 已安装并启用", ManagementSignal.COMPLETE)
                     operations.consumeResult(operation.id)
                     if (submittedInstallId == operation.id) {
                         completedName = name
@@ -242,7 +253,12 @@ internal fun SourceImportSheet(
                     }
                 }
                 ApplicationOperationPhase.FAILED, ApplicationOperationPhase.INTERRUPTED -> {
-                    failure = operation.message
+                    failure = operation.message ?: "安装未完成，请重新提交"
+                    operations.consumeResult(operation.id)
+                }
+                ApplicationOperationPhase.CANCELLED -> {
+                    failure = null
+                    installNotice = ManagementNotice("安装已取消，可以重新提交", ManagementSignal.CANCELLED)
                     operations.consumeResult(operation.id)
                 }
                 else -> Unit
@@ -281,6 +297,7 @@ internal fun SourceImportSheet(
                             candidates = emptyList()
                             candidateQuery = ""
                             failure = null
+                            installNotice = null
                         }
                     }, modifier = Modifier.fillMaxWidth().motionInputGate(busy == null),
                         treatment = MotionTabTreatment.Soft, role = Role.RadioButton, fullWidthIndicator = true,
@@ -517,12 +534,17 @@ internal fun SourceImportSheet(
             val installActions: @Composable () -> Unit = {
                 if (bundle != null) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
-                    MotionTextButton(onClick = { prepared = null; failure = null }, enabled = busy == null) { Text("重新选择") }
+                    MotionTextButton(onClick = { prepared = null; failure = null; installNotice = null }, enabled = busy == null) { Text("重新选择") }
                     MotionButton(onClick = {
                         val handle = operations.installSource(store, registry, bundle, markAdult)
+                        failure = null
                         if (handle.accepted) {
-                            failure = null
+                            installNotice = null
+                            rejectedInstallId = null
                             submittedInstallId = handle.id
+                        } else {
+                            rejectedInstallId = handle.id
+                            installNotice = ManagementNotice("已有安装任务，当前来源尚未提交", ManagementSignal.INFORMATION)
                         }
                     }, enabled = busy == null && engineReady) { Text(if (installOperation?.active == true) "正在安装" else "导入并启用") }
                 }
@@ -536,18 +558,21 @@ internal fun SourceImportSheet(
                         Icon(Icons.Outlined.Close, "关闭来源导入", Modifier.size(20.dp))
                     }
                 }
-                val status = busy ?: failure ?: installNotice
-                if (status != null) Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 3.dp)
-                    .background(if (busy == null && failure != null) colors.errorContainer else colors.surfaceContainerLow, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 10.dp, vertical = 5.dp).semantics { liveRegion = LiveRegionMode.Polite },
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (busy != null) MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
-                    Text(status, Modifier.weight(1f).heightIn(max = 60.dp).verticalScroll(rememberScrollState()),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (busy == null && failure != null) colors.onErrorContainer else colors.onSurfaceVariant)
-                    if (previewBusy != null) MotionTextButton(onClick = { activeJob?.cancel() }) { Text("取消") }
-                    else if (installOperation?.active == true && installOperation.cancellable) MotionTextButton(
-                        onClick = { operations.cancel(installOperation.id) }) { Text("取消") }
+                val status = when {
+                    busy != null -> ManagementNotice(busy, if (previewBusy == null && activeInstall?.phase == ApplicationOperationPhase.QUEUED)
+                        ManagementSignal.QUEUED else ManagementSignal.WORKING)
+                    failure != null -> ManagementNotice(failure.orEmpty(), ManagementSignal.ATTENTION)
+                    else -> installNotice
+                }
+                ManagementStatusRow(status, Modifier.padding(horizontal = 18.dp, vertical = 3.dp)) {
+                    if (previewBusy != null) MotionTextButton(enabled = !cancelPreviewRequested, onClick = {
+                        activeJob?.takeIf { it.isActive }?.let { job ->
+                            cancelPreviewRequested = true
+                            job.cancel()
+                        }
+                    }) { Text("取消") }
+                    else if (activeInstall?.cancellable == true && activeInstall.id != rejectedInstallId) MotionTextButton(
+                        onClick = { operations.cancel(activeInstall.id) }) { Text("取消") }
                 }
                 if (split) Row(Modifier.weight(1f).fillMaxWidth()) {
                     Box(Modifier.width(setupWidth).fillMaxHeight().background(colors.surfaceContainerLow)) {
@@ -637,7 +662,8 @@ private fun ScriptEngineControl(
                     spec.bundled && state.pendingRemoval -> "已内置 · 下载副本将在重启后移除"
                     spec.bundled -> "已内置 · 无需下载，仅在使用脚本源时加载"
                     state.pendingRemoval -> "重启后完成移除"
-                    state.downloading -> "下载中 · ${((state.progress ?: 0f) * 100).toInt()}%"
+                    state.downloading -> state.progress?.takeIf { it.isFinite() && it in 0f..1f }
+                        ?.let { "下载中 · ${(it * 100).toInt()}%" } ?: "正在接收组件"
                     state.installed -> "已下载 · 仅在使用脚本源时加载"
                     else -> "首次使用下载本机架构组件"
                 }, fontSize = 10.sp, color = colors.onSurfaceVariant)

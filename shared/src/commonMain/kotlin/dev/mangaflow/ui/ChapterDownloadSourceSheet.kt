@@ -1,9 +1,16 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -12,7 +19,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material3.Icon
@@ -26,7 +32,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -34,6 +47,10 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -253,20 +270,17 @@ internal fun ChapterBatchDownloadSheet(
                         val status = if (id == null) "" else chapterDownloadLabel(entries[id], preparations[id])
                         val message = listOfNotNull(source, edition?.takeIf(String::isNotBlank), status.takeIf(String::isNotBlank))
                             .joinToString(" · ").ifBlank { if (row.variants.isEmpty()) "暂无来源" else "请选择具体版本" }
-                        val fill by animateColorAsState(colors.onSurface.copy(alpha = if (checked) .075f else .028f),
+                        val fill = animateColorAsState(if (checked) colors.primary.copy(alpha = .095f) else colors.onSurface.copy(alpha = .028f),
                             if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "chapter-batch-selection")
-                        Row(Modifier.fillMaxWidth().background(fill, RoundedCornerShape(11.dp)).padding(end = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp)).drawBehind { drawRect(fill.value) }.padding(end = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
                             Row(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).toggleable(value = checked, enabled = available,
                                 interactionSource = interaction, indication = null, role = Role.Checkbox, onValueChange = { on ->
                                     if (id != null) selected = if (on) selected + id else selected - id
                                 }).motionPress(interaction, enabled = available, pressedScale = .995f)
                                 .heightIn(min = 52.dp).padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                                Box(Modifier.size(19.dp).background(if (checked) colors.primary else
-                                    colors.onSurface.copy(alpha = if (available) .11f else .045f), RoundedCornerShape(6.dp)),
-                                    contentAlignment = Alignment.Center) {
-                                    if (checked) Icon(Icons.Outlined.Check, null, Modifier.size(14.dp), tint = colors.onPrimary)
-                                }
+                                ChapterBatchCheck(checked, available)
                                 Column(Modifier.weight(1f)) {
                                     Text(row.chapter.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -305,8 +319,7 @@ internal fun ChapterBatchDownloadSheet(
             }
             Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("已选 ${picked.size} 章", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
-                    color = colors.onSurfaceVariant)
+                ChapterBatchCount(picked.size, choices.size, Modifier.weight(1f))
                 MotionButton(onClick = {
                     if (!submitted && picked.isNotEmpty()) {
                         submitted = true
@@ -316,5 +329,54 @@ internal fun ChapterBatchDownloadSheet(
                 }, enabled = !submitted && picked.isNotEmpty()) { Text("加入下载") }
             }
         }
+    }
+}
+
+/** Only the check stroke moves. The row owns the single checkbox action and accessible state. */
+@Composable
+private fun ChapterBatchCheck(checked: Boolean, available: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    val motion = LocalMotionEnabled.current
+    val amount = animateFloatAsState(if (checked) 1f else 0f,
+        if (motion) tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing) else snap(), label = "batch-check")
+    Canvas(Modifier.size(19.dp)) {
+        val fraction = if (motion) amount.value else if (checked) 1f else 0f
+        val base = colors.onSurface.copy(alpha = if (available) .11f else .045f)
+        drawRoundRect(lerp(base, colors.primary, fraction), cornerRadius = CornerRadius(6.dp.toPx()))
+        val start = Offset(size.width * .23f, size.height * .50f)
+        val joint = Offset(size.width * .43f, size.height * .69f)
+        val end = Offset(size.width * .78f, size.height * .32f)
+        val stroke = 1.8.dp.toPx()
+        if (fraction > 0f) drawLine(colors.onPrimary, start, start + (joint - start) * (fraction / .36f).coerceAtMost(1f),
+            strokeWidth = stroke, cap = StrokeCap.Round)
+        if (fraction > .36f) drawLine(colors.onPrimary, joint, joint + (end - joint) * ((fraction - .36f) / .64f),
+            strokeWidth = stroke, cap = StrokeCap.Round)
+    }
+}
+
+@Composable
+private fun ChapterBatchCount(count: Int, total: Int, modifier: Modifier) {
+    val colors = MaterialTheme.colorScheme
+    val label = MaterialTheme.typography.labelLarge
+    val number = label.copy(fontFeatureSettings = "tnum")
+    Row(modifier.clearAndSetSemantics {
+        contentDescription = "已选 ${count} 章"
+        liveRegion = LiveRegionMode.Polite
+    }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("已选", style = label, color = colors.onSurfaceVariant)
+        Box(Modifier.clipToBounds(), contentAlignment = Alignment.CenterEnd) {
+            // Reserve the real count's maximum number of digits so adjacent controls keep their position.
+            Text("0".repeat(total.toString().length), style = number, color = Color.Transparent)
+            if (!LocalMotionEnabled.current) Text(count.toString(), style = number, color = colors.onSurface)
+            else AnimatedContent(count, contentAlignment = Alignment.CenterEnd, transitionSpec = {
+                val direction = targetState.compareTo(initialState)
+                ((slideInVertically(tween(MangaMotion.Content, easing = MangaMotion.EnterEasing)) { direction * it / 2 } +
+                    fadeIn(tween(MangaMotion.Quick))) togetherWith
+                    (slideOutVertically(tween(MangaMotion.Quick)) { -direction * it / 2 } + fadeOut(tween(MangaMotion.Quick)))).using(null)
+            }, label = "selected-chapter-count") { shown ->
+                Text(shown.toString(), style = number, color = colors.onSurface)
+            }
+        }
+        Text("章", style = label, color = colors.onSurfaceVariant)
     }
 }

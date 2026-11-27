@@ -62,6 +62,20 @@ import kotlinx.coroutines.launch
 
 private enum class SourceAccountPanel { LOGIN, REGISTER }
 
+private enum class SourceAccountAction(val pending: String) {
+    LOGIN("正在登录…"), VERIFY("正在验证并保存凭据…"), REGISTER("正在提交注册申请…"),
+    LOGOUT("正在退出账号…"), CLEAR("正在清除凭据…");
+
+    fun receipt(account: SourceAccountState): PreferenceNotice = when (this) {
+        REGISTER -> PreferenceNotice("站点已接受注册请求，请使用新账号登录。如需邮箱验证，请按站点提示操作。", PreferenceNoticeKind.DONE)
+        LOGIN, VERIFY -> if (account.signedIn) PreferenceNotice("已登录。", PreferenceNoticeKind.DONE)
+            else PreferenceNotice(if (account.hasCredentials) "凭据已保存，仍需重新验证。" else "站点尚未确认登录。", PreferenceNoticeKind.INFO)
+        LOGOUT, CLEAR -> if (!account.signedIn && !account.hasCredentials)
+            PreferenceNotice(if (this == CLEAR) "本机凭据已清除。" else "已退出账号。", PreferenceNoticeKind.DONE)
+            else PreferenceNotice("账号仍有登录状态或本机凭据。", PreferenceNoticeKind.INFO)
+    }
+}
+
 @Composable
 internal fun SourceAccountLoading(message: String) {
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
@@ -84,6 +98,7 @@ internal fun SourceAccountControls(
 ) = key(source.id, source.revision) {
     val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
+    val desktop = platformKind == PlatformKind.DESKTOP
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val uriHandler = LocalUriHandler.current
     var panel by remember { mutableStateOf(SourceAccountPanel.LOGIN) }
@@ -100,8 +115,8 @@ internal fun SourceAccountControls(
     var running by remember { mutableStateOf(false) }
     var cancelling by remember { mutableStateOf(false) }
     var job by remember { mutableStateOf<Job?>(null) }
-    var message by remember { mutableStateOf<String?>(null) }
-    var messageIsSuccess by remember { mutableStateOf(false) }
+    var activeAction by remember { mutableStateOf(SourceAccountAction.LOGIN) }
+    var notice by remember { mutableStateOf<PreferenceNotice?>(null) }
     var present by remember { mutableStateOf(true) }
     var generation by remember { mutableLongStateOf(0L) }
     val currentAccountChanged by rememberUpdatedState(onAccountChanged)
@@ -128,9 +143,19 @@ internal fun SourceAccountControls(
             try {
                 stopped.join()
                 val refreshed = repository.sourceAccountState(source.id)
-                if (present && generation == expected) currentAccountChanged(refreshed)
+                if (present && generation == expected) {
+                    currentAccountChanged(refreshed)
+                    if (desktop) notice = PreferenceNotice(when {
+                        refreshed.signedIn -> "操作已结束，当前账号已登录。"
+                        refreshed.hasCredentials -> "操作已结束，本机仍有登录凭据。"
+                        else -> "操作已结束，当前账号未登录。"
+                    }, PreferenceNoticeKind.INFO)
+                }
             } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { if (present && generation == expected) message = "账号状态未能重新读取，请重新打开来源设置。" }
+            catch (_: Exception) {
+                if (present && generation == expected) notice = PreferenceNotice(
+                    "账号状态未能重新读取，请重新打开来源设置。", PreferenceNoticeKind.ERROR)
+            }
             finally {
                 if (present && generation == expected) {
                     job = null; running = false; cancelling = false; currentBusy(false)
@@ -154,7 +179,7 @@ internal fun SourceAccountControls(
     }
     LaunchedEffect(active) { if (!active) { cancel(); expanded = false } }
     fun selectPanel(next: SourceAccountPanel) {
-        clearInput(); message = null; messageIsSuccess = false
+        clearInput(); notice = null
         expanded = !expanded || panel != next
         panel = next
     }
@@ -163,15 +188,15 @@ internal fun SourceAccountControls(
         cookieMode = credentials
         password = ""
         values = emptyList()
-        message = null
+        notice = null
     }
     fun openWebsite(url: String) {
         try { uriHandler.openUri(url) }
-        catch (_: Exception) { message = "无法打开浏览器，请稍后重试。"; messageIsSuccess = false }
+        catch (_: Exception) { notice = PreferenceNotice("无法打开浏览器，请稍后重试。", PreferenceNoticeKind.ERROR) }
     }
-    fun operate(successNotice: String? = null, action: suspend () -> Unit) {
+    fun operate(operation: SourceAccountAction, action: suspend () -> Unit) {
         if (running || !enabled || !present || !active) return
-        running = true; currentBusy(true); message = null; messageIsSuccess = false
+        activeAction = operation; running = true; currentBusy(true); notice = null
         val expected = ++generation
         job = scope.launch {
             var succeeded = false
@@ -181,15 +206,15 @@ internal fun SourceAccountControls(
                 val refreshed = repository.sourceAccountState(source.id)
                 if (present && generation == expected) {
                     currentAccountChanged(refreshed); expanded = false
-                    if (successNotice != null) { message = successNotice; messageIsSuccess = true }
+                    if (desktop || operation == SourceAccountAction.REGISTER) notice = operation.receipt(refreshed)
                 }
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
-                if (succeeded && successNotice != null) {
+                if (succeeded && (desktop || operation == SourceAccountAction.REGISTER)) {
                     if (present && generation == expected) {
                         expanded = false
-                        message = successNotice
-                        messageIsSuccess = true
+                        notice = if (operation == SourceAccountAction.REGISTER) operation.receipt(account)
+                            else PreferenceNotice("操作已提交，暂时无法确认账号状态。请重新打开来源设置查看。", PreferenceNoticeKind.INFO)
                     }
                     return@launch
                 }
@@ -216,17 +241,16 @@ internal fun SourceAccountControls(
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (_: Exception) { /* Do not invent a new account state from a failed read. */ }
                 if (present && generation == expected) {
-                    messageIsSuccess = false
                     val clearedFields = when {
-                        successNotice == null -> ""
+                        operation != SourceAccountAction.REGISTER -> ""
                         source.id == "picacg" -> " 请重新填写密码和安全答案。"
                         else -> " 请重新填写密码。"
                     }
-                    message = failureMessage + clearedFields
+                    notice = PreferenceNotice(failureMessage + clearedFields, PreferenceNoticeKind.ERROR)
                 }
             } finally {
                 if (present && generation == expected) {
-                    if (successNotice != null && !succeeded) {
+                    if (operation == SourceAccountAction.REGISTER && !succeeded) {
                         // Keep editable non-secret fields for a corrected retry without
                         // retaining passwords or recovery answers from a failed signup.
                         registerValues = registerValues.filterKeys { id ->
@@ -259,7 +283,7 @@ internal fun SourceAccountControls(
                 if (onOpenShelf != null) MotionTextButton(onClick = onOpenShelf, enabled = enabled) {
                     Text("站点收藏", fontSize = 12.sp)
                 }
-                MotionTextButton(onClick = { operate { repository.sourceLogout(source.id) } }, enabled = enabled) {
+                MotionTextButton(onClick = { operate(SourceAccountAction.LOGOUT) { repository.sourceLogout(source.id) } }, enabled = enabled) {
                     Text("退出", fontSize = 12.sp)
                 }
             } else if (expanded) {
@@ -312,14 +336,17 @@ internal fun SourceAccountControls(
                             colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)) { Text("注册说明", fontSize = 12.sp) }
                     }
                 }
-                if (account.hasCredentials) MotionTextButton(onClick = { operate { repository.sourceLogout(source.id) } }, enabled = enabled,
+                if (account.hasCredentials) MotionTextButton(onClick = { operate(SourceAccountAction.CLEAR) { repository.sourceLogout(source.id) } }, enabled = enabled,
                     colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant)) {
                     Text("清除凭据", fontSize = 12.sp)
                 }
             }
         }
-        message?.let { Text(it, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, fontSize = 12.sp,
-            color = if (messageIsSuccess) colors.onSurfaceVariant else colors.error) }
+        if (desktop) PreferenceOperationFeedback(
+            if (running) PreferenceNotice(if (cancelling) "正在取消并核对账号状态…" else activeAction.pending, PreferenceNoticeKind.WORKING)
+            else notice
+        ) else notice?.let { Text(it.message, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, fontSize = 12.sp,
+            color = if (it.kind == PreferenceNoticeKind.ERROR) colors.error else colors.onSurfaceVariant) }
         AccountFormReveal(expanded && !account.signedIn) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 val registerMode = panel == SourceAccountPanel.REGISTER
@@ -402,7 +429,7 @@ internal fun SourceAccountControls(
                                     registerIssue = issue
                                 } else {
                                     val captured = SourceRegistrationRequest(registerValues.toMap(), registerConsent, registerConsent)
-                                    operate("站点已接受注册请求，请使用新账号登录。如需邮箱验证，请按站点提示操作。") {
+                                    operate(SourceAccountAction.REGISTER) {
                                         repository.sourceRegister(source.id, captured)
                                     }
                                 }
@@ -437,7 +464,7 @@ internal fun SourceAccountControls(
                     MotionButton(onClick = {
                         val submitted = capabilities.cookieFields.indices.map { values.getOrNull(it).orEmpty() }
                         clearInput()
-                        operate { repository.sourceLoginCookies(source.id, submitted) }
+                        operate(SourceAccountAction.VERIFY) { repository.sourceLoginCookies(source.id, submitted) }
                     }, enabled = enabled && !running && values.any(String::isNotBlank)) {
                         Text(if (running) "验证中…" else "验证并保存", fontSize = 12.sp)
                     }
@@ -448,7 +475,7 @@ internal fun SourceAccountControls(
                             val user = username
                             val secret = password
                             clearInput()
-                            operate { repository.sourceLogin(source.id, user, secret) }
+                            operate(SourceAccountAction.LOGIN) { repository.sourceLogin(source.id, user, secret) }
                         }
                     }
                     SourceAccountField("账号", username, enabled && !running, false) { if (it.length <= 160) username = it }

@@ -1,6 +1,9 @@
 package dev.mangaflow.ui
 
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -18,6 +21,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -49,7 +53,10 @@ import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionPress
 
 /** The search hit's actual body sources, kept separate from rating-site marks. */
@@ -154,6 +161,8 @@ internal fun SearchSourceMarks(
     }
 }
 
+private enum class SearchSourcePhase { WAITING, READY, FAILED }
+
 /** Source state stays on its own mark; diagnostics never become a second result list. */
 @Composable
 internal fun SearchSourceSummary(
@@ -165,11 +174,31 @@ internal fun SearchSourceSummary(
     if (sources.isEmpty()) return
     val colors = MaterialTheme.colorScheme
     val busy = sources.values.any { it.loading }
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val meter = desktop && sources.size > 1
     Row(modifier.heightIn(min = 28.dp).horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        sources.values.forEach { source ->
-            val failed = !source.loading && source.error != null
+        if (meter) {
+            val returned = sources.values.count { !it.loading }
+            val amount = animateFloatAsState(returned.toFloat() / sources.size,
+                if (LocalMotionEnabled.current) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
+                label = "search-source-returns")
+            Row(Modifier.padding(end = 3.dp).clearAndSetSemantics {
+                contentDescription = "${sources.size} 个来源里已有 $returned 个结束查询"
+            }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                MotionBusyIndicator(progress = { amount.value }, modifier = Modifier.size(13.dp),
+                    color = colors.primary, trackColor = colors.onSurface.copy(alpha = .12f), strokeWidth = 1.5.dp)
+                Text("$returned/${sources.size}", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
+        }
+        sources.values.forEach { source -> key(source.sourceId) {
+            val phase = when {
+                source.loading -> SearchSourcePhase.WAITING
+                source.error != null -> SearchSourcePhase.FAILED
+                else -> SearchSourcePhase.READY
+            }
+            val failed = phase == SearchSourcePhase.FAILED
             val interaction = remember(source.sourceId) { MutableInteractionSource() }
             Row(Modifier.then(if (showNames) Modifier.heightIn(min = 32.dp).padding(end = 8.dp) else Modifier.size(24.dp))
                 .then(if (failed) Modifier.clickable(enabled = !busy,
@@ -184,16 +213,37 @@ internal fun SearchSourceSummary(
                     }
                 }, horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-                ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(15.dp), muted = source.loading)
-                if (source.loading) MotionBusyIndicator(Modifier.align(Alignment.BottomEnd).size(7.dp),
-                    color = colors.onSurfaceVariant, strokeWidth = 1.dp)
-                else Icon(if (failed) Icons.Outlined.ErrorOutline else Icons.Outlined.Check, null,
-                    Modifier.align(Alignment.BottomEnd).size(9.dp),
-                    tint = if (failed) colors.error else colors.onSurfaceVariant)
+                    ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(15.dp), muted = source.loading)
+                    val status: @Composable (SearchSourcePhase) -> Unit = { current ->
+                        when (current) {
+                            SearchSourcePhase.WAITING -> if (meter) Icon(Icons.Outlined.MoreHoriz, null,
+                                Modifier.size(9.dp), tint = colors.onSurfaceVariant)
+                            else MotionBusyIndicator(Modifier.size(7.dp), color = colors.onSurfaceVariant, strokeWidth = 1.dp)
+                            SearchSourcePhase.READY -> Icon(Icons.Outlined.Check, null, Modifier.size(9.dp),
+                                tint = colors.onSurfaceVariant)
+                            SearchSourcePhase.FAILED -> Icon(Icons.Outlined.ErrorOutline, null, Modifier.size(9.dp),
+                                tint = colors.error)
+                        }
+                    }
+                    Box(Modifier.align(Alignment.BottomEnd).size(9.dp), contentAlignment = Alignment.Center) {
+                        if (desktop) MotionSwap(phase, content = status) else status(phase)
+                    }
                 }
-                if (showNames) Text(source.sourceName + when { source.loading -> " · 查询中"; failed -> " · 重试"; else -> "" },
-                    color = if (failed) colors.error else colors.onSurfaceVariant,
+                // Keep each source at its measured position as its neighbours finish.
+                // The mark carries the status; the semantic action still announces retry.
+                if (showNames) Text(source.sourceName, color = if (failed) colors.error else colors.onSurfaceVariant,
                     style = MaterialTheme.typography.labelSmall, maxLines = 1)
+            }
+        } }
+        if (showNames && sources.values.any { !it.loading && it.error != null }) {
+            val retry = remember { MutableInteractionSource() }
+            Box(Modifier.heightIn(min = 32.dp)
+                .clickable(enabled = !busy, role = Role.Button, interactionSource = retry, indication = null,
+                    onClickLabel = "重试搜索", onClick = onRetry)
+                .motionPress(retry, enabled = !busy).padding(horizontal = 6.dp),
+                contentAlignment = Alignment.Center) {
+                Text("重试搜索", style = MaterialTheme.typography.labelSmall,
+                    color = if (busy) colors.onSurfaceVariant else colors.primary)
             }
         }
     }

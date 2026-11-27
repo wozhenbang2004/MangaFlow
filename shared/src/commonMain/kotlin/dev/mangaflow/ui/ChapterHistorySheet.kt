@@ -252,7 +252,8 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
                         }
                     }
                 }, pages = { Text(mangaNumberText(pageLabel), style = mangaMetricValueStyle()) },
-                    date = { DesktopIndexNote(mangaNumberText(historyTime(progress.updatedAt))) })
+                    date = { Text(mangaNumberText(historyTime(progress.updatedAt)), color = secondary,
+                        style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) })
                 else Row(click, verticalAlignment = Alignment.CenterVertically) {
                     ChapterReadMark(progress, size = 18.dp)
                     Spacer(Modifier.width(12.dp))

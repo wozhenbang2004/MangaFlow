@@ -180,7 +180,7 @@ private fun DirectorySheet(choices: List<DirectoryChoice>, current: DirectoryCho
                     Icon(Icons.Outlined.Close, "关闭目录选择", Modifier.size(18.dp))
                 }
             }
-            AnimePaneLayout(modifier = Modifier.weight(1f, fill = false), minimumWidth = 606.dp,
+            AnimePaneLayout(modifier = Modifier.weight(1f, fill = false), minimumWidth = 606.dp, selectionKey = category,
                 sidebar = {
                     AnimePaneChoice("全部目录", category == null, { category = null }, Icons.Outlined.FolderOpen,
                         count = groups.values.sumOf { it.size }.toString())

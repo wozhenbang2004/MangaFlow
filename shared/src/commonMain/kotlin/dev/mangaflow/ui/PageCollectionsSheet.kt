@@ -6,6 +6,10 @@ import dev.mangaflow.typography.MangaFontScene
 
 import dev.mangaflow.ui.platform.*
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -52,16 +56,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalAccessibilityManager
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.IntOffset
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
@@ -75,10 +83,14 @@ import dev.mangaflow.data.plugins.resolveScriptPage
 import dev.mangaflow.data.plugins.materializeScriptPage
 import dev.mangaflow.storage.DownloadStore
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.PageCollection
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
@@ -92,20 +104,44 @@ internal fun PageCollectionsSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    val desktop = platformKind == PlatformKind.DESKTOP
+    var removal by remember { mutableStateOf<PageCollection?>(null) }
+    val removed = remember(collections, removal) { removal?.takeIf { entry -> collections.none { it.key == entry.key } } }
+    if (removed != null) {
+        val accessibility = LocalAccessibilityManager.current
+        LaunchedEffect(removed.key) {
+            delay(accessibility?.calculateRecommendedTimeoutMillis(3000L, containsText = true) ?: 3000L)
+            removal = null
+        }
+    }
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background, desktopWidth = 1050.dp) { dismiss ->
         Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Text("画面收藏", modifier = Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
-            Text(collections.size.toString(), modifier = Modifier.padding(start = 8.dp).weight(1f),
-                style = mangaMetricValueStyle(), color = colors.onSurfaceVariant)
+            Row(Modifier.padding(start = 8.dp).weight(1f), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(collections.size.toString(), style = mangaMetricValueStyle(), color = colors.onSurfaceVariant)
+                if (desktop) MotionSwap(removed, scaleContent = false) { entry ->
+                    if (entry != null) Text("已移除《${entry.manga.title}》${pageCollectionLocation(entry)}",
+                        Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.labelMedium,
+                        color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
             MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.Close, "关闭画面收藏", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
             }
         }
-        if (platformKind == PlatformKind.DESKTOP) {
-            if (collections.isEmpty()) CatalogueState("还没有收藏的画面", "在阅读器点爱心，可以保存当前单页或一整组跨页。",
-                Modifier.padding(horizontal = 14.dp))
-            else DesktopPageGallery(collections, repository, onOpen = { onOpen(it); dismiss() }, onRemove = onRemove)
+        if (desktop) {
+            val settle = LocalMotionEnabled.current && removed != null && collections.isEmpty()
+            Box(Modifier.fillMaxWidth().animateContentSize(if (settle) tween(MangaMotion.Content,
+                easing = MangaMotion.EnterEasing) else snap())) {
+                if (collections.isEmpty()) CatalogueState("还没有收藏的画面", "在阅读器点爱心，可以保存当前单页或一整组跨页。",
+                    Modifier.padding(horizontal = 14.dp))
+                else DesktopPageGallery(collections, repository, onOpen = { onOpen(it); dismiss() }, onRemove = { entry ->
+                    removal = entry
+                    onRemove(entry)
+                })
+            }
         } else LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -149,6 +185,8 @@ private fun DesktopPageGallery(collections: List<PageCollection>, repository: Ma
         }
     }
     val filtering = term.isNotEmpty() || kind != GalleryPageKind.ALL
+    val placement = if (LocalMotionEnabled.current && !filtering)
+        spring<IntOffset>(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null
     val matches = remember(collections, searchText, term, kind) {
         if (!filtering) collections else {
             val words = term.split(' ').filter(String::isNotEmpty)
@@ -206,28 +244,30 @@ private fun DesktopPageGallery(collections: List<PageCollection>, repository: Ma
                         DesktopMenuAction("移除画面收藏", icon = Icons.Outlined.DeleteOutline, destructive = true) { onRemove(entry) },
                     )
                     val interaction = remember(entry.key) { MutableInteractionSource() }
-                    DesktopContextMenuArea(actions) {
-                        Column(Modifier.fillMaxWidth().clickable(interactionSource = interaction, indication = null,
-                            role = Role.Button, onClickLabel = "阅读收藏画面", onClick = { onOpen(entry) })
-                            .motionPress(interaction, pressedScale = .99f)) {
-                            val ratio = if (!entry.spread) 1.24f else if (columns > 1) 2.55f else 1.72f
-                            CollectionPreview(entry, repository, Modifier.fillMaxWidth().aspectRatio(ratio)
-                                .mangaCoverCard(8.dp, shadowRadius = 4.dp).background(colors.surfaceContainerLow))
-                            Row(Modifier.fillMaxWidth().padding(top = 7.dp),
-                                verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                    Text(entry.manga.title, style = MaterialTheme.typography.titleMedium,
-                                        fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis)
-                                    Text(entry.chapter.title, style = MaterialTheme.typography.bodySmall,
-                                        color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    val date = remember(entry.savedAt) { if (entry.savedAt > 0L)
-                                        formatInstantMillis(entry.savedAt, "M月d日 HH:mm") else null }
-                                    Text(mangaNumberText(listOfNotNull(pageCollectionLocation(entry), date).joinToString("  ·  ")),
-                                        style = mangaMetricValueStyle(), color = colors.onSurfaceVariant,
-                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Box(Modifier.animateItem(fadeInSpec = null, placementSpec = placement, fadeOutSpec = null)) {
+                        DesktopContextMenuArea(actions) {
+                            Column(Modifier.fillMaxWidth().clickable(interactionSource = interaction, indication = null,
+                                role = Role.Button, onClickLabel = "阅读收藏画面", onClick = { onOpen(entry) })
+                                .motionPress(interaction, pressedScale = .99f)) {
+                                val ratio = if (!entry.spread) 1.24f else if (columns > 1) 2.55f else 1.72f
+                                CollectionPreview(entry, repository, Modifier.fillMaxWidth().aspectRatio(ratio)
+                                    .mangaCoverCard(8.dp, shadowRadius = 4.dp).background(colors.surfaceContainerLow))
+                                Row(Modifier.fillMaxWidth().padding(top = 7.dp),
+                                    verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                        Text(entry.manga.title, style = MaterialTheme.typography.titleMedium,
+                                            fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis)
+                                        Text(entry.chapter.title, style = MaterialTheme.typography.bodySmall,
+                                            color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        val date = remember(entry.savedAt) { if (entry.savedAt > 0L)
+                                            formatInstantMillis(entry.savedAt, "M月d日 HH:mm") else null }
+                                        Text(mangaNumberText(listOfNotNull(pageCollectionLocation(entry), date).joinToString("  ·  ")),
+                                            style = mangaMetricValueStyle(), color = colors.onSurfaceVariant,
+                                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    DesktopMoreButton(actions, "收藏画面操作")
                                 }
-                                DesktopMoreButton(actions, "收藏画面操作")
                             }
                         }
                     }

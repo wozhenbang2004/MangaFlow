@@ -2,11 +2,7 @@ package dev.mangaflow.reader
 
 import dev.mangaflow.ui.mangaNumberText
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Transition
 import androidx.compose.animation.core.animateFloat
@@ -43,7 +39,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,6 +73,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.glass.softSurfaceShadow
@@ -150,27 +151,30 @@ internal fun Modifier.readerMouseEdgeReveal(topWidth: Dp, dockWidth: Dp, onRevea
 /** Keep the actual page tree in one slot while an optional desktop inspector opens beside it. */
 @Composable
 internal fun ReaderWorkspace(
+    canDock: Boolean,
     panelVisible: Boolean,
     panelWidth: Dp,
     panel: @Composable () -> Unit,
-    content: @Composable () -> Unit,
+    content: @Composable (inspectorMounted: Boolean) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
+    val transition = updateTransition(canDock && panelVisible, label = "reader-inspector")
+    val reveal = transition.animateFloat(transitionSpec = {
+        if (!motion || !canDock) snap() else if (targetState) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing)
+        else tween(MangaMotion.Quick, easing = MangaMotion.ExitEasing)
+    }, label = "reader-inspector-surface") { if (it) 1f else 0f }
+    val mounted = canDock && (panelVisible || motion && (transition.currentState || transition.isRunning))
     Row(Modifier.fillMaxSize()) {
-        Box(Modifier.weight(1f).fillMaxHeight()) { content() }
-        AnimatedVisibility(
-            visible = panelVisible,
-            enter = expandHorizontally(
-                animationSpec = tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
-                expandFrom = Alignment.End,
-            ) + fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
-            exit = shrinkHorizontally(
-                animationSpec = tween(if (motion) MangaMotion.Exit else 0, easing = MangaMotion.ExitEasing),
-                shrinkTowards = Alignment.End,
-            ) + fadeOut(tween(if (motion) MangaMotion.Quick else 0)),
-        ) {
-            Box(Modifier.width(panelWidth).fillMaxHeight().padding(start = 6.dp, top = 8.dp, end = 8.dp, bottom = 8.dp)
-                .motionInputGate(panelVisible)) {
+        Box(Modifier.weight(1f).fillMaxHeight()) { content(mounted) }
+        if (mounted) {
+            val side = if (LocalLayoutDirection.current == LayoutDirection.Ltr) 1f else -1f
+            // A changing width causes every visible strip page to remeasure and rebase its
+            // scroll offset. Reserve the final width once and move only the inspector's ink.
+            Box(Modifier.width(panelWidth).fillMaxHeight().graphicsLayer {
+                val amount = if (motion) reveal.value else 1f
+                translationX = side * 18.dp.toPx() * (1f - amount)
+                alpha = amount
+            }.padding(start = 6.dp, top = 8.dp, end = 8.dp, bottom = 8.dp).motionInputGate(panelVisible)) {
                 panel()
             }
         }
@@ -245,6 +249,11 @@ internal fun ReaderSeekBar(
     val pressed by interactions.collectIsPressedAsState()
     val dragged by interactions.collectIsDraggedAsState()
     val focused by interactions.collectIsFocusedAsState()
+    val layoutDirection = LocalLayoutDirection.current
+    val lastHoverIndex = (pageCount ?: 0) - 1
+    val canInspect = enabled && platformKind == PlatformKind.DESKTOP && lastHoverIndex > 0
+    var hoverIndex by remember(canInspect, lastHoverIndex, layoutDirection) { mutableIntStateOf(-1) }
+    var hovering by remember(canInspect, lastHoverIndex, layoutDirection) { mutableStateOf(false) }
     val contrast = LocalGlassAccessibilitySettings.current.increaseContrast
     val engaged = enabled && (pressed || dragged)
     val motion = LocalMotionEnabled.current
@@ -256,25 +265,48 @@ internal fun ReaderSeekBar(
     )
     val fraction = ((value - valueRange.start) /
         (valueRange.endInclusive - valueRange.start).coerceAtLeast(.001f)).coerceIn(0f, 1f)
+    val inspect = canInspect && !engaged && hoverIndex >= 0
+    val bubbleFraction = if (inspect) hoverIndex.toFloat() / lastHoverIndex else fraction
+    val bubbleShown = engaged || hovering
+    val bubbleReveal = animateFloatAsState(if (bubbleShown) 1f else 0f,
+        if (motion) tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing) else snap(), label = "reader-ruler-preview")
     val foreground = if (enabled) colors.primary else colors.onSurface.copy(alpha = .30f)
     val previewText = valueLabel?.invoke(value.coerceIn(valueRange)) ?: pageCount?.let { count ->
-        "${value.roundToInt().coerceIn(0, (count - 1).coerceAtLeast(0)) + 1} / $count"
+        val index = if (inspect) hoverIndex else value.roundToInt().coerceIn(0, (count - 1).coerceAtLeast(0))
+        "${index + 1} / $count"
     } ?: "${(fraction * 100f).roundToInt()}%"
     // Continuous reading/scrubbing is silent; the preview and release commit are the feedback.
-    val layoutDirection = LocalLayoutDirection.current
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-    BoxWithConstraints(modifier.height(48.dp)) {
+    val readPointer = if (!canInspect) Modifier else Modifier.pointerInput(lastHoverIndex, layoutDirection) {
+        val inset = 12.dp.toPx()
+        awaitPointerEventScope {
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Final)
+                val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse }
+                if (event.type == PointerEventType.Exit || mouse == null || mouse.pressed) {
+                    hovering = false
+                    if (mouse?.pressed == true) hoverIndex = -1
+                    continue
+                }
+                if (event.type != PointerEventType.Enter && event.type != PointerEventType.Move) continue
+                val at = ((mouse.position.x - inset) / (size.width - 2f * inset).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                hoverIndex = ((if (layoutDirection == LayoutDirection.Rtl) 1f - at else at) * lastHoverIndex).roundToInt()
+                hovering = true
+            }
+        }
+    }
+    BoxWithConstraints(modifier.height(48.dp).then(readPointer)) {
         val bubbleWidth = minOf(76.dp * fontScale, maxWidth)
         val travel = (maxWidth - 24.dp).coerceAtLeast(0.dp)
         val bubbleLimit = (maxWidth - bubbleWidth).coerceAtLeast(0.dp)
-        val thumbX = 12.dp + travel * fraction
+        val thumbX = 12.dp + travel * bubbleFraction
         val bubbleX = (thumbX - bubbleWidth / 2f).coerceIn(0.dp, bubbleLimit)
         val origin = ((thumbX - bubbleX) / bubbleWidth.coerceAtLeast(1.dp)).coerceIn(0f, 1f)
         Surface(
             modifier = Modifier.width(bubbleWidth).heightIn(min = 24.dp).align(Alignment.TopStart)
                 .offset(x = bubbleX, y = (-16).dp)
                 .graphicsLayer {
-                    val amount = engagement.value.coerceIn(0f, 1f)
+                    val amount = bubbleReveal.value.coerceIn(0f, 1f)
                     transformOrigin = TransformOrigin(if (layoutDirection == LayoutDirection.Rtl) 1f - origin else origin, 1f)
                     alpha = amount
                     scaleX = .87f + amount * .13f
@@ -285,7 +317,7 @@ internal fun ReaderSeekBar(
             shape = RoundedCornerShape(50),
             color = colors.surface,
             contentColor = colors.onSurface,
-            shadowElevation = if (engaged) 2.dp else 0.dp,
+            shadowElevation = if (bubbleShown) 2.dp else 0.dp,
             tonalElevation = 0.dp,
         ) {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -343,6 +375,8 @@ internal fun ReaderSeekBar(
                     }
                     if (fraction > 0f) drawLine(foreground, Offset(start, middle),
                         Offset(start + (end - start) * fraction, middle), width, StrokeCap.Round)
+                    if (inspect && hovering) drawCircle(colors.onSurface.copy(alpha = if (contrast) .80f else .52f),
+                        radius = 2.5.dp.toPx(), center = Offset(start + (end - start) * bubbleFraction, middle))
                 }
             },
         )

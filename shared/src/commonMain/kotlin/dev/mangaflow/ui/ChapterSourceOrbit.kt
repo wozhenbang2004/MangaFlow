@@ -65,6 +65,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
+import dev.mangaflow.ui.motion.anchoredMenuReveal
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.input.key.Key
@@ -174,7 +175,7 @@ internal fun ChapterSourceOrbit(
     val flightVelocity = remember(identity) { floatArrayOf(0f) }
     val canInteract by remember(identity, closing) {
         // Rows are already separated at 0.6; delaying taps to 0.9 swallowed the first touch.
-        derivedStateOf { !closing && origin != null && progress.value >= .6f }
+        derivedStateOf { !closing && origin != null && (desktop || progress.value >= .6f) }
     }
     val scrim = MaterialTheme.colorScheme.scrim
     // A Popup is another window: explicit source layers carry the actual page across it.
@@ -370,21 +371,21 @@ private fun BoxWithConstraintsScope.DesktopChapterSources(
     }
     val top = target?.center?.y?.roundToInt()?.minus(measuredHeight / 2)
         ?: ((viewport.maxHeight - measuredHeight) / 2)
+    val panelOffset = IntOffset(left.coerceIn(inset, (viewport.maxWidth - inset - panelPixels).coerceAtLeast(inset)),
+        top.coerceIn(inset, (viewport.maxHeight - inset - measuredHeight).coerceAtLeast(inset)))
+    val pivot = target?.center?.let { anchor ->
+        TransformOrigin(((anchor.x - panelOffset.x) / panelPixels.coerceAtLeast(1)).coerceIn(0f, 1f),
+            ((anchor.y - panelOffset.y) / measuredHeight.coerceAtLeast(1)).coerceIn(0f, 1f))
+    } ?: TransformOrigin.Center
+    val currentReveal by rememberUpdatedState(reveal)
+    val visibleFraction = remember(identity) { derivedStateOf { if (measuredHeight == 0) 0f else currentReveal() } }
     val focus = LocalFocusManager.current
     val state = rememberLazyListState()
     val colors = MaterialTheme.colorScheme
-    LiquidGlassSurface(backdrop, Modifier.absoluteOffset {
-        IntOffset(left.coerceIn(inset, (viewport.maxWidth - inset - panelPixels).coerceAtLeast(inset)),
-            top.coerceIn(inset, (viewport.maxHeight - inset - measuredHeight).coerceAtLeast(inset)))
-    }.width(panelWidth).heightIn(max = panelMaxHeight)
+    LiquidGlassSurface(backdrop, Modifier.absoluteOffset { panelOffset }.width(panelWidth).heightIn(max = panelMaxHeight)
         .onGloballyPositioned { measuredHeight = it.size.height }
-        .graphicsLayer {
-            val p = reveal().coerceIn(0f, 1f)
-            alpha = if (measuredHeight == 0) 0f else p
-            scaleX = .97f + .03f * p
-            scaleY = scaleX
-            translationY = (1f - p) * -6.dp.toPx()
-        }.pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } }
+        .anchoredMenuReveal(visibleFraction, 20.dp) { pivot }
+        .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } }
         .semantics { paneTitle = title }
         .onPreviewKeyEvent { event ->
             if (!canInteract || event.type != KeyEventType.KeyDown) false

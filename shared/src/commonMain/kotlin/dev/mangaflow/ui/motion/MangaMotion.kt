@@ -34,6 +34,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -66,6 +67,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -77,6 +79,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
@@ -85,6 +88,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.KeyEventType
@@ -115,6 +120,7 @@ import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 internal val LocalTabVisibilityScope = staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
@@ -177,6 +183,39 @@ private class DesktopIconFocus {
     fun keyboardPressed() { pointerFocus = false }
 }
 
+/** A keyboard can deliver a genuine press and release between two draws. Hold its visual
+ * briefly while Foundation retains sole ownership of activation and cancellation. */
+@Composable
+private fun desktopPressState(source: MutableInteractionSource, enabled: Boolean): State<Boolean> {
+    val state = remember(source, enabled) { mutableStateOf(false) }
+    if (enabled) LaunchedEffect(source) {
+        val active = mutableSetOf<PressInteraction.Press>()
+        var started = 0L
+        var release: Job? = null
+        source.interactions.collect { event ->
+            when (event) {
+                is PressInteraction.Press -> {
+                    release?.cancel()
+                    active += event
+                    started = monotonicTimeMillis()
+                    state.value = true
+                }
+                is PressInteraction.Release -> if (active.remove(event.press) && active.isEmpty()) {
+                    val left = MangaMotion.PressMinimumDuration - (monotonicTimeMillis() - started)
+                    if (left <= 0L) state.value = false
+                    else release = launch { delay(left); state.value = false }
+                }
+                is PressInteraction.Cancel -> if (active.remove(event.press) && active.isEmpty()) {
+                    release?.cancel()
+                    state.value = false
+                }
+                else -> Unit
+            }
+        }
+    }
+    return state
+}
+
 @Composable
 private fun Modifier.motionPressFeedback(
     interaction: MutableInteractionSource,
@@ -186,24 +225,25 @@ private fun Modifier.motionPressFeedback(
     desktopIcon: DesktopIconFocus?,
     showKeyboardFocus: Boolean = true,
 ): Modifier {
-    val interactionPressed by interaction.collectIsPressedAsState()
     val desktop = platformKind == PlatformKind.DESKTOP
+    val windowActive = !desktop || LocalWindowInfo.current.isWindowFocused
+    val feedbackEnabled = enabled && windowActive
+    val interactionPressed by if (desktop) desktopPressState(interaction, feedbackEnabled) else interaction.collectIsPressedAsState()
     val accessibility = if (desktop) LocalPlatformAccessibilityPreferences.current else null
     val hovered = if (desktop) interaction.collectIsHoveredAsState().value else false
-    val focused = if (desktop) interaction.collectIsFocusedAsState().value && LocalWindowInfo.current.isWindowFocused &&
+    val focused = if (desktop) interaction.collectIsFocusedAsState().value && windowActive &&
         (showKeyboardFocus || accessibility?.increaseContrast == true || accessibility?.touchExploration == true) else false
     val feedbackColor = MaterialTheme.colorScheme.onSurface
-    val iconAccessibility = if (desktopIcon != null) accessibility else null
     var down by remember(interaction) { mutableStateOf(false) }
     var directPress by remember(interaction) { mutableStateOf(false) }
     var contact by remember(interaction) { mutableStateOf(TransformOrigin.Center) }
     var mouseContact by remember(interaction) { mutableStateOf(false) }
     var release by remember(interaction) { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
-    val pressed = enabled && (directPress || (!down && interactionPressed))
+    val pressed = feedbackEnabled && (directPress || (!down && interactionPressed))
     val motion = LocalMotionEnabled.current
-    LaunchedEffect(enabled) {
-        if (!enabled) {
+    LaunchedEffect(feedbackEnabled) {
+        if (!feedbackEnabled) {
             release?.cancel()
             release = null
             directPress = false
@@ -218,7 +258,7 @@ private fun Modifier.motionPressFeedback(
     )
     // clickable intentionally delays its Press inside scrolling parents. Observe down without
     // consuming it; Foundation still owns click/long-click/scroll, keyboard and TalkBack.
-    val input = if (enabled) Modifier.onPreviewKeyEvent {
+    val input = if (feedbackEnabled) Modifier.onPreviewKeyEvent {
         if (!down && it.type == KeyEventType.KeyDown) {
             contact = TransformOrigin.Center
             mouseContact = false
@@ -274,41 +314,54 @@ private fun Modifier.motionPressFeedback(
         }
     } else Modifier
     // Foundation owns hover/focus dispatch; draw those existing states only on desktop.
-    val hoverAmount = if (desktop) animateFloatAsState(if (hovered && enabled) 1f else 0f,
+    val hoverAmount = if (desktop) animateFloatAsState(if (hovered && feedbackEnabled) 1f else 0f,
         if (motion) tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing) else snap(), label = "hover-ink") else null
-    val desktopFeedback = if (desktop) Modifier.drawBehind {
-        if (!enabled) return@drawBehind
+    // The resting hover lives behind the artwork. Contact and keyboard focus must still
+    // be visible over an opaque cover, button or thumbnail drawn by a child Surface.
+    val contactBrush = if (desktop) remember(feedbackColor) {
+        Brush.radialGradient(0f to feedbackColor.copy(alpha = .16f),
+            .48f to feedbackColor.copy(alpha = .095f), 1f to feedbackColor.copy(alpha = 0f),
+            center = Offset.Zero, radius = 1f)
+    } else null
+    val desktopFeedback = if (desktop) Modifier.drawWithContent {
+        if (!feedbackEnabled) {
+            drawContent()
+            return@drawWithContent
+        }
         val hover = hoverAmount?.value ?: 0f
-        val steadyPress = !motion && pressed
-        if (desktopIcon != null) {
-            val contrast = iconAccessibility?.increaseContrast == true
-            val focusVisible = focused && (contrast || iconAccessibility?.touchExploration == true || !desktopIcon.pointerFocus)
-            val hoverRadius = minOf(14.dp.toPx(), size.minDimension / 2f)
-            if ((hover > 0f || steadyPress) && hoverRadius > 0f) {
-                val ink = if (steadyPress) if (contrast) .23f else .14f else hover * if (contrast) .14f else .055f
-                drawCircle(feedbackColor.copy(alpha = ink), radius = hoverRadius)
+        val contrast = accessibility?.increaseContrast == true
+        val glyph = desktopIcon != null
+        val focusVisible = focused && (desktopIcon == null || contrast ||
+            accessibility?.touchExploration == true || !desktopIcon.pointerFocus)
+        val corner = CornerRadius(minOf(12.dp.toPx(), size.minDimension / 2f))
+        if (glyph && hover > 0f) {
+            drawCircle(feedbackColor.copy(alpha = hover * if (contrast) .14f else .055f),
+                radius = minOf(14.dp.toPx(), size.minDimension / 2f))
+        } else if (!glyph && (hover > 0f || focused)) {
+            val ink = if (focused) if (contrast) .13f else .075f else hover * if (contrast) .09f else .045f
+            drawRoundRect(feedbackColor.copy(alpha = ink), cornerRadius = corner)
+        }
+        drawContent()
+        val amount = if (motion) maxOf(if (pressed) .45f else 0f, pressure.value.coerceIn(0f, 1f))
+            else if (pressed) 1f else 0f
+        if (amount > .001f && size.minDimension > 0f && contactBrush != null) {
+            val reach = minOf(size.minDimension * .49f, (if (glyph) 16.dp else 38.dp).toPx())
+            val radius = if (motion) reach * (.85f + .15f * amount) else reach
+            val x = (size.width * contact.pivotFractionX).coerceIn(reach, size.width - reach)
+            val y = (size.height * contact.pivotFractionY).coerceIn(reach, size.height - reach)
+            withTransform({ translate(x, y); scale(radius, radius, Offset.Zero) }) {
+                drawCircle(contactBrush, radius = 1f, center = Offset.Zero, alpha = amount)
             }
-            if (focusVisible) {
-                val inset = (if (contrast) 2.dp else 1.dp).toPx()
-                val extent = minOf(size.minDimension - 2f * inset, if (contrast) size.minDimension else 34.dp.toPx())
-                if (extent > 0f) drawRoundRect(feedbackColor.copy(alpha = if (contrast) 1f else .80f),
-                    topLeft = Offset((size.width - extent) / 2f, (size.height - extent) / 2f),
-                    size = Size(extent, extent), cornerRadius = CornerRadius(minOf(8.dp.toPx(), extent / 2f)),
-                    style = Stroke(inset))
-            }
-        } else {
-            val contrast = accessibility?.increaseContrast == true
-            val radius = CornerRadius(minOf(12.dp.toPx(), size.minDimension / 2f))
-            val ink = when {
-                steadyPress -> if (contrast) .22f else .14f
-                focused -> if (contrast) .13f else .075f
-                else -> hover * if (contrast) .09f else .045f
-            }
-            if (ink > 0f) drawRoundRect(feedbackColor.copy(alpha = ink), cornerRadius = radius)
-            val stroke = (if (contrast) 2.dp else 1.25.dp).toPx()
-            if (focused && size.minDimension > stroke) drawRoundRect(
-                feedbackColor.copy(alpha = if (contrast) 1f else .44f), topLeft = Offset(stroke / 2, stroke / 2),
-                size = Size(size.width - stroke, size.height - stroke), cornerRadius = radius, style = Stroke(stroke))
+        }
+        if (focusVisible) {
+            val stroke = (if (contrast) 2.dp else if (glyph) 1.dp else 1.25.dp).toPx()
+            val width = if (glyph && !contrast) minOf(34.dp.toPx(), size.minDimension - stroke) else size.width - stroke
+            val height = if (glyph && !contrast) width else size.height - stroke
+            if (width > 0f && height > 0f) drawRoundRect(
+                feedbackColor.copy(alpha = if (contrast) 1f else if (glyph) .80f else .52f),
+                topLeft = Offset((size.width - width) / 2f, (size.height - height) / 2f),
+                size = Size(width, height), cornerRadius = if (glyph) CornerRadius(minOf(8.dp.toPx(), height / 2f)) else corner,
+                style = Stroke(stroke))
         }
     } else Modifier
     val iconContact = if (icon && !desktop && motion) Modifier.drawBehind {

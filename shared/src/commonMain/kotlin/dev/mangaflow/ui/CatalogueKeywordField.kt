@@ -15,11 +15,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -44,13 +42,8 @@ internal fun CatalogueKeywordField(value: String, onChange: (String) -> Unit, hi
     val accent = colors.primary
     Row(modifier.fillMaxWidth().heightIn(min = 44.dp)
         .background(colors.onSurface.copy(alpha = .045f), RoundedCornerShape(12.dp))
-        .drawBehind {
-            if (focused && enabled && desktop) {
-                val y = size.height - 1.dp.toPx()
-                drawLine(accent, Offset(9.dp.toPx(), y), Offset((size.width - 9.dp.toPx()).coerceAtLeast(9.dp.toPx()), y),
-                    strokeWidth = 2.dp.toPx())
-            }
-        }.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        .then(if (desktop) Modifier.desktopFieldFocusLine(focused && enabled, accent) else Modifier).padding(start = 12.dp),
+        verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Outlined.Search, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
         BasicTextField(value, onValueChange = { if (enabled) onChange(it) }, enabled = enabled, singleLine = true,
             modifier = Modifier.weight(1f).focusRequester(requester).onFocusChanged { focused = it.isFocused }
@@ -65,10 +58,11 @@ internal fun CatalogueKeywordField(value: String, onChange: (String) -> Unit, hi
                     input()
                 }
             })
-        if (value.isNotEmpty()) MotionIconButton(onClick = {
+        if (desktop) DesktopFieldClear(value.isNotEmpty(), enabled, "清除关键词", 40.dp) {
             onChange("")
-            if (desktop) requester.requestFocus()
-        }, enabled = enabled, modifier = Modifier.size(40.dp), tooltip = "清除关键词") {
+            requester.requestFocus()
+        } else if (value.isNotEmpty()) MotionIconButton(onClick = { onChange("") }, enabled = enabled,
+            modifier = Modifier.size(40.dp), tooltip = "清除关键词") {
             Icon(Icons.Outlined.Close, "清除关键词", Modifier.size(16.dp))
         } else Spacer(Modifier.width(40.dp))
     }

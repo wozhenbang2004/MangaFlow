@@ -305,7 +305,7 @@ internal fun AnimeSearchProgressSheet(
         if (index.error != null && !index.loading) 1 else 0
     MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop, desktopWidth = 780.dp) { dismiss ->
         AnimeSearchSheetHeading("搜索来源", "「${search.query}」", dismiss)
-        AnimePaneLayout(Modifier.fillMaxWidth().heightIn(max = 460.dp), minimumWidth = 600.dp,
+        AnimePaneLayout(Modifier.fillMaxWidth().heightIn(max = 460.dp), minimumWidth = 600.dp, selectionKey = filter,
             showSidebar = search.sources.isNotEmpty(), sidebar = {
                 AnimePaneChoice("全部来源", filter == 0, { filter = 0 }, Icons.Outlined.Public, (search.sources.size + 1).toString())
                 AnimePaneChoice("查询中", filter == 1, { filter = 1 }, Icons.Outlined.Schedule, pending.toString())
@@ -414,7 +414,7 @@ internal fun AnimeSearchVersionSheet(
         chosen?.let(onChoose)
     }, containerColor = MaterialTheme.colorScheme.background, backdrop = backdrop, desktopWidth = 824.dp) { dismiss ->
         AnimeSearchSheetHeading("选择要打开的版本", null, dismiss)
-        AnimePaneLayout(Modifier.fillMaxWidth().heightIn(max = 460.dp), showSidebar = groups.size > 1, sidebar = {
+        AnimePaneLayout(Modifier.fillMaxWidth().heightIn(max = 460.dp), showSidebar = groups.size > 1, selectionKey = activeSource, sidebar = {
             AnimeScrollableList(Modifier.fillMaxWidth()) {
                 item { AnimePaneChoice("全部版本", activeSource == null, { currentSource = null }, count = versions.size.toString()) }
                 groups.forEach { (id, choices) ->

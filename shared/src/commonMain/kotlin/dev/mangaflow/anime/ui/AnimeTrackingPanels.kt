@@ -64,7 +64,7 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
                 }
                 val services = listOf("Bangumi", "AniList")
                 val selectService: (Int) -> Unit = { providerIndex = it; requestedReview = false }
-                AnimePaneLayout(Modifier.weight(1f, fill = false), compactHeader = {
+                AnimePaneLayout(Modifier.weight(1f, fill = false), selectionKey = provider, compactHeader = {
                     MotionTabs(providerIndex, services, onSelect = selectService,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).motionInputGate(!state.syncing),
                         controlHeight = 44.dp)

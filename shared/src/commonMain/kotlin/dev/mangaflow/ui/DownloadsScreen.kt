@@ -363,6 +363,36 @@ fun DownloadsScreen(
     val pausedEntries = manageableEntries.filter { it.status == DownloadStatus.PAUSED && it.manga.sourceUrl != LOCAL_SOURCE_URL }
     val retryableEntries = manageableEntries.filter { it.status == DownloadStatus.FAILED && it.manga.sourceUrl != LOCAL_SOURCE_URL }
     val completedEntries = manageableEntries.filter { it.status == DownloadStatus.COMPLETED }
+    var queueRequest by remember(desktopScope) { mutableStateOf<DownloadQueueRequest?>(null) }
+    fun dispatchQueue(command: QueueCommand, candidates: List<DownloadEntry>, retryAction: (DownloadEntry) -> Unit = onRetry) {
+        if (!active || desktop && currentDesktopScope !== desktopScope) return
+        val requested = candidates.filter { sourceIncluded(it.manga.sourceId) }.distinctBy(DownloadEntry::id)
+        if (requested.isEmpty()) return
+        val latest = store.entries.value.associateBy(DownloadEntry::id)
+        val targets = requested.mapNotNull { original ->
+            latest[original.id]?.takeIf { current ->
+                sameDownloadTask(original, current) && sourceIncluded(current.manga.sourceId) && current.id !in removingIds &&
+                    when (command) {
+                        QueueCommand.PAUSE -> current.status == DownloadStatus.RUNNING || current.status == DownloadStatus.QUEUED ||
+                            current.status == DownloadStatus.WAITING
+                        QueueCommand.RESUME -> current.status == DownloadStatus.PAUSED && current.manga.sourceUrl != LOCAL_SOURCE_URL
+                        QueueCommand.RETRY -> current.manga.sourceUrl != LOCAL_SOURCE_URL && (current.needsSourceRefresh ||
+                            current.status == DownloadStatus.FAILED || current.status == DownloadStatus.PAUSED) &&
+                            current.status != DownloadStatus.COMPLETED
+                    }
+            }
+        }
+        if (desktop) queueRequest = DownloadQueueRequest(command, targets, visiblePreparations, requested.size - targets.size)
+        targets.forEach { target ->
+            if (command == QueueCommand.PAUSE) store.pause(target.id, target.progress.workId.takeIf { it.isNotBlank() })
+            else retryAction(target)
+        }
+    }
+    fun retrySelection(group: List<DownloadEntry>, retryAction: (DownloadEntry) -> Unit = onRetry) {
+        val command = if (group.all { it.status == DownloadStatus.PAUSED }) QueueCommand.RESUME else QueueCommand.RETRY
+        dispatchQueue(command, group, retryAction)
+    }
+
     val usedBytes = visibleEntries.sumOf { it.downloadedBytes }
     var availableBytes by remember(store) { mutableStateOf<Long?>(null) }
     var spaceReadFailed by remember(store) { mutableStateOf(false) }
@@ -461,9 +491,9 @@ fun DownloadsScreen(
                 if (!desktop) inspectedTaskId = null
                 else if (desktopInspection === selection) desktopInspection = null
             },
-            onPause = { currentTarget(it)?.let { target -> store.pause(target.id) } },
-            onRetry = { currentTarget(it)?.let(onRetry) },
-            onRetryUsingLatestRoute = { currentTarget(it)?.let(onRetryUsingLatestRoute) },
+            onPause = { currentTarget(it)?.let { target -> dispatchQueue(QueueCommand.PAUSE, listOf(target)) } },
+            onRetry = { currentTarget(it)?.let { target -> retrySelection(listOf(target)) } },
+            onRetryUsingLatestRoute = { currentTarget(it)?.let { target -> retrySelection(listOf(target), onRetryUsingLatestRoute) } },
             enhancement = enhancement,
             onEnhance = { shown -> currentTarget(shown)?.let { target ->
                 enhanceChapters(listOf(target)) { openQuality(target, inPane) }
@@ -662,13 +692,13 @@ fun DownloadsScreen(
                                     showQueueActions = false; managing = true; selectedIds = emptySet()
                                 }
                                 if (activeEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.Pause, "全部暂停") {
-                                    showQueueActions = false; activeEntries.forEach { store.pause(it.id) }
+                                    showQueueActions = false; dispatchQueue(QueueCommand.PAUSE, activeEntries)
                                 }
                                 if (pausedEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.PlayArrow, "继续已暂停") {
-                                    showQueueActions = false; pausedEntries.forEach(onRetry)
+                                    showQueueActions = false; dispatchQueue(QueueCommand.RESUME, pausedEntries)
                                 }
                                 if (retryableEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.Refresh, "重试失败任务") {
-                                    showQueueActions = false; retryableEntries.forEach(onRetry)
+                                    showQueueActions = false; dispatchQueue(QueueCommand.RETRY, retryableEntries)
                                 }
                                 if (completedEntries.isNotEmpty()) {
                                     HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -834,9 +864,9 @@ fun DownloadsScreen(
                                 manageableEntries.any { it.status == DownloadStatus.FAILED })) {
                             item(key = "queue-summary", contentType = "download-summary") {
                                 DownloadQueueSummary(manageableEntries,
-                                    onPause = { activeEntries.forEach { store.pause(it.id) } },
-                                    onResume = { pausedEntries.forEach(onRetry) },
-                                    onRetry = { retryableEntries.forEach(onRetry) },
+                                    onPause = { dispatchQueue(QueueCommand.PAUSE, activeEntries) },
+                                    onResume = { dispatchQueue(QueueCommand.RESUME, pausedEntries) },
+                                    onRetry = { dispatchQueue(QueueCommand.RETRY, retryableEntries) },
                                     hasPaused = pausedEntries.isNotEmpty(), hasRetryable = retryableEntries.isNotEmpty())
                             }
                         }
@@ -873,7 +903,8 @@ fun DownloadsScreen(
                                                     }
                                                 } else expandedBooks = if (expanded) expandedBooks - mangaId else expandedBooks + mangaId
                                             },
-                                            onPause = { store.pause(it.id) }, onRetry = onRetry,
+                                            onPause = { group -> dispatchQueue(QueueCommand.PAUSE, group) },
+                                            onRetry = { group -> retrySelection(group) },
                                             onDetails = onDetails?.let { open -> { open(chapters.first().manga) } },
                                             onRemove = { pendingDeletion = chapters }, inspectMode = desktopSplit,
                                             active = active && pageFilter == filter,
@@ -900,7 +931,7 @@ fun DownloadsScreen(
                                                     onRead = { onRead(entry) }, onSelect = { toggleSelection(listOf(entry)) },
                                                     onManage = { if (managing) toggleSelection(listOf(entry)) else {
                                                         managing = true; selectedIds = setOf(entry.id) } },
-                                                    onPause = { store.pause(it.id) }, onRetry = onRetry,
+                                                    onPause = { dispatchQueue(QueueCommand.PAUSE, listOf(it)) }, onRetry = { retrySelection(listOf(it)) },
                                                     onRemove = { pendingDeletion = listOf(entry) },
                                                     active = active && pageFilter == filter,
                                                     onInspect = { inspectDownload(it, pageFilter, selectWork = false) },
@@ -939,7 +970,7 @@ fun DownloadsScreen(
                     onRead = onRead, onSelect = { toggleSelection(listOf(it)) },
                     onManage = { managing = true; selectedIds = setOf(it.id) },
                     onRemove = { pendingDeletion = listOf(it) },
-                    onPause = { store.pause(it.id) }, onRetry = onRetry,
+                    onPause = { dispatchQueue(QueueCommand.PAUSE, listOf(it)) }, onRetry = { retrySelection(listOf(it)) },
                     onFindFocus = { chapterFieldFocused = it },
                     active = active, onInspect = { entry ->
                         if (entry.manga.id == selectedWork(desktopInspection?.mangaId)) {
@@ -997,7 +1028,20 @@ fun DownloadsScreen(
                 selectFilter(DownloadFilter.entries[index])
                 selectedIds = emptySet()
             })
-        MangaSnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp))
+        Column(Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            if (desktop && active) {
+                val request = queueRequest
+                CopyShelfValue(request) { shown ->
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        DownloadQueueFeedback(shown, entriesById, visiblePreparations) {
+                            if (queueRequest === shown) queueRequest = null
+                        }
+                    }
+                }
+            }
+            MangaSnackbarHost(snackbar)
+        }
         // Keep the modal host composed through a resize so its exit and settings handoff can settle.
         if (desktop) renderTaskDetails(if (inPane) null else desktopTask, false)
     }

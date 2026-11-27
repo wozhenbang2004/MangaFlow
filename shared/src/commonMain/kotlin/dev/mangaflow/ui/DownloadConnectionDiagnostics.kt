@@ -172,10 +172,11 @@ internal fun NetworkAutoCheckWorkspace(
         CheckResultFilter.UNVERIFIED -> unverified
     }
     val metrics = rememberAutoMetrics(state.rows)
+    val summaryAbove by remember(list) { derivedStateOf { list.firstVisibleItemIndex > 1 } }
     LaunchedEffect(controller, state.runId, state.running, state.complete) {
         if (state.running) {
             expandedId = null; notice = null; onReceipt("")
-        } else if (state.complete && !state.historyOnly && !state.stale) {
+        } else if (!desktop && state.complete && !state.historyOnly && !state.stale) {
             if (motion) list.animateScrollToItem(0) else list.scrollToItem(0)
         }
     }
@@ -305,6 +306,13 @@ internal fun NetworkAutoCheckWorkspace(
                 Icon(Icons.Outlined.Info, "查看原因", Modifier.size(15.dp), tint = colors.onSurfaceVariant)
             }
         }
+        if (desktop && !state.restoring && state.total > 0 && !state.historyOnly) {
+            key(state.runId, state.total) {
+                ManagementProgressTrack(state.completed.toFloat() / state.total, "已检测项目",
+                    if (state.stale || state.interrupted) colors.onSurfaceVariant else colors.primary,
+                    Modifier.fillMaxWidth().height(3.dp))
+            }
+        }
         if (state.rows.isNotEmpty()) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(when {
@@ -312,9 +320,14 @@ internal fun NetworkAutoCheckWorkspace(
                 state.stale -> "请先重测"
                 state.applied -> "已保存"
                 state.complete -> "已选 ${applicable.size} 项"
-                state.running -> "离开面板后继续检测"
+                state.running -> if (desktop && state.total > 0) "已检测 ${state.completed} / ${state.total} 项" else "离开面板后继续检测"
                 else -> "未完成项保留原设置"
             }, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            if (desktop && summaryAbove && !state.running && !state.restoring) MotionTextButton(onClick = {
+                scope.launch {
+                    if (motion) list.animateScrollToItem(1) else list.scrollToItem(1)
+                }
+            }, enabled = active, contentPadding = PaddingValues(horizontal = 6.dp)) { Text("查看摘要") }
             MotionButton(onClick = {
                 if (!latestActive || !canReview || applicable.isEmpty()) return@MotionButton
                 val chosen = applicable.toMap()

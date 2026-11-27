@@ -28,6 +28,7 @@ import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.canonicalDoubanId
 import dev.mangaflow.ui.DesktopVerticalScrollbar
 import dev.mangaflow.ui.mangaFontFamily
+import dev.mangaflow.enhancement.ui.mediaSettingsPage
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
@@ -136,7 +137,7 @@ internal fun AnimePlayerBrowseRail(
             MotionTextButton(onClick = ::submit, enabled = active && term.isNotEmpty(),
                 modifier = Modifier.align(Alignment.End).heightIn(min = 40.dp)) { Text("查找") }
         }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        Box(Modifier.weight(1f).fillMaxWidth().mediaSettingsPage(preview?.id ?: Unit, true)) {
             if (preview != null) key(preview.id) {
                 LazyColumn(Modifier.fillMaxSize(), userScrollEnabled = active,
                     contentPadding = PaddingValues(top = 10.dp, end = 6.dp, bottom = 12.dp),

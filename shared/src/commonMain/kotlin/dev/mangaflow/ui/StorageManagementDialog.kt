@@ -26,9 +26,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.liveRegion
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -97,7 +94,9 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     val busy = clearOperation?.active == true
     var loading by remember { mutableStateOf(false) }
     var clearingMemory by remember { mutableStateOf(false) }
-    var notice by remember { mutableStateOf<String?>(null) }
+    var notice by remember(store) { mutableStateOf<ManagementNotice?>(null) }
+    var rejectedClearId by remember(store) { mutableStateOf<String?>(null) }
+    var reviewedClear by remember(store) { mutableStateOf<Pair<String, String>?>(null) }
     var offlineBytes by remember { mutableStateOf<Long?>(null) }
     var animeOfflineBytes by remember { mutableStateOf<Long?>(null) }
     var revision by remember { mutableIntStateOf(0) }
@@ -116,7 +115,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
             // Title reads can restore owner memory; issue the review after those reads settle.
             snapshot = store.snapshot()
         } catch (cancel: CancellationException) { throw cancel }
-        catch (_: Exception) { notice = "用量读取未完成，点按刷新重试" }
+        catch (_: Exception) { notice = ManagementNotice("用量读取未完成，点按刷新重试", ManagementSignal.ATTENTION) }
         finally { loading = false }
     }
     LaunchedEffect(visible, active, revision, entries.map { it.id to it.status },
@@ -124,10 +123,10 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
         if (!visible || !active) return@LaunchedEffect
         try { offlineBytes = withContext(Dispatchers.IO) { downloads.storageBytes() } }
         catch (cancel: CancellationException) { throw cancel }
-        catch (_: Exception) { offlineBytes = null; notice = "漫画离线用量未能读取，点按刷新重试" }
+        catch (_: Exception) { offlineBytes = null; notice = ManagementNotice("漫画离线用量未能读取，点按刷新重试", ManagementSignal.ATTENTION) }
         try { animeOfflineBytes = animeDownloads.storageBytes() }
         catch (cancel: CancellationException) { throw cancel }
-        catch (_: Exception) { animeOfflineBytes = null; notice = "番剧离线用量未能读取，点按刷新重试" }
+        catch (_: Exception) { animeOfflineBytes = null; notice = ManagementNotice("番剧离线用量未能读取，点按刷新重试", ManagementSignal.ATTENTION) }
     }
     fun back() {
         when {
@@ -172,45 +171,65 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
             protected.size, protected.sumOf { it.bytes }, scopeBytes, scopeLabel, snapshot?.legacyRevision, snapshot?.legacyStamp)
     }
     fun applyClear(reviewed: StorageClearPlan) {
-        if (operations.find(UserOperationKeys.CACHE)?.active == true) return
         val handle = operations.clearStorageCache(store, imageLoader, reviewed.items,
             reviewed.legacy, reviewed.legacyRevision, reviewed.legacyStamp)
         if (handle.accepted) {
             plan = null
             selected = emptySet()
-            notice = "已在后台清理，可关闭此页"
+            reviewedClear = handle.id to reviewed.label
+            rejectedClearId = null
+            notice = null
+        } else {
+            rejectedClearId = handle.id
+            notice = ManagementNotice("已有清理任务，当前选择尚未提交", ManagementSignal.INFORMATION)
         }
     }
     LaunchedEffect(clearOperation?.id, clearOperation?.phase, visible, active) {
         val operation = clearOperation ?: return@LaunchedEffect
         if (!visible || !active || operation.active) return@LaunchedEffect
+        val prefix = reviewedClear?.takeIf { it.first == operation.id }?.let { it.second + " · " }.orEmpty()
+        fun terminalNotice(): ManagementNotice {
+            val signal = when (operation.phase) {
+                ApplicationOperationPhase.SUCCEEDED -> ManagementSignal.COMPLETE
+                ApplicationOperationPhase.CANCELLED -> ManagementSignal.CANCELLED
+                else -> ManagementSignal.ATTENTION
+            }
+            val fallback = when (signal) {
+                ManagementSignal.COMPLETE -> "清理已结束，正在刷新用量"
+                ManagementSignal.CANCELLED -> "清理已取消，正在核对实际释放量"
+                else -> "清理未完成，请核对用量后重试"
+            }
+            return ManagementNotice(prefix + (operation.message ?: fallback), signal)
+        }
         fun showResult(result: StorageCleanupResult) {
             if (!result.accountingComplete) {
-                notice = "可能已释放部分内容，请刷新用量核对"
+                notice = ManagementNotice(prefix + "可能已释放部分内容，请刷新用量核对", ManagementSignal.ATTENTION)
                 return
             }
-            notice = "已释放 ${storageBytes(result.freedBytes)}" + when {
+            val summary = "已释放 ${storageBytes(result.freedBytes)}" + when {
                 result.failed > 0 -> " · 部分内容未清理，请重试"
                 result.skipped > 0 -> " · 使用中的内容已保留"
                 else -> ""
             }
+            notice = ManagementNotice(prefix + summary, if (result.failed > 0 || operation.phase == ApplicationOperationPhase.FAILED)
+                ManagementSignal.ATTENTION else ManagementSignal.COMPLETE)
         }
         when (operation.phase) {
             ApplicationOperationPhase.SUCCEEDED, ApplicationOperationPhase.FAILED -> {
                 try {
                     val result = operations.result<StorageCleanupResult>(operation.id)
-                    if (result != null) showResult(result.await()) else notice = operation.message
+                    if (result != null) showResult(result.await()) else notice = terminalNotice()
                 } catch (failure: StorageCleanupFailure) {
                     showResult(failure.result)
                 } catch (cancel: CancellationException) {
                     currentCoroutineContext().ensureActive()
-                    notice = operation.message
-                } catch (_: Exception) { notice = operation.message }
+                    notice = terminalNotice()
+                } catch (_: Exception) { notice = terminalNotice() }
             }
-            ApplicationOperationPhase.CANCELLED -> notice = "清理已取消，可能已释放部分内容；正在刷新实际用量"
-            else -> notice = operation.message
+            ApplicationOperationPhase.CANCELLED -> notice = ManagementNotice(prefix + "清理已取消，正在核对实际释放量", ManagementSignal.CANCELLED)
+            else -> notice = terminalNotice()
         }
-        if (!operation.statusDurable) notice = notice.orEmpty() + " · 操作状态未保存"
+        if (!operation.statusDurable) notice = notice?.let { it.copy(message = it.message + " · 操作状态未保存", signal = ManagementSignal.ATTENTION) }
         // This small outcome remains available across panel/page reopening; a new CACHE
         // operation or the registry's bounded terminal retention releases it.
     }
@@ -279,24 +298,25 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                             Icon(Icons.Outlined.Close, "关闭存储管理", Modifier.size(20.dp))
                         }
                     }
-                    if (busy) Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
-                        Text(clearOperation?.message ?: "后台清理中 · 可关闭此页", Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                        if (clearOperation?.cancellable == true) MotionTextButton(
-                            onClick = { operations.cancel(clearOperation.id) }) { Text("取消") }
-                    }
                     val review = plan
+                    val pending = clearOperation?.takeIf { it.active }
+                    val status = pending?.let { work ->
+                        val prefix = reviewedClear?.takeIf { it.first == work.id }?.let { it.second + " · " }.orEmpty()
+                        val queued = work.phase == ApplicationOperationPhase.QUEUED
+                        val message = when {
+                            work.id == rejectedClearId -> "另一个清理任务正在执行，当前选择尚未提交"
+                            queued -> "清理已排队"
+                            else -> work.message ?: "正在清理，可关闭此页"
+                        }
+                        ManagementNotice(prefix + message, if (queued) ManagementSignal.QUEUED else ManagementSignal.WORKING)
+                    } ?: notice
                     val feedback: @Composable () -> Unit = {
-                        notice?.let { message ->
-                            Row(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(10.dp))
-                                .padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(message, Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
-                                    style = MaterialTheme.typography.bodySmall, color = colors.onSurface)
-                                MotionIconButton({ notice = null }, modifier = Modifier.size(40.dp), tooltip = "收起消息") {
-                                    Icon(Icons.Outlined.Close, "收起消息", Modifier.size(14.dp))
-                                }
+                        ManagementStatusRow(status) {
+                            if (pending?.cancellable == true && pending.id != rejectedClearId) MotionTextButton(onClick = { operations.cancel(pending.id) }) {
+                                Text("取消")
+                            } else if (pending == null) MotionIconButton({ notice = null },
+                                modifier = Modifier.size(40.dp), tooltip = "收起消息") {
+                                Icon(Icons.Outlined.Close, "收起消息", Modifier.size(14.dp))
                             }
                         }
                     }
@@ -355,7 +375,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                     LazyColumn(Modifier.fillMaxWidth().padding(end = if (desktop) 12.dp else 0.dp),
                         state = list, contentPadding = PaddingValues(bottom = 8.dp)) {
                         if (paneReview == null && short) item("usage") { usage() }
-                        if (short && notice != null) item("notice") { feedback() }
+                        if (short && status != null) item("notice") { feedback() }
                         if (paneReview != null) {
                             item("review") {
                                 Column(Modifier.padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -452,9 +472,9 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                             scope.launch {
                                                 try {
                                                     val released = experience.clearDecodedMemory().await()
-                                                    notice = "已释放 ${storageBytes(released)} 缓存引用"
+                                                    notice = ManagementNotice("已释放 ${storageBytes(released)} 缓存引用", ManagementSignal.COMPLETE)
                                                 } catch (cancel: CancellationException) { throw cancel }
-                                                catch (_: Exception) { notice = "内存清理未完成，请重试" }
+                                                catch (_: Exception) { notice = ManagementNotice("内存清理未完成，请重试", ManagementSignal.ATTENTION) }
                                                 finally { clearingMemory = false }
                                             }
                                         }, enabled = active && visible && !busy && !clearingMemory,

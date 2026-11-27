@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -115,6 +116,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -271,7 +276,7 @@ fun SettingsScreen(
     var showWebDav by remember { mutableStateOf(false) }
     var webDavPresent by remember { mutableStateOf(false) }
     var webDavConnectionOnly by remember { mutableStateOf(false) }
-    var webDavNotice by remember { mutableStateOf<WebDavFeedback?>(null) }
+    var webDavNotice by remember { mutableStateOf<BackupNotice?>(null) }
     var expandedSetting by rememberSaveable { mutableStateOf<String?>(null) }
     var showBodySources by remember { mutableStateOf(false) }
     var showAnimeSources by remember { mutableStateOf(false) }
@@ -283,18 +288,36 @@ fun SettingsScreen(
     val foundHeader = remember { BringIntoViewRequester() }
     var foundSetting by remember { mutableStateOf<String?>(null) }
     var findRequest by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    var lastFindArrival by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val arrival = remember { Animatable(0f) }
+    val motion = LocalMotionEnabled.current
     fun openSetting(key: String) {
         expandedSetting = key
         foundSetting = key
         findRequest++
     }
-    fun searchTarget(key: String): Modifier =
-        if (desktop && key == foundSetting) Modifier.bringIntoViewRequester(foundHeader) else Modifier
-    LaunchedEffect(findRequest) {
-        if (findRequest > 0) {
-            androidx.compose.runtime.withFrameNanos { }
-            foundHeader.bringIntoView()
+    fun searchTarget(key: String): Modifier = if (desktop && key == foundSetting) {
+        Modifier.bringIntoViewRequester(foundHeader).drawBehind {
+            val amount = arrival.value
+            if (amount > 0f) {
+                drawRoundRect(colors.primary.copy(alpha = .10f * amount), cornerRadius = CornerRadius(8.dp.toPx()))
+                val x = if (layoutDirection == androidx.compose.ui.unit.LayoutDirection.Rtl) size.width - 2.dp.toPx() else 2.dp.toPx()
+                val inset = minOf(8.dp.toPx(), size.height / 3f)
+                drawLine(colors.primary.copy(alpha = amount), Offset(x, inset), Offset(x, size.height - inset),
+                    strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
+            }
         }
+    } else Modifier
+    LaunchedEffect(findRequest, foundSetting, screenActive, motion) {
+        arrival.snapTo(0f)
+        if (!desktop || !screenActive || foundSetting == null || findRequest <= lastFindArrival) return@LaunchedEffect
+        lastFindArrival = findRequest
+        androidx.compose.runtime.withFrameNanos { }
+        foundHeader.bringIntoView()
+        arrival.snapTo(1f)
+        kotlinx.coroutines.delay(650)
+        if (motion) arrival.animateTo(0f, tween(MangaMotion.Enter, easing = MangaMotion.ExitEasing))
+        else arrival.snapTo(0f)
     }
     val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
     LaunchedEffect(screenActive, openWebDavSettings, backupBusy) {
@@ -317,26 +340,35 @@ fun SettingsScreen(
     }
 
     val backupWriter = rememberTextDocumentSaver { result ->
-        backupNotice = if (result.saved) BackupNotice("阅读备份已导出")
-            else result.error?.let { BackupNotice(it, failed = true) }
+        backupNotice = when {
+            result.saved -> BackupNotice("阅读备份已导出")
+            result.error != null -> BackupNotice(result.error, PreferenceNoticeKind.ERROR)
+            desktop -> BackupNotice("已取消导出", PreferenceNoticeKind.INFO)
+            else -> null
+        }
         exportSaving = false
     }
     fun exportBackup() {
         if (backupBusy != null) return
         backupNotice = null
+        webDavNotice = null
         if (!operations.exportReadingBackup(libraryStore).accepted)
-            backupNotice = BackupNotice("已有备份操作，请稍后再导出。", failed = true)
+            backupNotice = BackupNotice("已有备份操作，请稍后再导出。", PreferenceNoticeKind.ERROR)
     }
     val importBackup = rememberOpenDocumentPicker() { uri ->
         if (uri != null) {
             if (backupBusy == null) {
                 backupNotice = null
+                webDavNotice = null
                 val handle = operations.inspectReadingBackup(context, libraryStore, uri)
                 if (!handle.accepted) {
                     releasePickedDocuments(listOf(uri))
-                    backupNotice = BackupNotice("已有备份操作，请稍后再选择文件。", failed = true)
+                    backupNotice = BackupNotice("已有备份操作，请稍后再选择文件。", PreferenceNoticeKind.ERROR)
                 }
             } else releasePickedDocuments(listOf(uri))
+        } else if (desktop && backupBusy == null) {
+            webDavNotice = null
+            backupNotice = BackupNotice("已取消选择备份文件", PreferenceNoticeKind.INFO)
         }
     }
 
@@ -344,15 +376,13 @@ fun SettingsScreen(
         val operation = backupOperation ?: return@LaunchedEffect
         if (!screenActive || operation.active) return@LaunchedEffect
         if (operation.phase != ApplicationOperationPhase.SUCCEEDED) {
-            if (operation.kind in setOf(ApplicationOperationKind.WEBDAV_SAVE,
-                ApplicationOperationKind.WEBDAV_UPLOAD, ApplicationOperationKind.WEBDAV_READ)) {
-                webDavNotice = operation.message?.let {
-                    WebDavFeedback(it, failed = operation.phase != ApplicationOperationPhase.CANCELLED)
-                }
-            } else backupNotice = operation.message?.let {
-                BackupNotice(it, failed = operation.phase == ApplicationOperationPhase.FAILED ||
-                    operation.phase == ApplicationOperationPhase.INTERRUPTED)
+            val receipt = operation.message?.let { message ->
+                BackupNotice(message, if (operation.phase == ApplicationOperationPhase.CANCELLED)
+                    PreferenceNoticeKind.INFO else PreferenceNoticeKind.ERROR)
             }
+            if (operation.kind in setOf(ApplicationOperationKind.WEBDAV_SAVE,
+                ApplicationOperationKind.WEBDAV_UPLOAD, ApplicationOperationKind.WEBDAV_READ)) webDavNotice = receipt
+            else backupNotice = receipt
             operations.consumeResult(operation.id)
             return@LaunchedEffect
         }
@@ -379,18 +409,18 @@ fun SettingsScreen(
                     val pending = PendingLibraryRestore(inspected.payload, inspected.info)
                     if (showWebDav || webDavPresent) { pendingWebDavRestore = pending; showWebDav = false }
                     else { backupNotice = null; pendingRestore = pending }
+                    webDavNotice = BackupNotice("已读取远端备份，可查看恢复预览")
                 }
-                webDavNotice = WebDavFeedback("已读取远端备份，可查看恢复预览")
                 operations.consumeResult(operation.id)
             }
-            ApplicationOperationKind.WEBDAV_UPLOAD -> {
-                webDavNotice = WebDavFeedback("阅读备份已上传")
+            ApplicationOperationKind.WEBDAV_UPLOAD -> operations.result<Any?>(operation.id)?.let {
+                webDavNotice = BackupNotice("阅读备份已上传")
                 operations.consumeResult(operation.id)
             }
-            ApplicationOperationKind.WEBDAV_SAVE -> {
+            ApplicationOperationKind.WEBDAV_SAVE -> operations.result<Any?>(operation.id)?.let {
                 webDavNotice = if (webDavStore.config.value.configured)
-                    WebDavFeedback("连接设置已保存 · 尚未验证", savedConfiguration = true)
-                    else WebDavFeedback("本机连接设置已清除")
+                    BackupNotice("连接设置已保存 · 尚未验证", PreferenceNoticeKind.INFO, savedConfiguration = true)
+                    else BackupNotice("本机连接设置已清除")
                 operations.consumeResult(operation.id)
             }
             else -> Unit
@@ -399,15 +429,16 @@ fun SettingsScreen(
 
     fun runWebDav(action: String, draft: WebDavBackupDraft? = null) {
         if (backupBusy != null) return
+        backupNotice = null
         webDavNotice = null
         try {
             val route = if (action == "upload" || action == "download") routeStore.snapshot(DownloadCategory.WEBDAV)
                 else DownloadRouteSnapshot(DownloadRouteMode.SYSTEM)
             val accepted = draft?.let { WebDavOperationDraft(it.endpoint, it.username, it.password, it.remotePath) }
             val operation = operations.webDav(libraryStore, webDavStore, action, accepted, route)
-            if (!operation.accepted) webDavNotice = WebDavFeedback("已有备份操作，请稍后重试", failed = true)
+            if (!operation.accepted) webDavNotice = BackupNotice("已有备份操作，请稍后重试", PreferenceNoticeKind.ERROR)
         } catch (_: Exception) {
-            webDavNotice = WebDavFeedback("备份线路不可用，请检查连接设置", failed = true)
+            webDavNotice = BackupNotice("备份线路不可用，请检查连接设置", PreferenceNoticeKind.ERROR)
         }
     }
 
@@ -527,9 +558,10 @@ fun SettingsScreen(
                         }
                     }
                     SettingsDisclosure("备份与同步", when {
+                        desktop && expandedSetting == "backup" -> "漫画账号 · 阅读备份"
                         backupBusy == "export-saving" -> "等待选择保存位置"
                         backupBusy != null -> backupOperation?.message ?: "正在处理…"
-                        desktop && backupNotice != null -> backupNotice?.message.orEmpty()
+                        desktop && (backupNotice != null || webDavNotice != null) -> (backupNotice ?: webDavNotice)?.message.orEmpty()
                         !desktop && lanReadingConflictCount > 0 -> "$lanReadingConflictCount 处阅读差异待确认"
                         desktop -> "漫画账号 · 阅读备份"
                         else -> "设备 · 漫画账号 · 阅读备份"
@@ -558,11 +590,21 @@ fun SettingsScreen(
                                 webDavNotice = null; showWebDav = true
                             }
                         }
-                        SettingsOperationStatus(backupOperation) { operations.cancel(it) }
                         if (desktop) {
-                            backupNotice?.let { SettingsBackupReceipt(it.message, it.failed) }
-                            webDavNotice?.let { SettingsBackupReceipt(it.message, it.failed) }
-                        }
+                            val op = backupOperation
+                            val confirmed = backupNotice ?: webDavNotice
+                            val notice = when {
+                                exportSaving -> PreferenceNotice("等待选择保存位置", PreferenceNoticeKind.INFO)
+                                op?.active == true -> PreferenceNotice(op.message ?: op.title, PreferenceNoticeKind.WORKING)
+                                op != null && !op.statusDurable && op.message != null -> PreferenceNotice(op.message, PreferenceNoticeKind.INFO)
+                                else -> confirmed?.presentation()
+                            }
+                            PreferenceOperationFeedback(notice) {
+                                if (op?.cancellable == true && !exportSaving) TextButton(onClick = { operations.cancel(op.id) }) {
+                                    Text("取消")
+                                }
+                            }
+                        } else SettingsOperationStatus(backupOperation) { operations.cancel(it) }
                         Text("备份不包含账号、密码、缓存与漫画文件；恢复前会再次确认。",
                             style = MaterialTheme.typography.bodySmall, color = secondary)
                     }
@@ -748,7 +790,10 @@ fun SettingsScreen(
             add(DesktopSettingsLink(3, "自动检查与更新提醒", "通知 提醒 开关") { openSetting("update-options") })
             add(DesktopSettingsLink(3, "项目主页", "GitHub 仓库 源代码") { openSetting("project") })
         }
-        DesktopSettingsLayout(settingsCategory, { settingsCategory = it }, contentTopPadding, links, desktopFindRequest, settingsContent)
+        DesktopSettingsLayout(settingsCategory, { index ->
+            foundSetting = null
+            settingsCategory = index
+        }, contentTopPadding, links, desktopFindRequest, settingsContent)
     } else settingsContent(contentTopPadding)
 
     if (showBodySources && sourceRegistry != null) {
@@ -795,8 +840,9 @@ fun SettingsScreen(
             val handle = operations.restoreReadingBackup(libraryStore, pending.payload)
             if (handle.accepted) {
                 backupNotice = null
+                webDavNotice = null
                 pendingRestore = null
-            } else backupNotice = BackupNotice("已有备份操作，请稍后再恢复。", failed = true)
+            } else backupNotice = BackupNotice("已有备份操作，请稍后再恢复。", PreferenceNoticeKind.ERROR)
         },
     )
     WebDavBackupDialog(
@@ -836,21 +882,13 @@ private data class PendingLibraryRestore(
     val info: LibraryBackupInfo,
 )
 
-private data class BackupNotice(val message: String, val failed: Boolean = false)
-
-@Composable
-private fun SettingsBackupReceipt(message: String, failed: Boolean) {
-    val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth().background(
-        if (failed) colors.errorContainer.copy(alpha = .52f) else colors.surfaceContainerHigh,
-        RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 8.dp)
-        .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Icon(if (failed) Icons.Outlined.ErrorOutline else Icons.Outlined.Info, null, Modifier.size(16.dp),
-            tint = if (failed) colors.error else colors.onSurfaceVariant)
-        Text(message, style = MaterialTheme.typography.bodySmall,
-            color = if (failed) colors.onErrorContainer else colors.onSurface)
-    }
+private data class BackupNotice(
+    val message: String,
+    val kind: PreferenceNoticeKind = PreferenceNoticeKind.DONE,
+    val savedConfiguration: Boolean = false,
+) {
+    val failed: Boolean get() = kind == PreferenceNoticeKind.ERROR
+    fun presentation() = PreferenceNotice(message, kind)
 }
 
 private data class WebDavBackupDraft(
@@ -858,12 +896,6 @@ private data class WebDavBackupDraft(
     val username: String,
     val password: String,
     val remotePath: String,
-)
-
-private data class WebDavFeedback(
-    val message: String,
-    val failed: Boolean = false,
-    val savedConfiguration: Boolean = false,
 )
 
 @Composable
@@ -901,7 +933,7 @@ private fun WebDavBackupDialog(
     config: WebDavBackupConfig,
     busy: String?,
     cancellable: Boolean,
-    notice: WebDavFeedback?,
+    notice: BackupNotice?,
     onDismiss: () -> Unit,
     onCancel: () -> Unit,
     onClosed: () -> Unit,
@@ -1039,21 +1071,33 @@ private fun WebDavBackupDialog(
                                 }
                             }
                         }
-                        CopyShelfValue(notice) { feedback ->
-                            Text(feedback.message, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (feedback.failed) colors.error else colors.onSurfaceVariant)
-                        }
-                        CopyShelfValue(busy) { operation ->
-                            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
-                                Text(when (operation) {
-                                    "webdav-save" -> "正在保存连接"
-                                    "webdav-upload" -> "正在上传备份"
-                                    "webdav-download" -> "正在读取备份"
-                                    else -> "正在处理配置"
-                                }, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        if (platformKind == PlatformKind.DESKTOP) {
+                            val phase = when (busy) {
+                                "webdav-save" -> "正在保存连接"
+                                "webdav-upload" -> "正在上传备份"
+                                "webdav-download" -> "正在读取备份"
+                                null -> null
+                                else -> "正在处理配置"
+                            }
+                            PreferenceOperationFeedback(phase?.let { PreferenceNotice(it, PreferenceNoticeKind.WORKING) }
+                                ?: notice?.presentation())
+                        } else {
+                            CopyShelfValue(notice) { feedback ->
+                                Text(feedback.message, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (feedback.failed) colors.error else colors.onSurfaceVariant)
+                            }
+                            CopyShelfValue(busy) { operation ->
+                                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
+                                    Text(when (operation) {
+                                        "webdav-save" -> "正在保存连接"
+                                        "webdav-upload" -> "正在上传备份"
+                                        "webdav-download" -> "正在读取备份"
+                                        else -> "正在处理配置"
+                                    }, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                }
                             }
                         }
                         Text(if (connectionOnly) "成人阅读进度使用此目录中的独立文件。"

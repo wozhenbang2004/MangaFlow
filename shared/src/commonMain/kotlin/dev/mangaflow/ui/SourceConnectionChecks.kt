@@ -9,6 +9,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Pause
@@ -84,6 +85,7 @@ internal fun SourceConnectionChecks(
     var checkedSources by remember(repository) { mutableStateOf<String?>(null) }
     var checkedConfiguration by remember(repository) { mutableStateOf<String?>(null) }
     var job by remember(repository) { mutableStateOf<Job?>(null) }
+    var runTargets by remember(repository) { mutableStateOf(emptySet<String>()) }
     var generation by remember(repository) { mutableIntStateOf(0) }
     var expanded by remember(repository) { mutableStateOf(false) }
     var showAll by remember(repository) { mutableStateOf(false) }
@@ -100,7 +102,7 @@ internal fun SourceConnectionChecks(
         job?.cancel()
         job = null
         rows = if (clear) emptyList() else rows.map { if (it.complete) it else it.copy(running = false, stopped = true, message = "已取消") }
-        if (clear) { checkedSettings = null; checkedSources = null; checkedConfiguration = null; showAll = false; failedOnly = false }
+        if (clear) { checkedSettings = null; checkedSources = null; checkedConfiguration = null; runTargets = emptySet(); showAll = false; failedOnly = false }
     }
     LaunchedEffect(settings, sourceKey, configuration) {
         if (checkedSettings != null && (checkedSettings !== store.state.value ||
@@ -125,6 +127,7 @@ internal fun SourceConnectionChecks(
         val queued = selected.map { source ->
             SourceConnectionResult(source, runCatching { store.sourceSnapshot(source.id) }.getOrNull())
         }
+        runTargets = queued.mapTo(mutableSetOf()) { it.source.id }
         rows = if (replace || !sameEvidence) queued else rows.filter { row -> selected.none { it.id == row.source.id } } + queued
         checkedSettings = capturedSettings
         checkedSources = capturedSources
@@ -180,6 +183,8 @@ internal fun SourceConnectionChecks(
         checkedConfiguration == repository.sourceConfigurationKey()
     val shown = if (valid) rows.sortedBy { row -> targets.indexOfFirst { it.id == row.source.id }.let { if (it < 0) Int.MAX_VALUE else it } } else emptyList()
     val completed = shown.count { it.complete }
+    val roundCompleted = shown.count { it.source.id in runTargets && it.complete }
+    val roundSize = runTargets.size
     val succeeded = shown.count { it.complete && it.usable }
     val failures = shown.filter { it.complete && !it.usable }
     val failed = failures.size
@@ -189,8 +194,10 @@ internal fun SourceConnectionChecks(
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(if (targets.size == 1) "当前线路检查" else "各源连接", style = MaterialTheme.typography.labelMedium)
-                Text(if (shown.isEmpty()) "按各源设置 · 仅检查目录" else completed.toString() + "/" + shown.size +
-                    " · 可用 " + succeeded + " · 失败 " + failed,
+                Text(if (shown.isEmpty()) "按各源设置 · 仅检查目录"
+                    else if (job != null) "本轮检查 $roundCompleted / $roundSize"
+                    else if (shown.any { it.stopped }) "检查已停止 · 已查 $completed / ${shown.size}"
+                    else "$completed/${shown.size} · 可用 $succeeded · 失败 $failed",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
@@ -200,8 +207,9 @@ internal fun SourceConnectionChecks(
                 MotionSwap(job != null, scaleContent = false) { checking ->
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         if (!checking) Icon(Icons.Outlined.Refresh, null, Modifier.size(14.dp))
-                        else if (completed > 0 && shown.size > 1) MotionBusyIndicator(
-                            progress = { completed.toFloat() / shown.size }, modifier = Modifier.size(14.dp), strokeWidth = 1.4.dp)
+                        else if (desktop) Icon(Icons.Outlined.Close, null, Modifier.size(14.dp))
+                        else if (roundSize > 1) MotionBusyIndicator(
+                            progress = { roundCompleted.toFloat() / roundSize }, modifier = Modifier.size(14.dp), strokeWidth = 1.4.dp)
                         else MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
                         Text(if (checking) "取消检查" else if (targets.size == 1) "检查目录" else "一键检查",
                             style = MaterialTheme.typography.labelMedium)
@@ -212,6 +220,12 @@ internal fun SourceConnectionChecks(
                 modifier = Modifier.size(44.dp), tooltip = if (expanded) "收起各源结果" else "查看各源结果") {
                 Icon(Icons.Outlined.ExpandMore, if (expanded) "收起各源结果" else "查看各源结果",
                     Modifier.size(16.dp).graphicsLayer { rotationZ = detailsAngle })
+            }
+        }
+        if (desktop) CopyShelfReveal(job != null && valid && roundSize > 1) {
+            if (roundSize > 1) key(generation) {
+                ManagementProgressTrack(roundCompleted.toFloat() / roundSize, "本轮来源检查进度", colors.primary,
+                    Modifier.fillMaxWidth().padding(horizontal = 4.dp).height(3.dp))
             }
         }
         val detailsContent: @Composable () -> Unit = {
