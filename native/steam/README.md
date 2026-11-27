@@ -1,12 +1,12 @@
 # Steam Workshop native component
 
-MangaFlow media adapter version 0.1.6; component identity 0.1.6-f541366.
+Kayo media adapter version 0.1.7 (component 0.1.7-f541366).
 
 The module links the real tapline core pinned to
 https://github.com/UnhingedSoftware/tapline/tree/f54136611519bef50cf31336e0c28a78eb175657.
 It does not launch Steam, SteamCMD, shell commands or a scene renderer.
 The fixed-source patch changes the actual Steam friendly-device label to
-MangaFlow so the user recognizes the login approval. No OS/platform or
+Kayo so the user recognizes the login approval. No OS/platform or
 authentication-protocol fields are altered. The same pinned patch also threads
 immutable job network routes through the existing maintained transport.
 
@@ -106,7 +106,7 @@ The adapter never calls TokenStore, automatic login or local Steam discovery.
   authVerifying describe that existing attempt, not a newly authenticated account.
   Mobile/email approvals continue polling without a code; successful login uses the
   same verified-client-session and platform-vault handoff as QR. Passwords and codes
-  are never persisted, logged, included in state or sent to MangaFlow servers.
+  are never persisted, logged, included in state or sent to Kayo servers.
 - account validates the passed session and emits account/account/steamId,
   followed by complete. Network/session_unavailable does not mean the token
   was revoked; the Kotlin caller must retain the saved credential.

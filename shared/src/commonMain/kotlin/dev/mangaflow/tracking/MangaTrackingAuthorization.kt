@@ -1,5 +1,6 @@
 package dev.mangaflow.tracking
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.platform.randomUuid
@@ -273,7 +274,7 @@ private fun bangumiTokenObserver(nonce: String, document: String, bridgeExpressi
       const prefillName = () => {
         if (!officialPage()) return;
         const name = document.querySelector('#tokenName[name="name"]');
-        if (name && name.value === '') name.value = 'MangaFlow';
+        if (name && name.value === '') name.value = ${JsonPrimitive(APP_DISPLAY_NAME)};
       };
       if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', prefillName, {once: true});
       else prefillName();

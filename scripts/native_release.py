@@ -248,6 +248,9 @@ def upload_native_asset(release_id: int, path: Path, digest: str) -> dict:
     content = path.read_bytes()
     url = (f"https://uploads.github.com/repos/{REPOSITORY}/releases/{release_id}/assets"
            f"?name={quote(path.name)}")
+    if path.suffix in {".msi", ".exe"}:
+        label = f"Kayo {os.environ['MANGA_VERSION']} · Windows x64 ({path.suffix[1:].upper()})"
+        url += "&label=" + quote(label, safe="")
     content_type = "application/json" if path.suffix == ".json" else "application/octet-stream"
     for attempt in range(5):
         try:

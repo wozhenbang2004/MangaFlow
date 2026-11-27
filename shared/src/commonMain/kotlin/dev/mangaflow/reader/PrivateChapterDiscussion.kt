@@ -30,6 +30,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.data.MangaReview
 import dev.mangaflow.data.ReviewKind
 import dev.mangaflow.data.ReviewPage
@@ -68,7 +69,7 @@ internal class PrivateChapterDiscussionState(
     private val scope: CoroutineScope,
 ) {
     val canConnect = store.canConnect(config)
-    val subject = ReviewSource("mangaflow-webdav", "MangaFlow 私有讨论", ReviewStatus.READY, "",
+    val subject = ReviewSource("mangaflow-webdav", "$APP_DISPLAY_NAME 私有讨论", ReviewStatus.READY, "",
         subjectId = key.digest, supportsReplies = true)
     var space by mutableStateOf(store.selectedSpace(config))
         private set

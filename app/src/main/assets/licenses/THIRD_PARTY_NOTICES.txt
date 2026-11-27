@@ -1,5 +1,7 @@
 # Third-party notices
 
+Kayo was previously distributed as MangaFlow.
+
 ## Anime4K video enhancement
 
 The player includes the original Restore CNN S/M and Upscale CNN x2 S/M

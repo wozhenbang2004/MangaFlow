@@ -1,5 +1,6 @@
 package dev.mangaflow.update
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.platform.PlatformContext
 import kotlinx.coroutines.flow.StateFlow
 
@@ -21,7 +22,7 @@ data class UpdateState(
     val release: AppRelease? = null,
     val downloaded: Long = 0,
     val total: Long = 0,
-    val message: String = "检查漫流的新版本",
+    val message: String = "检查 $APP_DISPLAY_NAME 的新版本",
     val lastChecked: Long = 0,
 ) {
     val busy: Boolean get() = phase in setOf(UpdatePhase.CHECKING, UpdatePhase.DOWNLOADING, UpdatePhase.VERIFYING)

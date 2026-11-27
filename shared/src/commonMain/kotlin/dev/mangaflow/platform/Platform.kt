@@ -1,5 +1,6 @@
 package dev.mangaflow.platform
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import androidx.compose.runtime.staticCompositionLocalOf
 import coil3.PlatformContext as ImagePlatformContext
 import kotlin.time.Clock
@@ -8,7 +9,7 @@ import kotlin.time.Clock
 expect abstract class PlatformContext
 
 val LocalMangaContext = staticCompositionLocalOf<PlatformContext> {
-    error("MangaFlow's platform application context is missing")
+    error("$APP_DISPLAY_NAME's platform application context is missing")
 }
 
 expect fun applicationContext(context: PlatformContext): PlatformContext

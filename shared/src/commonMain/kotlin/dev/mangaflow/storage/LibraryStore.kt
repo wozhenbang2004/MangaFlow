@@ -1,5 +1,6 @@
 package dev.mangaflow.storage
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.platform.PlatformContext as Context
 import dev.mangaflow.platform.storage.*
 import kotlinx.atomicfu.locks.synchronized
@@ -536,7 +537,7 @@ class LibraryStore(context: Context) {
     private suspend fun decodeBackup(encoded: String): DecodedBackup {
         requireBackupSize(encoded, "阅读备份超过 8 MiB，已停止读取。")
         val root = JSONObject(encoded)
-        require(root.optString("format") == BACKUP_FORMAT) { "这不是 MangaFlow 备份文件" }
+        require(root.optString("format") == BACKUP_FORMAT) { "请选择 $APP_DISPLAY_NAME 阅读备份文件" }
         require(root.optInt("version") == BACKUP_VERSION) { "备份版本暂不支持" }
         val array = root.optJSONArray("entries") ?: error("备份内容不完整")
         val values = linkedMapOf<String, Any>()

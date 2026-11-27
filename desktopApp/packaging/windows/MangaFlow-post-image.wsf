@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<job>
+  <script language="JScript"><![CDATA[
+    // jpackage runs this in the installer build, before WiX compiles its generated inputs.
+    var fs = new ActiveXObject("Scripting.FileSystemObject");
+    var directory = fs.GetParentFolderName(WScript.ScriptFullName);
+
+    function editDocument(name, edit) {
+        var path = fs.BuildPath(directory, name);
+        var doc = new ActiveXObject("Msxml2.DOMDocument.6.0");
+        doc.async = false;
+        doc.preserveWhiteSpace = true;
+        if (!doc.load(path)) throw new Error(doc.parseError.reason);
+        doc.setProperty("SelectionNamespaces", "xmlns:w='http://schemas.microsoft.com/wix/2006/wi'");
+        edit(doc);
+        doc.save(path);
+    }
+
+    editDocument("main.wxs", function(doc) {
+        doc.selectSingleNode("/w:Wix/w:Product").setAttribute("Name", "Kayo");
+    });
+    editDocument("bundle.wxf", function(doc) {
+        var links = doc.selectNodes("//w:Shortcut[@Name='MangaFlow']");
+        for (var i = 0; i < links.length; i++) {
+            var link = links.item(i);
+            var component = link.parentNode;
+            link.setAttribute("Name", "Kayo");
+            // Each renamed .lnk is a new MSI resource, with a stable identity on subsequent updates.
+            component.setAttribute("Guid", component.parentNode.getAttribute("Id") === "DesktopFolder"
+                ? "{92F0DDD3-871A-4DBB-B79B-9231F7C4D6A1}"
+                : "{165502A0-5684-4469-AC1F-E7D6C2DEB26D}");
+        }
+    });
+  ]]></script>
+</job>

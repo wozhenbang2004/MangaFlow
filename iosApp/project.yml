@@ -36,7 +36,8 @@ targets:
     info:
       path: Info.plist
       properties:
-        CFBundleDisplayName: 漫流
+        CFBundleDisplayName: Kayo
+        CFBundleName: Kayo
         CFBundleShortVersionString: '$(MARKETING_VERSION)'
         CFBundleVersion: '$(CURRENT_PROJECT_VERSION)'
         MangaFlowDistributionURL: '$(MANGAFLOW_IOS_DISTRIBUTION_URL)'

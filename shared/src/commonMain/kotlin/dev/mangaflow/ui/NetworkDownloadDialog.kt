@@ -44,6 +44,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.currentStateAsState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.net.*
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.data.UnifiedMangaRepository
@@ -508,8 +509,8 @@ private fun relayPhaseLabel(state: RelayLinkState): String = when (state.phase) 
 }
 
 private fun relayConflictLabel(conflict: String): String = when {
-    conflict.contains("bypass", ignoreCase = true) -> "MangaFlow 已被设为绕过 VPN，请在 Relay 调整应用规则。"
-    conflict.contains("block", ignoreCase = true) -> "MangaFlow 已被禁止联网，请在 Relay 调整应用规则。"
+    conflict.contains("bypass", ignoreCase = true) -> "$APP_DISPLAY_NAME 已被设为绕过 VPN，请在 Relay 调整应用规则。"
+    conflict.contains("block", ignoreCase = true) -> "$APP_DISPLAY_NAME 已被禁止联网，请在 Relay 调整应用规则。"
     conflict.contains("global", ignoreCase = true) -> "全局模式需要额外的例外授权，请在 Relay 查看授权范围。"
     conflict.contains("revision", ignoreCase = true) -> "Relay 的规则已变化，请先核对后重试同步。"
     conflict.contains("app_policy", ignoreCase = true) -> "Relay 的应用强制出口与源级规则冲突，请在 Relay 调整。"
@@ -608,7 +609,7 @@ private fun NetworkConnectionHelp(relayInstalled: Boolean) {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("连接与识别", style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
         listOf(
-            if (relayInstalled) "Relay 联动只管理 MangaFlow 自己的规则。首次需要授权；规则保存、核心应用和实际请求响应分别记录。"
+            if (relayInstalled) "Relay 联动只管理 $APP_DISPLAY_NAME 自己的规则。首次需要授权；规则保存、核心应用和实际请求响应分别记录。"
                 else "识别系统公开的 VPN、代理地址和自动代理配置。检测到配置不代表请求一定使用它。",
             if (relayInstalled) "仅选择 Relay 且启用联动后，已绑定请求由 Relay 专用入口执行。绑定未就绪会明确失败；没有绑定的直连仍可能受系统 VPN 接管。选择自定义地址不使用 Relay 专用入口。"
                 else "直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。外部软件需提供相应的分流能力。",

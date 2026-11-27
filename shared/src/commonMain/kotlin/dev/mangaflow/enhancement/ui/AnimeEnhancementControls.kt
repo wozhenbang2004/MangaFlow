@@ -14,6 +14,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.enhancement.*
 import dev.mangaflow.enhancement.engine.*
 import dev.mangaflow.platform.PlatformKind
@@ -247,7 +248,7 @@ internal fun AnimeEnhancementFrames(policy: EnhancementPolicy, inventory: Engine
             it.readiness == EngineReadiness.NOT_INSTALLED }
     EnhancementQuiet(when {
         policy.frameMode == FrameMode.ORIGINAL -> "按文件原始帧率播放。"
-        missingDesktopRuntime -> "安装实时播放器组件后，重新打开漫流即可使用当前补帧目标。"
+        missingDesktopRuntime -> "安装实时播放器组件后，重新打开 $APP_DISPLAY_NAME 即可使用当前补帧目标。"
         ready.isEmpty() -> "补帧组件尚未就绪，目标已保留。"
         ready.none { it.realtime && it.videoOutput == null } -> "当前支持离线补帧，可从离线任务打开处理后的版本。"
         policy.frameQuality != FrameQuality.BALANCED -> "实时补帧仅在均衡档开启；当前所选质量用于离线处理。"

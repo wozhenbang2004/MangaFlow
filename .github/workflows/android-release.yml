@@ -1,5 +1,5 @@
 name: Android release
-run-name: MangaFlow 0.1.${{ github.run_number }}
+run-name: Kayo 0.1.${{ github.run_number }}
 
 on:
   push:

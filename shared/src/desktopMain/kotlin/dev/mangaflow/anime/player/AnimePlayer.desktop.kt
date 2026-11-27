@@ -1,5 +1,7 @@
 package dev.mangaflow.anime.player
 
+import dev.mangaflow.APP_DISPLAY_NAME
+
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
@@ -148,9 +150,9 @@ private class DesktopAnimePlayer(
     } catch (cancel: CancellationException) {
         throw cancel
     } catch (failure: LinkageError) {
-        throw AnimePlayerInitializationException("本机视频内核无法加载，请重新打开漫流。", failure)
+        throw AnimePlayerInitializationException("本机视频内核无法加载，请重新打开 $APP_DISPLAY_NAME。", failure)
     } catch (failure: Exception) {
-        throw AnimePlayerInitializationException("本机视频播放器启动失败，请重试或重新打开漫流。", failure)
+        throw AnimePlayerInitializationException("本机视频播放器启动失败，请重试或重新打开 $APP_DISPLAY_NAME。", failure)
     }
 
     override suspend fun createDecoderStartup(byteLimit: Long): MediampPlayer = createMpv(byteLimit)

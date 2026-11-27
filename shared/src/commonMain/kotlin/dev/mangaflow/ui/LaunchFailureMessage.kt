@@ -1,5 +1,6 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.ui.platform.*
 
 import androidx.compose.foundation.background
@@ -34,7 +35,7 @@ fun LaunchFailureMessage(report: String, onRetry: () -> Unit) {
             EmptyMessage("应用上次意外退出", "可复制错误详情，也可以重试打开。",
                 action = "重试打开", onAction = onRetry)
             TextButton(onClick = {
-                copied = copyText(context, "MangaFlow 错误详情", report)
+                copied = copyText(context, "$APP_DISPLAY_NAME 错误详情", report)
             }) { Text(if (copied) "已复制" else "复制错误详情") }
         }
     }

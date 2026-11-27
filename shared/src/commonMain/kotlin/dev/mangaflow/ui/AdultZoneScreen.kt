@@ -42,6 +42,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.sources.BodySourceInfo
 import dev.mangaflow.data.sources.SourceAccountState
@@ -171,7 +172,7 @@ internal fun ContentProfileAccountScreen(
                             } else null, initiallyShowLogin = initialSourceId == source.id, active = active)
                     }
                 } else if (offered != null) {
-                    Text("此来源未提供漫流内账号登录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("此来源未提供 $APP_DISPLAY_NAME 内账号登录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else if (capabilityUnavailable) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text("暂时无法核对这个来源的账号能力", Modifier.weight(1f),
@@ -182,7 +183,7 @@ internal fun ContentProfileAccountScreen(
 
                 if (website != null && (offered?.supports(SourceFeature.ACCOUNT) != true || accountReadError)) {
                     Column(Modifier.fillMaxWidth().padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("网页登录不会把账号或登录状态带回漫流。", style = MaterialTheme.typography.bodySmall,
+                        Text("网页登录不会把账号或登录状态带回 $APP_DISPLAY_NAME。", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         MotionTextButton(onClick = {
                             val current = repository.reviewedProfileBrowserAccount(source)

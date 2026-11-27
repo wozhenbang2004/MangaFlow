@@ -2,6 +2,7 @@ package dev.mangaflow.desktop
 
 import androidx.compose.runtime.*
 import kotlinx.coroutines.*
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.MangaViewModel
 import dev.mangaflow.desktop.relay.registerWindowsRelayCompanion
 import dev.mangaflow.anime.ui.ProvideWindowsVideoDock
@@ -68,8 +69,8 @@ fun main(args: Array<String>) {
         ?: File(userDirectory, "AppData/Local").absolutePath
     val data = File(localData, "MangaFlow")
     val cache = File(data, "cache")
-    check(data.isDirectory || data.mkdirs()) { "无法创建漫流数据目录：$data" }
-    check(cache.isDirectory || cache.mkdirs()) { "无法创建漫流缓存目录：$cache" }
+    check(data.isDirectory || data.mkdirs()) { "无法创建 ${APP_DISPLAY_NAME} 数据目录：$data" }
+    check(cache.isDirectory || cache.mkdirs()) { "无法创建 ${APP_DISPLAY_NAME} 缓存目录：$cache" }
     val context = object : PlatformContext(data.absolutePath, cache.absolutePath) {}
     registerWindowsRelayCompanion()
     initializeMangaFlow(context)
@@ -79,6 +80,9 @@ fun main(args: Array<String>) {
     var lastModel: MangaViewModel? = null
     try {
         application(exitProcessOnExit = false) {
+            if ("--after-update" in args) LaunchedEffect(Unit) {
+                withContext(Dispatchers.IO) { refreshUserShortcutNames() }
+            }
             var model by remember { mutableStateOf<MangaViewModel?>(null) }
             var closing by remember { mutableStateOf(false) }
             val scope = rememberCoroutineScope()
@@ -96,7 +100,7 @@ fun main(args: Array<String>) {
             var playbackTitle by remember { mutableStateOf<String?>(null) }
             val reportPlaybackTitle = remember { { value: String? -> playbackTitle = value } }
             val taskTitle = readerTitle ?: playbackTitle.takeIf { fullscreen.animePlaybackVisible }
-            val title = taskTitle?.takeIf { it.isNotBlank() }?.let { "$it · 漫流" } ?: "漫流"
+            val title = taskTitle?.takeIf { it.isNotBlank() }?.let { "$it · $APP_DISPLAY_NAME" } ?: APP_DISPLAY_NAME
             val requestFullscreen: (Boolean) -> Unit = { enabled ->
                 if (enabled && !fullscreen.active && !fullscreen.restoring) {
                     windowPreferences.capture(windowState.desktopSnapshot())
@@ -211,7 +215,7 @@ fun main(args: Array<String>) {
         val saved = runBlocking(Dispatchers.IO) { lastModel?.library?.flushPendingWrites() ?: flushLocalPreferences() }
         // Embedded website/video windows belong to this application process.
         runCatching { Class.forName("javafx.application.Platform").getMethod("exit").invoke(null) }
-        if (!saved) System.err.println("漫流未能保存关闭时的最终记录，请检查存储空间。")
+        if (!saved) System.err.println("${APP_DISPLAY_NAME} 未能保存关闭时的最终记录，请检查存储空间。")
         kotlin.system.exitProcess(if (saved) 0 else 1)
     }
 }
@@ -386,6 +390,6 @@ private class DesktopWindowPreferences(context: PlatformContext) {
             currentBounds?.let { bounds -> desktopWorkAreas().bestFor(bounds)?.let { edit.putString("monitor", it.id) } }
             // Existing preference draining covers normal close and installer handoff.
             edit.apply()
-        }.onFailure { System.err.println("漫流未能保存窗口布局。") }
+        }.onFailure { System.err.println("${APP_DISPLAY_NAME} 未能保存窗口布局。") }
     }
 }

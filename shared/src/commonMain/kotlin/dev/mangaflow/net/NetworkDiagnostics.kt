@@ -1,5 +1,6 @@
 package dev.mangaflow.net
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.data.CopyAnonymousIdentityStore
 import dev.mangaflow.data.CopyMangaConfig
 import dev.mangaflow.platform.PlatformContext
@@ -48,7 +49,7 @@ data class NetworkDiagnosis(
 ) {
     /** An allowlist report: no URLs, proxy endpoints, identities, headers or exception chains. */
     fun safeReport(): String = buildString {
-        appendLine("MangaFlow 连接检查")
+        appendLine("$APP_DISPLAY_NAME 连接检查")
         appendLine("目标：" + when (target) { NetworkProbeTarget.CATALOG -> "漫画目录接口"; NetworkProbeTarget.UPDATE -> "更新接口" })
         appendLine("检查时间（Unix ms）：$checkedAt")
         results.forEach { result ->

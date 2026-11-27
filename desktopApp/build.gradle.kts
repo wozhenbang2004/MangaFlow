@@ -1,4 +1,5 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask
 import org.jetbrains.compose.desktop.application.tasks.AbstractProguardTask
 import java.io.RandomAccessFile
 
@@ -31,19 +32,29 @@ compose.desktop {
         }
         nativeDistributions {
             targetFormats(TargetFormat.Exe, TargetFormat.Msi)
+            // Installed launcher and configuration names are also used by the updater and Relay.
             packageName = "MangaFlow"
             packageVersion = mangaVersion.get().substringBefore('-')
-            description = "MangaFlow manga reader"
-            vendor = "MangaFlow"
+            description = "Kayo"
+            vendor = "Kayo"
             modules("java.desktop", "java.net.http", "java.naming", "java.management", "jdk.management", "jdk.jfr", "jdk.management.jfr", "java.scripting", "jdk.unsupported", "jdk.crypto.ec", "jdk.accessibility", "jdk.jsobject", "jdk.xml.dom", "java.xml", "java.logging", "java.datatransfer", "jdk.unsupported.desktop", "java.prefs", "java.sql", "jdk.zipfs")
             windows {
-                menuGroup = "MangaFlow"
+                menuGroup = "Kayo"
                 shortcut = true
                 dirChooser = true
                 upgradeUuid = "6e16a804-1c0c-4a84-a348-631288194ff9"
                 iconFile.set(project.file("icons/mangaflow.ico"))
             }
         }
+    }
+}
+
+// JDK 21 derives MSI product and shortcut captions from the stable launcher filename.
+val windowsInstallerResources = layout.projectDirectory.dir("packaging/windows")
+tasks.withType<AbstractJPackageTask>().configureEach {
+    if (targetFormat == TargetFormat.Msi || targetFormat == TargetFormat.Exe) {
+        inputs.dir(windowsInstallerResources)
+        freeArgs.addAll("--resource-dir", "\"${windowsInstallerResources.asFile.invariantSeparatorsPath}\"")
     }
 }
 

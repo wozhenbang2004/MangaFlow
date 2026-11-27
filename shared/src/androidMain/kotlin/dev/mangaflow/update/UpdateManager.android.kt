@@ -21,6 +21,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.AtomicFile
 import android.util.Base64
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeStore
 import dev.mangaflow.net.DownloadCategory
@@ -507,7 +508,7 @@ actual class UpdateManager private constructor(private val context: Context) {
             withContext(Dispatchers.Main) {
                 if (activity.isFinishing || activity.isDestroyed) return@withContext
                 if (!context.packageManager.canRequestPackageInstalls()) {
-                    _state.value = _state.value.copy(message = "请允许漫流安装应用，返回后再次点击安装")
+                    _state.value = _state.value.copy(message = "请允许 $APP_DISPLAY_NAME 安装应用，返回后再次点击安装")
                     activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
                 } else {
                     // Session owns its copy; cache cleanup cannot revoke the installer's APK.
@@ -776,7 +777,7 @@ actual class UpdateManager private constructor(private val context: Context) {
         manager.createNotificationChannel(NotificationChannel(CHANNEL, "应用更新", NotificationManager.IMPORTANCE_DEFAULT))
         manager.notify(JOB_ID + 1, Notification.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .setContentTitle("继续确认漫流更新")
+            .setContentTitle("继续确认 $APP_DISPLAY_NAME 更新")
             .setContentText("轻触打开系统安装确认；不会自动安装")
             .setContentIntent(pending).setAutoCancel(true).build())
     }
@@ -1099,7 +1100,7 @@ actual class UpdateManager private constructor(private val context: Context) {
             JOB_ID,
             Notification.Builder(context, CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentTitle("漫流 ${release.versionName} 已发布")
+                .setContentTitle("$APP_DISPLAY_NAME ${release.versionName} 已发布")
                 .setContentText("轻触查看更新内容并下载安装")
                 .setContentIntent(pending)
                 .setAutoCancel(true)

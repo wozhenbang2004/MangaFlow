@@ -21,7 +21,7 @@ class CrashReportActivity : Activity() {
             val report = buildReport()
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
-                putExtra(Intent.EXTRA_SUBJECT, "漫流错误日志")
+                putExtra(Intent.EXTRA_SUBJECT, "${getString(R.string.app_name)} 错误日志")
                 putExtra(Intent.EXTRA_TEXT, report)
             }
             startActivity(Intent.createChooser(send, "复制或分享错误日志"))
@@ -30,7 +30,7 @@ class CrashReportActivity : Activity() {
     }
 
     private fun buildReport(): String = buildString {
-        appendLine("MangaFlow ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+        appendLine(LaunchFailure.reportHeader)
         appendLine("Android ${Build.VERSION.RELEASE}, API ${Build.VERSION.SDK_INT}, ${Build.MANUFACTURER} ${Build.MODEL}")
         appendLine()
         appendLine("应用异常记录")

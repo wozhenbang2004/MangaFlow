@@ -1,6 +1,7 @@
 package dev.mangaflow.ui
 
 import androidx.compose.material.icons.outlined.ViewList
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.anime.ui.AnimeWorkspace
 import dev.mangaflow.anime.ui.AnimeWorkspaceDestination
 import androidx.compose.material.icons.outlined.Tv
@@ -1414,7 +1415,7 @@ private fun MangaFlowContent(
                             Row(Modifier.fillMaxWidth().padding(start = 14.dp, bottom = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
-                                    Text("MangaFlow", style = MaterialTheme.typography.titleLarge,
+                                    Text(APP_DISPLAY_NAME, style = MaterialTheme.typography.titleLarge,
                                         fontSize = 24.sp, lineHeight = 29.sp, letterSpacing = (-.6f).sp,
                                         fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(appVersion, style = mangaMetricValueStyle(), color = MaterialTheme.colorScheme.onSurfaceVariant,

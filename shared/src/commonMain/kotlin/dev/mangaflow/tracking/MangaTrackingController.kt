@@ -1,5 +1,6 @@
 package dev.mangaflow.tracking
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
@@ -105,7 +106,7 @@ class MangaTrackingController(
             MangaTrackingProvider.ANILIST -> {
                 val clientId = mutable.value.aniListClientId.takeIf(String::isNotBlank)
                 if (clientId == null) {
-                    fail("此安装包尚未配置漫流的 AniList 应用 ID，可先使用备用令牌连接，或更新到已配置的版本。")
+                    fail("此安装包尚未配置 $APP_DISPLAY_NAME 的 AniList 应用 ID，可先使用备用令牌连接，或更新到已配置的版本。")
                     return null
                 }
                 "https://anilist.co/api/v2/oauth/authorize".toHttpUrlOrNull()!!.newBuilder()

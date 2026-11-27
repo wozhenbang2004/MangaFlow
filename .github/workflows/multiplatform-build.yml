@@ -1,5 +1,5 @@
 name: Multiplatform applications
-run-name: MangaFlow applications · ${{ github.sha }}
+run-name: Kayo applications · ${{ github.sha }}
 
 on:
   push:

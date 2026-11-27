@@ -1,5 +1,7 @@
 package dev.mangaflow.enhancement.engine
 
+import dev.mangaflow.APP_DISPLAY_NAME
+
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
@@ -96,7 +98,7 @@ internal class DesktopEngineRuntime(private val directory: File) {
         val file = File(directory, "${pack.id}-${pack.sha256}.partial")
         val lock = File(directory, "${pack.id}.download.lock")
         FileChannel.open(lock.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE, NOFOLLOW_LINKS).use { channel ->
-            checkNotNull(channel.tryLock()) { "另一个漫流进程正在准备该组件" }.use {
+            checkNotNull(channel.tryLock()) { "另一个 $APP_DISPLAY_NAME 进程正在准备该组件" }.use {
                 if (alreadyInstalled()) return
                 check(!Files.exists(file.toPath(), NOFOLLOW_LINKS) || Files.isRegularFile(file.toPath(), NOFOLLOW_LINKS)) {
                     "组件临时文件不可用"

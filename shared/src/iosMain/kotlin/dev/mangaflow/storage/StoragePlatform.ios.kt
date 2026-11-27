@@ -2,6 +2,8 @@
 
 package dev.mangaflow.storage
 
+import dev.mangaflow.APP_DISPLAY_NAME
+
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.storage.StorageFile
 import dev.mangaflow.platform.storage.StorageInput
@@ -82,7 +84,7 @@ internal actual fun beginDownloadExecution(onExpiration: () -> Unit): () -> Unit
         if (active != UIBackgroundTaskInvalid) UIApplication.sharedApplication.endBackgroundTask(active)
     }
     val start = {
-        val acquired = UIApplication.sharedApplication.beginBackgroundTaskWithName("MangaFlow下载") {
+        val acquired = UIApplication.sharedApplication.beginBackgroundTaskWithName("$APP_DISPLAY_NAME 下载") {
             end()
             onExpiration()
         }

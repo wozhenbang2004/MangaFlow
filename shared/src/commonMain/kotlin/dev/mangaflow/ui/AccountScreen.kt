@@ -38,6 +38,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.AccountUiState
 import dev.mangaflow.account.CloudHistoryEntry
 import dev.mangaflow.account.CopyLoginRoute
@@ -362,7 +363,7 @@ internal fun AccountError(message: String, busy: Boolean, onRetry: (() -> Unit)?
         }
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             TextButton(onClick = {
-                clipboard.setText(AnnotatedString("MangaFlow ${versionName}\n$message"))
+                clipboard.setText(AnnotatedString("$APP_DISPLAY_NAME $versionName\n$message"))
                 copied = true
             }, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
                 MotionSwap(copied, scaleContent = false) { done -> Text(if (done) "已复制" else "复制错误") }

@@ -1,5 +1,5 @@
 <resources>
-    <string name="wallpaper_import_target">添加到漫流壁纸</string>
+    <string name="wallpaper_import_target">添加到 Kayo 壁纸</string>
     <string name="wallpaper_import_title">添加壁纸</string>
     <string name="wallpaper_import_checking">正在检查分享的文件…</string>
     <string name="wallpaper_import_count">%1$d 项 · 图片或静音视频</string>
@@ -8,7 +8,7 @@
     <string name="wallpaper_import_cancel">取消</string>
     <string name="wallpaper_import_stop">停止</string>
     <string name="wallpaper_import_done">完成</string>
-    <string name="wallpaper_import_open">打开漫流</string>
+    <string name="wallpaper_import_open">打开 Kayo</string>
     <string name="wallpaper_import_progress">正在添加 %1$d / %2$d</string>
     <string name="wallpaper_import_result">已添加 %1$d 项 · 未添加 %2$d 项</string>
     <string name="wallpaper_import_stopped">已停止，已添加的壁纸会保留。未完成文件可重新分享。</string>

@@ -114,7 +114,7 @@ function Close-LocalApplication([string]$Versions) {
         try { $processPath = $process.Path } catch { continue }
         if (-not $processPath -or -not $processPath.StartsWith($Versions + '\', [StringComparison]::OrdinalIgnoreCase)) { continue }
         Write-Message '正在正常关闭本机渠道的旧版本…'
-        if (-not $process.CloseMainWindow()) { throw '请先关闭本机渠道的 MangaFlow 窗口，再双击更新。' }
+        if (-not $process.CloseMainWindow()) { throw '请先关闭本机渠道的 Kayo 窗口，再双击更新。' }
         if (-not $process.WaitForExit(15000)) { throw '旧窗口尚未关闭；请关闭它后再更新。旧版本保持可用。' }
     }
 }
@@ -141,7 +141,7 @@ function Assert-NoOtherChannel([string]$Versions) {
         $processPath = $null
         try { $processPath = $process.Path } catch { }
         if (-not $processPath -or -not $processPath.StartsWith($Versions + '\', [StringComparison]::OrdinalIgnoreCase)) {
-            throw '请先关闭其他渠道的 MangaFlow 窗口，再启动本机版本；本脚本不会关闭它。'
+            throw '请先关闭其他渠道的 Kayo 窗口，再启动本机版本；本脚本不会关闭它。'
         }
     }
 }
@@ -162,7 +162,7 @@ try {
     $logs = Assert-OwnedPath (Join-Path $rootPath 'logs')
     $null = New-Item -ItemType Directory -Path $logs -Force
     $script:logPath = Join-Path $logs ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + $PID + '.log')
-    Write-Message 'MangaFlow 本机渠道：拉取代码 → 增量构建 → 替换 → 启动'
+    Write-Message 'Kayo 本机渠道：拉取代码 → 增量构建 → 替换 → 启动'
     Write-Message "本机构建目录：$rootPath"
     Write-Message '首次需要下载依赖；之后保留源码、Gradle 与 Rust 缓存。'
     # Resolve installed tools before isolating Rust caches; mise shims otherwise

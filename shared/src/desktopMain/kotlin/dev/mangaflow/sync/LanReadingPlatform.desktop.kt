@@ -1,5 +1,7 @@
 package dev.mangaflow.sync
 
+import dev.mangaflow.APP_DISPLAY_NAME
+
 import dev.mangaflow.platform.PlatformContext
 import java.net.Inet4Address
 import java.net.InetSocketAddress
@@ -14,7 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 internal actual fun createLanReadingTransport(
     context: PlatformContext, scope: CoroutineScope, listener: LanReadingTransportListener,
 ): LanReadingTransport = JvmLanReadingTransport(context, scope, listener,
-    System.getenv("COMPUTERNAME")?.takeIf(String::isNotBlank) ?: "Windows 漫流",
+    System.getenv("COMPUTERNAME")?.takeIf(String::isNotBlank) ?: "Windows $APP_DISPLAY_NAME",
     localAddresses = ::desktopLanAddresses, newDiscovery = { DesktopLanServiceDiscovery() })
 
 /** Bind to physical, directly connected adapters; VPN/default proxy settings are not inherited. */
@@ -76,7 +78,7 @@ private class DesktopLanServiceDiscovery : LanServiceDiscovery {
                 service?.let { services.remove(it); runCatching { it.close() } }
             }
         }
-        if (services.isEmpty() && !closed) failed("等待可用的局域网；请连接同一 Wi-Fi 或有线网络，并允许漫流通过专用网络防火墙。")
+        if (services.isEmpty() && !closed) failed("等待可用的局域网；请连接同一 Wi-Fi 或有线网络，并允许 $APP_DISPLAY_NAME 通过专用网络防火墙。")
     }
 
     override fun close() {

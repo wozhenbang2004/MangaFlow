@@ -1,5 +1,7 @@
 # Third-party notices
 
+Kayo was previously distributed as MangaFlow.
+
 ## Local PDF import and LAN reading synchronization (2026-11-22)
 
 - Windows PDF import uses Apache PDFBox 3.0.8 and Apache JBIG2 ImageIO 3.0.5, licensed under Apache-2.0 with their bundled notices. The exact upstream license and notice texts are retained in `third_party/pdf-import/`. Sources: https://github.com/apache/pdfbox/tree/3.0.8 and https://github.com/apache/pdfbox-jbig2/tree/3.0.5. No JAI JPEG2000 codec is added; an unsupported image decoder fails the import explicitly. Android uses the system `android.graphics.pdf.PdfRenderer` API.

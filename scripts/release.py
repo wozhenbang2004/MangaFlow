@@ -255,7 +255,7 @@ def publish():
     body = (
         f"{value['notes']}\n\n"
         f"Android 8.0+ · versionCode {value['versionCode']}\n\n"
-        "下载 APK 安装；已安装漫流的用户可以在应用中检查更新并覆盖升级。\n\n"
+        f"[下载 Kayo 安卓安装包]({payload_url(value)})。已安装旧版的用户可在应用内检查更新，直接覆盖升级。\n\n"
         "AI 识别组件在应用中按需下载，仅获取当前设备架构所需文件。\n\n"
         f"Source: `{value['sourceCommit']}`\n\n"
         "本流水线只编译、签名和发布安装包，未运行测试。"
@@ -264,7 +264,7 @@ def publish():
         # Keep the release hidden until every public asset is uploaded.
         release = request(API + "/releases", "POST", {
             "tag_name": tag, "target_commitish": value["sourceCommit"],
-            "name": "漫流 " + value["versionName"], "body": body,
+            "name": "Kayo " + value["versionName"], "body": body,
             "draft": True, "prerelease": False,
         })
     packages, runtime_paths = runtime_assets(DIST / "runtime-assets")
@@ -296,7 +296,10 @@ def publish():
             if previous.get("digest") != expected or previous["size"] != len(data):
                 raise RuntimeError("An existing draft asset has different bytes; it will not be replaced: " + file.name)
             continue
-        upload = release["upload_url"].split("{", 1)[0] + "?name=" + urllib.parse.quote(file.name)
+        params = {"name": file.name}
+        if file.suffix == ".apk":
+            params["label"] = f"Kayo {value['versionName']} · Android APK"
+        upload = release["upload_url"].split("{", 1)[0] + "?" + urllib.parse.urlencode(params)
         uploaded = request(upload, "POST", data, binary=True, content_type="application/octet-stream")
         if uploaded.get("digest") is None:
             uploaded = request(API + "/releases/assets/" + str(uploaded["id"]))
@@ -313,7 +316,7 @@ def publish():
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as file:
-            file.write(f"## 漫流 {value['versionName']}\n\n[下载 APK]({payload_url(value)}) · [Release]({result['html_url']})\n\n已编译、签名并发布。未运行测试。\n")
+            file.write(f"## Kayo {value['versionName']}\n\n[下载 APK]({payload_url(value)}) · [Release]({result['html_url']})\n\n已编译、签名并发布。未运行测试。\n")
 
 
 def payload_url(value):

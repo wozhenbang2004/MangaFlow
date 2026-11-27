@@ -1,5 +1,7 @@
 package dev.mangaflow.net
 
+import dev.mangaflow.APP_DISPLAY_NAME
+
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.storage.preferences
 import kotlinx.coroutines.CancellationException
@@ -157,7 +159,7 @@ private class DesktopRelayLink(context: PlatformContext) : RelayPlatformLink {
                 verifiedAtMillis = it.verifiedAtMillis.takeIf { keepEvidence },
                 verifiedMode = it.verifiedMode.takeIf { keepEvidence },
                 error = when {
-                    status == WindowsRelayCompanionStatus.UNTRUSTED -> "请从桌面的漫流更新脚本启动支持联动的安装。"
+                    status == WindowsRelayCompanionStatus.UNTRUSTED -> "请从桌面的 $APP_DISPLAY_NAME 更新脚本启动支持联动的安装。"
                     phase == RelayLinkPhase.INCOMPATIBLE -> "请使用桌面的 Relay 更新脚本更新后台。"
                     phase == RelayLinkPhase.ERROR -> "Relay 联动状态已变化，请重新检测。"
                     else -> null

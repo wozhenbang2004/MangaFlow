@@ -1,5 +1,6 @@
 package dev.mangaflow.storage
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.Closeable
@@ -179,8 +180,8 @@ internal class WallpaperEngineConnection(
             val request = buildJsonObject {
                 put("version", 4)
                 put("pin", pin)
-                put("name", visibleText(deviceName, 96).ifBlank { "MangaFlow" })
-                put("deviceUserName", "漫流")
+                put("name", visibleText(deviceName, 96).ifBlank { APP_DISPLAY_NAME })
+                put("deviceUserName", APP_DISPLAY_NAME)
                 put("displayWidth", displayWidth.coerceIn(128, 16384))
                 put("displayHeight", displayHeight.coerceIn(128, 16384))
             }

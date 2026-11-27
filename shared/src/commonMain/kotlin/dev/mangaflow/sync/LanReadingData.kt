@@ -1,5 +1,6 @@
 package dev.mangaflow.sync
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.json.JSONArray
@@ -240,7 +241,7 @@ internal object LanReadingCodec {
         // v1 peers may treat ordinary reading as confirmation and discard competing versions.
         // Migrate only our durable v1 journal; never downgrade the new wire semantics.
         require(format == FORMAT || local && format == LEGACY_LOCAL_FORMAT) {
-            "两端漫流的阅读同步版本不兼容，请将两端更新到支持保留待确认版本的版本。"
+            "两台设备的 $APP_DISPLAY_NAME 阅读同步版本不兼容，请将两端更新到支持保留待确认进度的版本。"
         }
         if (local) require(json.getString("localActor") == localActor) { "同步身份已变化，请先移除旧设备配对。" }
         val books = linkedMapOf<String, LanReadingBook>()

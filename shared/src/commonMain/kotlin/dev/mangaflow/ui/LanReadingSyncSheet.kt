@@ -27,6 +27,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.sync.LanReadingSyncController
@@ -108,7 +109,7 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                             }
                             if (state.pairingOpen) Text("请在另一台设备也打开「添加设备」，然后任选一端发起配对。添加窗口 2 分钟后自动关闭。",
                                 fontSize = 12.sp, color = colors.onSurfaceVariant)
-                            if (state.pairingOpen && nearby.isEmpty()) Text("正在寻找附近的漫流设备…", fontSize = 12.sp,
+                            if (state.pairingOpen && nearby.isEmpty()) Text("正在寻找附近运行 $APP_DISPLAY_NAME 的设备…", fontSize = 12.sp,
                                 color = colors.onSurfaceVariant)
                         }
                     }
@@ -140,7 +141,7 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                                 null, Modifier.size(16.dp))
                         }
                         if (!desktop || !state.enabled || showScope) {
-                            Text("同步在线普通漫画的收藏、阅读位置、页码书签和图片收藏位置。两端需打开漫流，并连接同一 Wi-Fi 或有线局域网。",
+                            Text("同步在线普通漫画的收藏、阅读位置、页码书签和图片收藏位置。两端需打开 $APP_DISPLAY_NAME，并连接同一 Wi-Fi 或有线局域网。",
                                 fontSize = 12.sp, color = colors.onSurfaceVariant)
                             Text("本地导入的漫画和 PDF 不在本次同步范围；图片与文件不会复制，阅读布局仍由每台设备自己设置。",
                                 fontSize = 11.sp, color = colors.onSurfaceVariant)
@@ -148,7 +149,7 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                         Text(when {
                             !state.supported -> "当前支持 Android 与 Windows 之间同步。"
                             !state.enabled -> "开启后，配对设备在同一局域网中会自动重连。"
-                            !state.active -> "等待漫流在前台启动局域网连接。"
+                            !state.active -> "等待 $APP_DISPLAY_NAME 在前台启动局域网连接。"
                             state.conflicts.isNotEmpty() -> "已采用默认结果，${state.conflicts.size} 处差异仍待你确认。"
                             state.lastSyncAt > 0L -> "已完成同步，后续阅读变化会自动合并。"
                             paired.isEmpty() -> "先添加一台设备，在两端核对校验码。"

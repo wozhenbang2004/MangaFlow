@@ -1,5 +1,6 @@
 package dev.mangaflow.update
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.net.writeRelayBinding
 import dev.mangaflow.net.readRelayBinding
 
@@ -32,7 +33,7 @@ actual class UpdateManager private constructor(private val context: PlatformCont
     private val previousInstallMessage = previousNativeUpdateResult(context)
     val hasPreviousInstallResult: Boolean get() = previousInstallMessage != null
     private val _state = MutableStateFlow(UpdateState(lastChecked = prefs.getLong("last_check", 0),
-        message = previousInstallMessage ?: "检查漫流的新版本"))
+        message = previousInstallMessage ?: "检查 $APP_DISPLAY_NAME 的新版本"))
     actual val state: StateFlow<UpdateState> = _state.asStateFlow()
     actual val automatic: Boolean get() = prefs.getBoolean("automatic", true)
     private var job: Job? = null

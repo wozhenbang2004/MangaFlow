@@ -1,5 +1,6 @@
 package dev.mangaflow.sync
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.platform.PlatformContext
@@ -340,7 +341,7 @@ internal class JvmLanReadingTransport(
         synchronized(guard) { if (sockets.containsKey(socket)) sockets[socket] = id }
         check(active(ticket) && onPhysicalLan(socket))
         val hello = JSONObject(receive(socket, HELLO_BYTES))
-        require(hello.getInt("version") == 1) { "两端漫流的局域网协议版本不兼容。" }
+        require(hello.getInt("version") == 1) { "两台设备上的 $APP_DISPLAY_NAME 使用了不同的局域网协议版本。" }
         when (hello.getString("op")) {
             "pair" -> {
                 check(pairingAllowed()) { "请先在另一台设备打开添加设备。" }
@@ -525,9 +526,9 @@ internal class JvmLanReadingTransport(
         fun digest(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
         fun fingerprint(certificate: X509Certificate) = digest(certificate.encoded)
-        fun cleanName(value: String) = value.filterNot(Char::isISOControl).trim().take(80).ifBlank { "漫流设备" }
+        fun cleanName(value: String) = value.filterNot(Char::isISOControl).trim().take(80).ifBlank { "$APP_DISPLAY_NAME 设备" }
         fun readableFailure(failure: Exception): String = when (failure) {
-            is SocketTimeoutException -> "设备暂未响应；保持两端漫流打开，恢复连接后会自动重试。"
+            is SocketTimeoutException -> "设备暂未响应。请在两台设备上保持 $APP_DISPLAY_NAME 打开，连接恢复后会自动重试。"
             is java.net.SocketException, is java.io.EOFException -> "局域网连接已断开，恢复后会自动重试。"
             is javax.net.ssl.SSLException -> "无法核验设备；首次连接请在两端打开添加设备并确认同一校验码。"
             else -> failure.message ?: "局域网同步暂未完成，将自动重试。"

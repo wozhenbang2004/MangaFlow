@@ -18,7 +18,7 @@ if (-not $administrator) {
     $commandLine = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
         ('"' + $PSCommandPath + '"'), '-Image', ('"' + [IO.Path]::GetFullPath($Image) + '"'), '-Commit', $Commit, '-Elevated')
     $process = Start-Process -FilePath $engine -Verb RunAs -ArgumentList $commandLine -Wait -PassThru -WindowStyle Hidden
-    if ($process.ExitCode -ne 0) { throw "Protected MangaFlow installation failed ($($process.ExitCode))." }
+    if ($process.ExitCode -ne 0) { throw "Protected Kayo installation failed ($($process.ExitCode))." }
     return
 }
 
@@ -41,7 +41,7 @@ function Assert-RegularTree([string]$Directory) {
 function Assert-Image([string]$Directory) {
     foreach ($item in @('MangaFlow.exe', 'app\MangaFlow.cfg', 'runtime\bin\java.dll')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Directory $item) -PathType Leaf)) {
-            throw "The MangaFlow app image is incomplete: $item"
+            throw "The Kayo app image is incomplete: $item"
         }
     }
     Assert-RegularTree $Directory
@@ -51,7 +51,7 @@ $mutex = [Threading.Mutex]::new($false, 'Global\MangaFlowProtectedDesktopInstall
 $held = $false
 try {
     try { $held = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $held = $true }
-    if (-not $held) { throw 'MangaFlow is already being updated.' }
+    if (-not $held) { throw 'Kayo is already being updated.' }
     Assert-Image $Image
     if ([IO.File]::GetAttributes($root).HasFlag([IO.FileAttributes]::ReparsePoint)) {
         throw 'Program Files is not on the usual protected install path.'
@@ -81,12 +81,12 @@ try {
     }
     Set-Acl -LiteralPath $stage -AclObject $security
     & robocopy.exe $Image $stage /E /COPY:DAT /DCOPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NP /NJH /NJS /XF .relay-installation .mangaflow-local-commit | Out-Host
-    if ($LASTEXITCODE -ge 8) { throw "MangaFlow staging failed (robocopy $LASTEXITCODE)." }
+    if ($LASTEXITCODE -ge 8) { throw "Kayo staging failed (robocopy $LASTEXITCODE)." }
     Assert-Image $stage
     [IO.File]::WriteAllText((Join-Path $stage $appMarker), $installation)
     [IO.File]::WriteAllText((Join-Path $stage $revisionMarker), $Commit)
     & icacls.exe $stage /setowner '*S-1-5-32-544' /T /Q | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw 'MangaFlow files could not be assigned protected ownership.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Kayo files could not be assigned protected ownership.' }
     $saved = $false
     try {
         if (Test-Path -LiteralPath $target) {
@@ -99,7 +99,7 @@ try {
         if ($saved -and -not (Test-Path -LiteralPath $target)) { [IO.Directory]::Move($backup, $target) }
         throw
     }
-    if ($saved) { Write-Host "Previous MangaFlow binaries: $backup" }
+    if ($saved) { Write-Host "Previous Kayo binaries: $backup" }
 }
 finally {
     if ($held) { $mutex.ReleaseMutex() }

@@ -601,7 +601,7 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 +            .await
 +    }
 +
-+    /// MangaFlow's media receiver checks the real manifest before creating files.
++    /// Kayo's media receiver checks the real manifest before creating files.
 +    /// Unlimited callers retain tapline's original file/link/mode behavior.
 +    pub async fn download_workshop_item_bounded(
 +        &mut self,
@@ -743,7 +743,7 @@ diff --git a/crates/tapline-auth/src/lib.rs b/crates/tapline-auth/src/lib.rs
  pub const PLATFORM_STEAM_CLIENT: i32 = 1;
  
 -pub const DEVICE_NAME: &str = "tapline";
-+pub const DEVICE_NAME: &str = "MangaFlow";
++pub const DEVICE_NAME: &str = "Kayo";
  
  #[cfg(test)]
  mod tests {

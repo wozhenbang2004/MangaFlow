@@ -12,6 +12,8 @@ import kotlin.system.exitProcess
 /** One private, bounded Java crash record; never uploaded automatically. */
 internal object LaunchFailure {
     private const val MAX_BYTES = 64 * 1024
+    private val versionLabel = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+    internal val reportHeader = "$APP_DISPLAY_NAME $versionLabel"
     private var installed = false
     private var record: AtomicFile? = null
     var recoveryReport: String? = null
@@ -23,8 +25,8 @@ internal object LaunchFailure {
         record = runCatching { AtomicFile(File(context.noBackupFilesDir, "last-failure.txt")) }.getOrNull()
         // Keep older reports available for export without blocking a newly installed fix.
         recoveryReport = readSavedReport(context)?.takeIf { report ->
-            report.lineSequence().firstOrNull() ==
-                "MangaFlow ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+            val header = report.lineSequence().firstOrNull()
+            header == reportHeader || header == "MangaFlow $versionLabel"
         }
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, failure ->
@@ -61,7 +63,7 @@ internal object LaunchFailure {
     private fun save(thread: Thread, failure: Throwable) {
         val output = record ?: return
         val text = buildString {
-            appendLine("MangaFlow ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+            appendLine(reportHeader)
             appendLine("Android ${Build.VERSION.RELEASE}, API ${Build.VERSION.SDK_INT}, ${Build.MANUFACTURER} ${Build.MODEL}")
             appendLine("Thread: ${redact(thread.name)}")
             val seen = Collections.newSetFromMap(IdentityHashMap<Throwable, Boolean>())

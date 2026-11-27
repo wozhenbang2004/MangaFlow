@@ -12,6 +12,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
 import androidx.exifinterface.media.ExifInterface
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeStore
@@ -74,7 +75,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
             (runtime?.installed != true || runtime.requiresUpdate)
         EngineInventory(listOf(
             EngineDescriptor(EnhancementEngineIds.LOCAL_DETAIL, "轻量线条处理", EnhancementEngineIds.LOCAL_DETAIL_VERSION,
-                "MangaFlow", "https://github.com/wozhenbang2004/MangaFlow", EngineReadiness.BUILT_IN,
+                APP_DISPLAY_NAME, "https://github.com/wozhenbang2004/MangaFlow", EngineReadiness.BUILT_IN,
                 "1× 保守去噪，保留文字与细线；非 AI 超分", setOf(1),
                 setOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON)),
             EngineDescriptor(EnhancementEngineIds.ANDROID_ONNX, "ONNX 漫画分块增强", "1.31.1", "MIT；模型遵循各自许可",

@@ -1,4 +1,6 @@
-# 漫流 · MangaFlow
+# Kayo
+
+Kayo（原名「漫流 · MangaFlow」）是一款漫画与番剧客户端。Android 和 Windows 用户可通过原有渠道覆盖升级，继续使用原来的书架、下载和阅读记录。
 
 ## 画质与性能 · 2026-11-19 源码接入
 
@@ -8,7 +10,7 @@
 
 Current 2026-11-12 interface: an ordinary flat full-cover collection grid, without 3D shelves or follow/hoard/pause groups; picture/spread hearts and image collection (replacing bookmark/notes controls); a reading-edge clock outside the console and actual foreground reading statistics; task-grouped settings, full-segment selections and shared paper-color previews; compact heat/native-score bands with real remaining-source counts; a floating glass discovery/ranking header over the original scrolling content; softer ranking transitions; finger-driven pull and curved swipe removal; glass search that hides underlying history chrome during its full presence; a matching glass downloads header with summary/import/queue/filter actions over the retained lists; immediate short cold-start reveal; local image/silent-video wallpaper; user-selected comic-window icon B. Settings → 外观 → 壁纸 imports ordinary image/video files. Wallpaper Engine scene/project/mobile packages are not generic videos. Build and device behavior remain pending the main CI/user feedback path.
 
-一个专注于阅读的漫画客户端，使用 Kotlin Multiplatform 和 Compose Multiplatform，共享页面与业务代码。
+项目使用 Kotlin Multiplatform 和 Compose Multiplatform，共享页面与业务代码。
 
 本次源码迁移面向 Android 手机／平板、iPhone／iPad 和 Windows 电脑。`shared` 复用现有发现、搜索、详情、阅读、书架、下载、账号、设置、玻璃和动效；`app`、`desktopApp`、`iosApp` 提供各平台正式入口。GitHub Actions 构建 APK、Windows EXE／MSI 和未签名的 Apple 设备／模拟器应用；源码迁移与原生接线不代表已经通过构建或设备验收。macOS 只用于编译 Apple 移动应用，不交付 Mac／Linux 客户端。
 
@@ -75,7 +77,7 @@ MangaBaka 在详情的附加来源之前解析：优先用已确认的 AniList�
 
 ### MangaBaka 数据署名
 
-作品关联资料由 **MangaBaka 及其贡献者**提供：`https://mangabaka.org`。MangaBaka 原创数据采用 **CC BY-NC-SA 4.0**：`https://creativecommons.org/licenses/by-nc-sa/4.0/`；数据使用条款及免责声明：`https://mangabaka.org/about/data-license`。本客户端按需选择名称、媒介、编号和关联信息，并做编号与界面格式转换；不打包、批量采集、发布数据库，也不另行展示聚合评分。作品保留关联的原始资料站。此声明不表示来源对 MangaFlow 的认可。
+作品关联资料由 **MangaBaka 及其贡献者**提供：`https://mangabaka.org`。MangaBaka 原创数据采用 **CC BY-NC-SA 4.0**：`https://creativecommons.org/licenses/by-nc-sa/4.0/`；数据使用条款及免责声明：`https://mangabaka.org/about/data-license`。本客户端按需选择名称、媒介、编号和关联信息，并做编号与界面格式转换；不打包、批量采集、发布数据库，也不另行展示聚合评分。作品保留关联的原始资料站。此声明不表示来源对 Kayo 的认可。
 
 跨站编号所指向的 AniList、MyAnimeList、Kitsu、MangaUpdates 和 Shikimori 分别保留自己的归属与使用条件。MangaBaka 数据许可不替代这些站点的权利；评分和评论直接向对应原站的已实现读取通道取得。当前数据使用面向个人、非商业阅读；商业用途须另行满足来源许可。声明同时随 APK 的第三方说明保存，第三方 URI 保持纯文本。
 

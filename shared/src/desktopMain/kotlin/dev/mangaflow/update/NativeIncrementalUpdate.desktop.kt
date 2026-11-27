@@ -57,7 +57,7 @@ internal actual suspend fun planNativeIncrementalUpdate(
     val assets = metadata.optJSONArray("assets") ?: return@withContext null
     val available = (0 until assets.length()).mapNotNull { assets.optJSONObject(it) }
     val prefix = "MangaFlow-" + release.versionName + "-windows-x64"
-    val asset = listOf("$"+"{prefix}.update-v2.json", "$"+"{prefix}.update.json")
+    val asset = listOf("$prefix.update-v2.json", "$prefix.update.json")
         .firstNotNullOfOrNull { name -> available.firstOrNull { it.optString("name") == name } }
         ?: return@withContext null
     val digest = asset.optString("digest").removePrefix("sha256:").lowercase()

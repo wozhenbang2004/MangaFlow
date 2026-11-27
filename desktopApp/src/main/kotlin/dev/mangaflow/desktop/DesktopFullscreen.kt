@@ -1,5 +1,7 @@
 package dev.mangaflow.desktop
 
+import dev.mangaflow.APP_DISPLAY_NAME
+
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -61,7 +63,7 @@ internal class DesktopFullscreen {
             check(user32.SetWindowPos(handle, null, bounds.left, bounds.top,
                 bounds.right - bounds.left, bounds.bottom - bounds.top, SWP_NOOWNERZORDER or SWP_FRAMECHANGED))
         }.onFailure {
-            System.err.println("漫流无法进入全屏：${it.message}")
+            System.err.println("${APP_DISPLAY_NAME} 无法进入全屏：${it.message}")
             exit()
         }
     }
@@ -77,7 +79,7 @@ internal class DesktopFullscreen {
             val framed = user32.SetWindowPos(previous.handle, null, 0, 0, 0, 0,
                 SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_NOOWNERZORDER or SWP_FRAMECHANGED)
             check(positioned && framed)
-        }.onFailure { System.err.println("漫流无法恢复窗口：${it.message}") }
+        }.onFailure { System.err.println("${APP_DISPLAY_NAME} 无法恢复窗口：${it.message}") }
         windowed = null
         owner = null
         active = false

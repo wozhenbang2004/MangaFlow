@@ -1,5 +1,7 @@
 package dev.mangaflow.desktop
 
+import dev.mangaflow.APP_DISPLAY_NAME
+
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -539,7 +541,7 @@ internal class DesktopPerformance(private val context: PlatformContext) {
             recording = runCatching {
                 val candidate = Recording(Configuration.getConfiguration("profile"))
                 try { candidate.apply {
-                    name = "MangaFlow Windows performance"
+                    name = "$APP_DISPLAY_NAME Windows performance"
                     maxSize = 64L * 1024 * 1024
                     maxAge = Duration.ofSeconds(seconds + 5)
                     start()

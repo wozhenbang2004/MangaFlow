@@ -24,7 +24,7 @@ if ($Launch) {
         CommandLine = $arguments
         ProcessStartupInformation = $startup
     }
-    if ($worker.ReturnValue -ne 0) { throw "Could not start MangaFlow's update worker (WMI $($worker.ReturnValue))." }
+    if ($worker.ReturnValue -ne 0) { throw "Could not start Kayo's update worker (WMI $($worker.ReturnValue))." }
     exit 0
 }
 
@@ -43,7 +43,7 @@ function Write-Result([bool]$success, [string]$message) {
 function Show-UpdateMessage([string]$message, [string]$icon) {
     try {
         Add-Type -AssemblyName PresentationFramework
-        [Windows.MessageBox]::Show($message, 'MangaFlow', 'OK', $icon) | Out-Null
+        [Windows.MessageBox]::Show($message, 'Kayo', 'OK', $icon) | Out-Null
     } catch {}
 }
 function Install-File([string]$relative) {
@@ -95,7 +95,7 @@ try {
     $env:LOCALAPPDATA = [IO.Path]::GetFullPath([string]$plan.LocalAppData)
     $mutex = New-Object Threading.Mutex($false, 'Local\MangaFlowDesktopUpdate')
     $ownsMutex = $mutex.WaitOne(0)
-    if (-not $ownsMutex) { throw 'Another MangaFlow update is already running.' }
+    if (-not $ownsMutex) { throw 'Another Kayo update is already running.' }
 
     if (-not $Elevated) {
         $running = Get-Process -Id $ParentPid
@@ -118,10 +118,10 @@ try {
         $accepted = $true
         # Replacing files must wait for a successful save-and-close and for jpackage to release the EXE.
         if (-not $running.WaitForExit(120000) -or $running.ExitCode -ne 0) {
-            throw '漫流未能正常保存并退出。请处理保存错误后重试。'
+            throw 'Kayo 未能正常保存并退出。请处理保存错误后重试。'
         }
         if ($null -ne $nativeLauncher -and -not $nativeLauncher.WaitForExit(10000)) {
-            throw '漫流启动器仍在运行。请关闭后重试。'
+            throw 'Kayo 启动器仍在运行。请关闭后重试。'
         }
     }
 
@@ -141,14 +141,14 @@ try {
             throw "Windows installer returned $($process.ExitCode). Log: $log"
         }
         if ($process.ExitCode -in @(1641, 3010)) {
-            $message = '安装已完成。请重启 Windows，再从开始菜单打开漫流。'
+            $message = '安装已完成。请重启 Windows，再从开始菜单打开 Kayo。'
         } elseif ((Test-Path -LiteralPath $config -PathType Leaf) -and (Get-FileHash -LiteralPath $config).Hash -ne $previousHash) {
             Write-Result $true '安装已完成。'
             Start-OldOrNew
             exit 0
         } else {
             # An MSI launched from a portable image may have upgraded a different directory.
-            $message = '安装已完成。请从开始菜单打开新版漫流。'
+            $message = '安装已完成。请从开始菜单打开新版 Kayo。'
         }
         Write-Result $true $message
         Show-UpdateMessage $message 'Information'
@@ -156,7 +156,7 @@ try {
     }
     if ($plan.Mode -ne 'incremental') { throw 'Unknown update operation.' }
     if (-not (Test-Path -LiteralPath (Join-Path $root 'app\MangaFlow.cfg') -PathType Leaf)) {
-        throw 'The installed MangaFlow application could not be found.'
+        throw 'The installed Kayo application could not be found.'
     }
 
     # Elevate only the installed-code replacement. UAC cancellation returns to the old application.

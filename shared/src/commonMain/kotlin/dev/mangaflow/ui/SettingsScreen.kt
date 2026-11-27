@@ -1,5 +1,6 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.APP_DISPLAY_NAME
 import dev.mangaflow.anime.AnimeController
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -398,7 +399,7 @@ fun SettingsScreen(
                 operations.consumeResult(operation.id)
                 // The document picker belongs only to this active UI, never to the worker.
                 exportSaving = true
-                backupWriter.launch("MangaFlow-backup.json", payload)
+                backupWriter.launch("$APP_DISPLAY_NAME-backup.json", payload)
             }
             ApplicationOperationKind.BACKUP_INSPECT -> operations.result<InspectedReadingBackup>(operation.id)?.let { result ->
                 val inspected = result.await()

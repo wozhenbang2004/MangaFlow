@@ -2,6 +2,8 @@
 
 package dev.mangaflow.ui.platform
 
+import dev.mangaflow.APP_DISPLAY_NAME
+
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
@@ -171,7 +173,7 @@ actual fun rememberTextDocumentSaver(onResult: (DocumentSaveResult) -> Unit): Te
             try {
                 val path = withContext(Dispatchers.IO) {
                     FileSystem.SYSTEM.createDirectories(folder.toPath())
-                    val safeName = name.replace('/', '_').replace(':', '_').ifBlank { "MangaFlow-backup.json" }
+                    val safeName = name.replace('/', '_').replace(':', '_').ifBlank { "${APP_DISPLAY_NAME}-backup.json" }
                     (folder + "/" + safeName).toPath().also { target ->
                         FileSystem.SYSTEM.write(target) { writeUtf8(text) }
                     }

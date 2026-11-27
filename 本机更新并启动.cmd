@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal
-title MangaFlow 本机更新
+title Kayo 本机更新
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\local_channel.ps1" %*
 set "MANGAFLOW_LOCAL_RESULT=%ERRORLEVEL%"
 if not "%MANGAFLOW_LOCAL_RESULT%"=="0" (
