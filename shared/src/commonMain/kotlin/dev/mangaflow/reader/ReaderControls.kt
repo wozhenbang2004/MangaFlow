@@ -11,8 +11,11 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -63,6 +66,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
@@ -162,6 +166,54 @@ internal fun Modifier.readerMouseEdgeReveal(topWidth: Dp, dockWidth: Dp, onRevea
         }
     }
 
+/** Observe gestures the artwork accepted. Child taps, hover and unconsumed movement keep the tools available. */
+internal fun Modifier.readerArtworkGesture(enabled: Boolean, onRead: () -> Unit): Modifier =
+    if (!enabled) this else pointerInput(onRead) {
+        val origins = mutableMapOf<PointerId, Offset>()
+        val slopSquared = viewConfiguration.touchSlop * viewConfiguration.touchSlop
+        awaitPointerEventScope {
+            var reported = false
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Final)
+                if (event.type == PointerEventType.Scroll) {
+                    if (event.changes.any { it.isConsumed && it.scrollDelta != Offset.Zero }) onRead()
+                    continue
+                }
+                if (origins.isEmpty() && event.changes.none { it.pressed }) continue
+                for (change in event.changes) {
+                    if (change.pressed && !change.previousPressed) origins[change.id] = change.position
+                    val origin = origins[change.id]
+                    if (!reported && origin != null && change.previousPressed && change.isConsumed &&
+                        change.position != change.previousPosition &&
+                        (change.position - origin).getDistanceSquared() >= slopSquared) {
+                        reported = true
+                        onRead()
+                    }
+                    if (!change.pressed) origins.remove(change.id)
+                }
+                if (origins.isEmpty()) reported = false
+            }
+        }
+    }
+
+/** Attach only to real control surfaces so the space between the two desktop capsules belongs to the page. */
+internal fun Modifier.readerControlContact(holds: MutableInteractionSource): Modifier = pointerInput(holds) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val press = PressInteraction.Press(down.position)
+        holds.tryEmit(press)
+        var released = false
+        try {
+            do {
+                val event = awaitPointerEvent(PointerEventPass.Final)
+            } while (event.changes.any { it.pressed })
+            released = true
+        } finally {
+            holds.tryEmit(if (released) PressInteraction.Release(press) else PressInteraction.Cancel(press))
+        }
+    }
+}
+
 /** Keep the actual page tree in one slot while an optional desktop inspector opens beside it. */
 @Composable
 internal fun ReaderWorkspace(
@@ -217,9 +269,11 @@ internal fun ReaderToolPresence(
         val remaining = 1f - amount
         // Keep the insets and the content height fixed even when the exit reverses halfway.
         transformOrigin = TransformOrigin(.5f, if (top) 0f else 1f)
-        translationY = (if (top) -11.dp.toPx() else 18.dp.toPx()) * remaining
-        scaleX = 1f - (if (top) .012f else .024f) * remaining
-        scaleY = 1f - (if (top) .045f else .09f) * remaining
+        val retreat = if (top) -minOf(28.dp.toPx(), size.height * .38f)
+            else minOf(38.dp.toPx(), size.height * .42f)
+        translationY = retreat * remaining
+        scaleX = 1f - (if (top) .008f else .018f) * remaining
+        scaleY = scaleX
         alpha = 1f - remaining * remaining
     }) { content(presence.targetState) }
 }
@@ -229,17 +283,17 @@ internal fun ReaderToolPresence(
 internal fun ReaderHeadingBar(
     desktop: Boolean, backdrop: HazeState, interactive: Boolean,
     identityInteraction: MutableInteractionSource, toolsInteraction: MutableInteractionSource,
-    modifier: Modifier, identity: @Composable RowScope.() -> Unit, tools: @Composable RowScope.() -> Unit,
+    holds: MutableInteractionSource, modifier: Modifier, identity: @Composable RowScope.() -> Unit, tools: @Composable RowScope.() -> Unit,
 ) {
     if (desktop) {
         Row(modifier, horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
-            ReaderHeadingCapsule(backdrop, desktop, interactive, identityInteraction,
+            ReaderHeadingCapsule(backdrop, desktop, interactive, identityInteraction, holds,
                 Modifier.weight(1f, fill = false).widthIn(max = 468.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)), identity)
             Spacer(Modifier.width(10.dp))
-            ReaderHeadingCapsule(backdrop, desktop, interactive, toolsInteraction, Modifier, tools)
+            ReaderHeadingCapsule(backdrop, desktop, interactive, toolsInteraction, holds, Modifier, tools)
         }
     } else Box(modifier) {
-        ReaderHeadingCapsule(backdrop, desktop, interactive, identityInteraction, Modifier.fillMaxWidth()) {
+        ReaderHeadingCapsule(backdrop, desktop, interactive, identityInteraction, holds, Modifier.fillMaxWidth()) {
             identity()
             tools()
         }
@@ -249,14 +303,14 @@ internal fun ReaderHeadingBar(
 @Composable
 private fun ReaderHeadingCapsule(
     backdrop: HazeState, desktop: Boolean, interactive: Boolean, interaction: MutableInteractionSource,
-    modifier: Modifier, content: @Composable RowScope.() -> Unit,
+    holds: MutableInteractionSource, modifier: Modifier, content: @Composable RowScope.() -> Unit,
 ) {
     LiquidGlassSurface(backdrop, modifier, role = if (desktop) GlassSurfaceRole.READING_DOCK else GlassSurfaceRole.NAVIGATION,
         cornerRadius = if (desktop) 22.dp else 28.dp, preferSource = true, trackPointer = true,
         interactionSource = interaction, softCard = true) {
         // Keep the hit target and its exit gate inside the rounded glass, including during a fade.
         Row(Modifier.motionInputGate(interactive).hoverable(interaction, enabled = desktop && interactive)
-            .heightIn(min = 52.dp).pointerInput(Unit) {}.padding(horizontal = if (desktop) 6.dp else 4.dp),
+            .heightIn(min = 52.dp).readerControlContact(holds).padding(horizontal = if (desktop) 6.dp else 4.dp),
             verticalAlignment = Alignment.CenterVertically, content = content)
     }
 }

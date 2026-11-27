@@ -244,8 +244,13 @@ class LibraryStore(context: Context) {
         additions.size
     }
 
-    fun toggleFavorite(manga: Manga): Unit = synchronized(lock) {
-        if (deferUntilReady { toggleFavorite(manga) }) return@synchronized
+    fun toggleFavorite(manga: Manga) {
+        toggleFavoriteAndGet(manga)
+    }
+
+    /** The new membership from this mutation; an early action is replayed after local restore. */
+    internal fun toggleFavoriteAndGet(manga: Manga): Boolean? = synchronized(lock) {
+        if (deferUntilReady { toggleFavorite(manga) }) return@synchronized null
         val removing = isFavorite(manga.id)
         val next = if (removing) _favorites.value.filterNot { it.id == manga.id }
         else listOf(manga) + _favorites.value
@@ -261,6 +266,7 @@ class LibraryStore(context: Context) {
             removeShelfStateLocked(manga.id)
             clearResumeTarget(manga.id)
         }
+        !removing
     }
 
     /** Idempotent removal: a stale item menu can never add the manga back. */

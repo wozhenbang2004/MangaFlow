@@ -1,5 +1,9 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -11,9 +15,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.storage.ChapterPreparationPhase
 import dev.mangaflow.storage.ChapterPreparationState
@@ -39,6 +45,7 @@ internal class DownloadQueueRequest(val command: QueueCommand, private val targe
     preparations: List<ChapterPreparationState>, val unavailable: Int,
     val commands: Map<String, Deferred<DownloadCommandResult>>) {
     val total = targets.size + unavailable
+    val needsStoreObservation = targets.any { it.id !in commands }
     private val priorPreparations = preparations.filter { it.refreshingEntryId != null }.associateBy { it.refreshingEntryId }
 
     fun observe(entries: Map<String, DownloadEntry>, preparations: List<ChapterPreparationState>,
@@ -82,7 +89,10 @@ internal fun DownloadQueueFeedback(request: DownloadQueueRequest, entries: Map<S
     val latestEntries by rememberUpdatedState(entries)
     val latestPreparations by rememberUpdatedState(preparations)
     val latestDismiss by rememberUpdatedState(onDismiss)
-    val access by rememberUpdatedState(LocalPlatformAccessibilityPreferences.current)
+    val access = LocalPlatformAccessibilityPreferences.current
+    val pointer = remember { MutableInteractionSource() }
+    val hovered by pointer.collectIsHoveredAsState()
+    var focused by remember { mutableStateOf(false) }
     var result by remember(request) { mutableStateOf(QueueAcknowledgement(request.total - request.unavailable, removed = request.unavailable)) }
     var waitingDetails by remember(request) { mutableStateOf(false) }
     LaunchedEffect(request, result.pending > 0) {
@@ -103,7 +113,11 @@ internal fun DownloadQueueFeedback(request: DownloadQueueRequest, entries: Map<S
             }
         }
         val settled = mutableMapOf<String, DownloadCommandResult>()
-        snapshotFlow { request.observe(latestEntries, latestPreparations, completed) }.first { observed ->
+        // Explicit command receipts are independent of the byte counters in the download directory.
+        snapshotFlow {
+            if (request.needsStoreObservation) request.observe(latestEntries, latestPreparations, completed)
+            else completed.toMap()
+        }.first { observed ->
             observed.forEach { (id, outcome) -> if (id !in settled) settled[id] = outcome }
             val outcomes = settled.values
             result = QueueAcknowledgement(request.total - request.unavailable - settled.size,
@@ -112,17 +126,21 @@ internal fun DownloadQueueFeedback(request: DownloadQueueRequest, entries: Map<S
                 outcomes.count { it == DownloadCommandResult.CANCELLED })
             result.pending == 0
         }
-        if (result.failed == 0 && result.removed == 0 && result.cancelled == 0) {
+    }
+    val settledCleanly = result.pending == 0 && result.failed == 0 && result.removed == 0 && result.cancelled == 0
+    LaunchedEffect(request, settledCleanly, hovered, focused, access.touchExploration) {
+        if (settledCleanly && !hovered && !focused && !access.touchExploration) {
             delay(4_500L)
-            if (!access.touchExploration) latestDismiss()
+            latestDismiss()
         }
     }
     val total = request.total
     val done = total - result.pending
     val colors = MaterialTheme.colorScheme
     val signal = when {
-        result.pending > 0 -> ManagementSignal.QUEUED
         result.failed > 0 -> ManagementSignal.ATTENTION
+        result.pending > 0 && done > 0 -> ManagementSignal.WORKING
+        result.pending > 0 -> ManagementSignal.QUEUED
         result.cancelled > 0 -> ManagementSignal.CANCELLED
         result.removed > 0 -> ManagementSignal.INFORMATION
         else -> ManagementSignal.COMPLETE
@@ -145,16 +163,25 @@ internal fun DownloadQueueFeedback(request: DownloadQueueRequest, entries: Map<S
             else -> "等待队列确认 ${result.pending} 话"
         })
     }.joinToString(" · ")
-    Surface(modifier = Modifier.widthIn(max = 480.dp), shape = RoundedCornerShape(14.dp),
+    val announcement = when {
+        result.pending == 0 -> detail
+        result.failed > 0 -> "部分操作失败，其余等待确认"
+        waitingDetails -> "仍在等待队列确认"
+        else -> "等待队列确认"
+    }
+    Surface(modifier = Modifier.widthIn(max = 480.dp).hoverable(pointer)
+        .onFocusChanged { focused = it.hasFocus }.focusGroup(), shape = RoundedCornerShape(14.dp),
         color = colors.surfaceContainerHigh, tonalElevation = 0.dp, shadowElevation = 4.dp) {
         Row(Modifier.padding(start = 14.dp, end = 3.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             ManagementStatusMark(signal)
             Column(Modifier.weight(1f, fill = false).padding(vertical = 9.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text("${request.command.label} $total 话", style = MaterialTheme.typography.labelLarge)
-                Text(detail, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                Text("${request.command.label} $total 话", Modifier.semantics {
+                    liveRegion = LiveRegionMode.Polite
+                    stateDescription = announcement
+                }, style = MaterialTheme.typography.labelLarge)
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                 if (total > 1) ManagementProgressTrack(done.toFloat() / total, "队列已回应",
                     accent, Modifier.fillMaxWidth().height(2.dp))
             }

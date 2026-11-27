@@ -503,7 +503,7 @@ internal fun DownloadProgressLine(entries: List<DownloadEntry>) {
         Row(Modifier.fillMaxWidth().padding(bottom = 3.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             ManagementProgressTrack(knownProgress, "当前图片接收进度", mangaStatusColors().activity,
-                Modifier.weight(1f).height(3.dp))
+                Modifier.weight(1f).height(3.dp), interpolateSteps = false)
             Text(mangaNumberText("当前页 ${(knownProgress * 100).toInt()}%"), Modifier.clearAndSetSemantics {},
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
         }

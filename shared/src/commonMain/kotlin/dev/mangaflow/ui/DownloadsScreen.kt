@@ -225,6 +225,7 @@ fun DownloadsScreen(
     onRetryPreparation: (String, Long) -> Unit = { _, _ -> },
     onRetryPreparationUsingLatestRoute: (String, Long) -> Unit,
     onRefreshForQueue: ((DownloadEntry, Boolean) -> Deferred<DownloadCommandResult>)? = null,
+    onRetryForQueue: ((DownloadEntry, Boolean) -> Deferred<DownloadCommandResult>)? = null,
 ) {
     fun sourceIncluded(sourceId: String): Boolean =
         (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
@@ -368,7 +369,7 @@ fun DownloadsScreen(
     val completedEntries = manageableEntries.filter { it.status == DownloadStatus.COMPLETED }
     var queueRequest by remember(desktopScope) { mutableStateOf<DownloadQueueRequest?>(null) }
     fun dispatchQueue(command: QueueCommand, candidates: List<DownloadEntry>, useLatestRoute: Boolean = false) {
-        if (!active || desktop && currentDesktopScope !== desktopScope) return
+        if (!active || currentDesktopScope !== desktopScope) return
         val requested = candidates.filter { sourceIncluded(it.manga.sourceId) }.distinctBy(DownloadEntry::id)
         if (requested.isEmpty()) return
         val latest = store.entries.value.associateBy(DownloadEntry::id)
@@ -389,15 +390,14 @@ fun DownloadsScreen(
         targets.forEach { target ->
             val workId = target.progress.workId.takeIf { it.isNotBlank() }
             when {
-                desktop && command == QueueCommand.PAUSE -> commands[target.id] = store.pauseCommand(target.id, workId, target)
-                command == QueueCommand.PAUSE -> store.pause(target.id, workId)
-                desktop && target.needsSourceRefresh && onRefreshForQueue != null ->
-                    commands[target.id] = onRefreshForQueue(target, useLatestRoute)
+                command == QueueCommand.PAUSE -> commands[target.id] = store.pauseCommand(target.id, workId, target)
+                target.needsSourceRefresh && onRefreshForQueue != null -> commands[target.id] = onRefreshForQueue(target, useLatestRoute)
+                !target.needsSourceRefresh && onRetryForQueue != null -> commands[target.id] = onRetryForQueue(target, useLatestRoute)
                 useLatestRoute -> onRetryUsingLatestRoute(target)
                 else -> onRetry(target)
             }
         }
-        if (desktop) queueRequest = DownloadQueueRequest(command, targets, visiblePreparations, requested.size - targets.size, commands)
+        queueRequest = DownloadQueueRequest(command, targets, visiblePreparations, requested.size - targets.size, commands)
     }
     fun retrySelection(group: List<DownloadEntry>, useLatestRoute: Boolean = false) {
         val command = if (group.all { it.status == DownloadStatus.PAUSED }) QueueCommand.RESUME else QueueCommand.RETRY
@@ -1042,9 +1042,9 @@ fun DownloadsScreen(
                 selectFilter(DownloadFilter.entries[index])
                 selectedIds = emptySet()
             })
-        Column(Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp),
+        Column(Modifier.align(Alignment.BottomCenter).padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 12.dp + bottomInset),
             horizontalAlignment = Alignment.CenterHorizontally) {
-            if (desktop && active) {
+            if (active) {
                 val request = queueRequest
                 CopyShelfValue(request) { shown ->
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {

@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -71,35 +72,13 @@ import kotlin.math.roundToInt
 
 internal data class AnimeSeekPreview(val originMs: Long, val positionMs: Long)
 
-/** Read the pending target above the dock. The slider already supplies its accessible value. */
+/** Hover and scrubbing share a single readout on the actual thumb interval. Scrubbing
+ * takes precedence on hybrid devices, while Material still owns all input and semantics. */
 @Composable
-internal fun AnimeTimelinePreview(preview: State<AnimeSeekPreview?>, modifier: Modifier) {
-    val targetSecond by remember(preview) { derivedStateOf { preview.value?.positionMs?.div(1_000L) } }
-    val deltaSeconds by remember(preview) { derivedStateOf {
-        preview.value?.let { (it.positionMs - it.originMs) / 1_000L } ?: 0L
-    } }
-    val target = targetSecond ?: return
-    val text = remember(target, deltaSeconds) {
-        val time = animeTime(target * 1_000L)
-        if (deltaSeconds == 0L) time
-        else "$time   ${if (deltaSeconds > 0L) "+" else "−"}${animeTime(abs(deltaSeconds) * 1_000L)}"
-    }
-    val colors = MaterialTheme.colorScheme
-    Text(text, modifier.clearAndSetSemantics { }.background(colors.inverseSurface, RoundedCornerShape(8.dp))
-        .padding(horizontal = 9.dp, vertical = 4.dp), color = colors.inverseOnSurface,
-        style = mangaMetricValueStyle(13.sp, 18.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-}
-
-/** The pointer inspects a time without issuing a seek or registering an extra video observation. */
-@Composable
-internal fun AnimeTimelineSlot(desktop: Boolean, duration: Long, modifier: Modifier, content: @Composable (Modifier) -> Unit) {
-    if (!desktop) {
-        content(modifier)
-        return
-    }
-    val pointer = remember(duration) { mutableStateOf<Float?>(null) }
-    Box(modifier.pointerInput(pointer) {
-        val inset = 14.dp.toPx()
+internal fun AnimeTimelineSlot(desktop: Boolean, duration: Long, preview: State<AnimeSeekPreview?>,
+    modifier: Modifier, content: @Composable (Modifier) -> Unit) {
+    val pointer = remember(preview, desktop) { mutableStateOf<Float?>(null) }
+    val hover = if (!desktop) Modifier else Modifier.pointerInput(pointer) {
         try {
             awaitPointerEventScope {
                 while (true) {
@@ -107,45 +86,56 @@ internal fun AnimeTimelineSlot(desktop: Boolean, duration: Long, modifier: Modif
                     val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse }
                     pointer.value = if (mouse != null && !mouse.pressed && !mouse.previousPressed &&
                         (event.type == PointerEventType.Move || event.type == PointerEventType.Enter)) {
+                        val inset = minOf(14.dp.toPx(), size.width / 2f)
                         ((mouse.position.x - inset) / (size.width - 2f * inset).coerceAtLeast(1f)).coerceIn(0f, 1f)
                     } else null
                 }
             }
         } finally { pointer.value = null }
-    }) {
+    }
+    Box(modifier.then(hover)) {
         content(Modifier.fillMaxWidth())
-        AnimeTimelineHoverTime(pointer, duration)
+        AnimeTimelineReadout(preview, pointer, duration)
     }
 }
 
 @Composable
-private fun BoxScope.AnimeTimelineHoverTime(pointer: State<Float?>, duration: Long) {
-    val visible by remember(pointer) { derivedStateOf { pointer.value != null } }
-    if (!visible) return
+private fun BoxScope.AnimeTimelineReadout(preview: State<AnimeSeekPreview?>, pointer: State<Float?>, duration: Long) {
+    val visible by remember(preview, pointer) { derivedStateOf { preview.value != null || pointer.value != null } }
+    if (!visible || duration <= 0L) return
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-    val label by remember(pointer, rtl, duration) { derivedStateOf {
-        val physical = pointer.value ?: 0f
-        animeTime(((if (rtl) 1f - physical else physical).toDouble() * duration).toLong())
+    val physical = remember(preview, pointer, duration, rtl) { derivedStateOf {
+        preview.value?.let {
+            val logical = (it.positionMs.toDouble() / duration).toFloat().coerceIn(0f, 1f)
+            if (rtl) 1f - logical else logical
+        } ?: pointer.value ?: 0f
+    } }
+    val label by remember(preview, pointer, rtl, duration) { derivedStateOf {
+        val edit = preview.value
+        val hover = pointer.value ?: 0f
+        val position = edit?.positionMs ?: ((if (rtl) 1f - hover else hover).toDouble() * duration).toLong()
+        val delta = edit?.let { (it.positionMs - it.originMs) / 1_000L } ?: 0L
+        if (delta == 0L) animeTime(position)
+        else animeTime(position) + "  " + (if (delta > 0L) "+" else "−") + animeTime(abs(delta) * 1_000L)
     } }
     val colors = MaterialTheme.colorScheme
-    // Both the marker and the label follow the same thumb-centre interval. Only text
-    // crossing a second boundary recomposes; a subsecond move just places and draws.
     Canvas(Modifier.matchParentSize().clearAndSetSemantics { }) {
-        val physical = pointer.value ?: return@Canvas
+        if (preview.value != null) return@Canvas
         val inset = minOf(14.dp.toPx(), size.width / 2f)
-        val x = inset + (size.width - 2f * inset) * physical
+        val x = inset + (size.width - 2f * inset) * physical.value
         drawLine(colors.onSurfaceVariant.copy(alpha = .76f), Offset(x, center.y - 5.dp.toPx()),
             Offset(x, center.y + 5.dp.toPx()), strokeWidth = 1.5.dp.toPx())
     }
     Layout(modifier = Modifier.matchParentSize().clearAndSetSemantics { }, content = {
-        Text(label, Modifier.background(colors.inverseSurface, RoundedCornerShape(5.dp)).padding(horizontal = 5.dp),
-            color = colors.inverseOnSurface, maxLines = 1, style = mangaMetricValueStyle(11.sp, 15.sp))
+        Text(label, Modifier.background(colors.inverseSurface, RoundedCornerShape(6.dp)).padding(horizontal = 5.dp),
+            color = colors.inverseOnSurface, maxLines = 1, style = mangaMetricValueStyle(11.sp, 15.sp),
+            overflow = TextOverflow.Ellipsis)
     }) { children, bounds ->
         val chip = children.single().measure(bounds.copy(minWidth = 0, minHeight = 0))
         layout(bounds.maxWidth, bounds.maxHeight) {
             val inset = minOf(14.dp.toPx(), bounds.maxWidth / 2f)
-            val center = inset + (bounds.maxWidth - 2f * inset) * (pointer.value ?: 0f)
-            chip.place((center - chip.width / 2f).roundToInt().coerceIn(0, bounds.maxWidth - chip.width), 0)
+            val x = inset + (bounds.maxWidth - 2f * inset) * physical.value
+            chip.place((x - chip.width / 2f).roundToInt().coerceIn(0, bounds.maxWidth - chip.width), 0)
         }
     }
 }
@@ -155,7 +145,7 @@ private fun BoxScope.AnimeTimelineHoverTime(pointer: State<Float?>, duration: Lo
 internal fun AnimeTransportGlyph(playing: Boolean, label: String, color: Color, modifier: Modifier) {
     val motion = LocalMotionEnabled.current
     val separation = animateFloatAsState(if (playing) 1f else 0f,
-        if (motion) spring(dampingRatio = .94f, stiffness = 880f) else snap(), label = "play-pause")
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(), label = "play-pause")
     val contour = remember { Path() }
     Canvas(modifier.semantics { contentDescription = label }) {
         val t = separation.value.coerceIn(0f, 1f)
@@ -184,7 +174,8 @@ internal fun AnimeTransportGlyph(playing: Boolean, label: String, color: Color, 
 /** Event-only state owned by a single player, asset and episode. It never subscribes to autoplay. */
 internal sealed interface AnimePlayerCue {
     class Seek(val positionMs: Long, val forward: Boolean?, val distanceMs: Long, val atLimit: Boolean,
-        val point: Offset?, private val inputTimeline: Long, val acceptedTimeline: Long?, private val inputTime: Long) : AnimePlayerCue {
+        val point: Offset?, private val inputTimeline: Long, val requestedTimeline: Long,
+        val acceptedTimeline: Long?, private val inputTime: Long) : AnimePlayerCue {
         fun ownsInput(from: Long, live: Long, now: Long): Boolean =
             acceptedTimeline == live && from in inputTimeline..live && now - inputTime in 0L..680L
 
@@ -192,7 +183,7 @@ internal sealed interface AnimePlayerCue {
             forward != null && ownsInput(timeline, timeline, now)
     }
 
-    class Transport(val resume: Boolean, val restart: Boolean) : AnimePlayerCue
+    class Transport(val resume: Boolean, val restart: Boolean, val timeline: Long) : AnimePlayerCue
     class Volume(val percent: Int) : AnimePlayerCue
 }
 
@@ -211,17 +202,32 @@ internal fun BoxScope.AnimePlayerFeedback(notice: MutableState<AnimePlayerCue?>,
     desktop: Boolean, observations: State<AnimePlayerState>) {
     val cue = notice.value ?: return
     val motion = LocalMotionEnabled.current
-    val alpha = remember { Animatable(if (motion) 0f else 1f) }
+    val alpha = remember { Animatable(1f) }
+    val modeSeen = remember(cue) { mutableStateOf(false) }
+    val transportAccepted by remember(cue, observations) { derivedStateOf {
+        cue is AnimePlayerCue.Transport && observations.value.let {
+            it.timelineGeneration == cue.timeline && it.playWhenReady == cue.resume
+        }
+    } }
+    if (transportAccepted && !modeSeen.value) SideEffect { modeSeen.value = true }
     val currentCue by remember(cue, observations) { derivedStateOf {
-        val generation = (cue as? AnimePlayerCue.Seek)?.acceptedTimeline
-        generation == null || observations.value.timelineGeneration <= generation
+        val current = observations.value
+        when (cue) {
+            is AnimePlayerCue.Seek -> current.timelineGeneration <= cue.requestedTimeline
+            is AnimePlayerCue.Transport -> current.timelineGeneration <= cue.timeline &&
+                (!modeSeen.value || current.playWhenReady == cue.resume)
+            is AnimePlayerCue.Volume -> true
+        }
     } }
     val visible = enabled && currentCue
     LaunchedEffect(cue, visible, motion) {
         if (visible) {
-            if (motion) alpha.animateTo(1f, tween(95, easing = MangaMotion.EnterEasing)) else alpha.snapTo(1f)
+            // The first input is legible on its first draw. An input during exit
+            // reverses the current envelope instead of blinking out and starting again.
+            if (motion) alpha.animateTo(1f, spring(MangaMotion.PressDamping, MangaMotion.PressAttackStiffness))
+            else alpha.snapTo(1f)
             delay(if (desktop) 860L else 520L)
-            if (motion) alpha.animateTo(0f, tween(140, easing = MangaMotion.ExitEasing))
+            if (motion) alpha.animateTo(0f, tween(MangaMotion.ListExit, easing = MangaMotion.ExitEasing))
         }
         if (notice.value === cue) notice.value = null
     }
@@ -245,7 +251,7 @@ internal fun BoxScope.AnimePlayerFeedback(notice: MutableState<AnimePlayerCue?>,
     val label by remember(cue, observations, desktop) { derivedStateOf {
         when (cue) {
             is AnimePlayerCue.Seek -> when {
-                !desktop || cue.forward == null -> animeTime(cue.positionMs)
+                cue.forward == null -> animeTime(cue.positionMs)
                 cue.atLimit -> if (cue.forward == true) "已在片尾" else "已在片头"
                 else -> seekDistanceLabel(cue.distanceMs, cue.forward == true)
             }
@@ -269,7 +275,7 @@ internal fun BoxScope.AnimePlayerFeedback(notice: MutableState<AnimePlayerCue?>,
     } }
     val time = seek?.let { animeTime(it.positionMs) }
     val showTarget = desktop && seek?.forward != null
-    val announcement = if (showTarget) "$label，目标 $time" else if (seek != null) "目标 $time" else label
+    val announcement = if (seek?.forward != null) "$label，目标 $time" else if (seek != null) "目标 $time" else label
     Row(Modifier.align(align).graphicsLayer {
         val amount = alpha.value
         this.alpha = amount
@@ -296,15 +302,13 @@ internal fun BoxScope.AnimePlayerFeedback(notice: MutableState<AnimePlayerCue?>,
             }
             is AnimePlayerCue.Volume -> if (cue.percent == 0) Icons.Outlined.VolumeOff else Icons.Outlined.VolumeUp
         }
-        val stepMotion = if (desktop && motion && seek != null && forward != null && !seek.atLimit) {
+        val stepMotion = if (motion && seek != null && forward != null && !seek.atLimit) {
             val step = remember { Animatable(0f) }
             LaunchedEffect(seek) {
-                step.snapTo(0f)
-                step.animateTo(1f, tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing))
+                step.animateTo(if (forward) 1f else -1f, spring(MangaMotion.PressDamping, MangaMotion.PressAttackStiffness))
+                step.animateTo(0f, spring(MangaMotion.PressDamping, MangaMotion.PressStiffness))
             }
-            Modifier.graphicsLayer {
-                translationX = (1f - step.value) * if (forward) -3.dp.toPx() else 3.dp.toPx()
-            }
+            Modifier.graphicsLayer { translationX = step.value * 3.dp.toPx() }
         } else Modifier
         Icon(glyph, null, Modifier.size(17.dp).then(stepMotion), tint = colors.primary)
         Text(label, color = colors.onSurface, style = mangaMetricValueStyle(), maxLines = 1)

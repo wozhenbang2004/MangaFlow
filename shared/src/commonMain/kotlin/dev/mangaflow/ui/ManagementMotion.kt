@@ -49,17 +49,25 @@ import dev.mangaflow.ui.motion.MotionSwap
 
 /** The caller keys the track to the measured operation. Corrections and new runs take effect immediately. */
 @Composable
-internal fun ManagementProgressTrack(fraction: Float, label: String, color: Color, modifier: Modifier = Modifier) {
+internal fun ManagementProgressTrack(
+    fraction: Float,
+    label: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    interpolateSteps: Boolean = true,
+) {
     val target = fraction.coerceIn(0f, 1f)
-    val motion = LocalMotionEnabled.current
-    val fill = remember { Animatable(target) }
-    var previousTarget by remember { mutableFloatStateOf(target) }
-    LaunchedEffect(target, motion) {
-        val corrected = target < previousTarget
-        previousTarget = target
-        if (!motion || corrected || target <= fill.value) fill.snapTo(target)
-        else fill.animateTo(target, tween(MangaMotion.Quick, easing = LinearEasing))
-    }
+    val fill = if (interpolateSteps && LocalMotionEnabled.current) {
+        val animated = remember { Animatable(target) }
+        var previousTarget by remember { mutableFloatStateOf(target) }
+        LaunchedEffect(target) {
+            val corrected = target < previousTarget
+            previousTarget = target
+            if (corrected || target <= animated.value) animated.snapTo(target)
+            else animated.animateTo(target, tween(MangaMotion.Quick, easing = LinearEasing))
+        }
+        animated
+    } else null
     val paper = MaterialTheme.colorScheme.onSurface.copy(alpha = .085f)
     Box(modifier.semantics {
         contentDescription = label
@@ -67,7 +75,7 @@ internal fun ManagementProgressTrack(fraction: Float, label: String, color: Colo
     }.drawBehind {
         val radius = CornerRadius(size.height / 2f)
         drawRoundRect(paper, cornerRadius = radius)
-        val width = size.width * if (motion) minOf(fill.value, target) else target
+        val width = size.width * (fill?.let { minOf(it.value, target) } ?: target)
         if (width > 0f) {
             val left = if (layoutDirection == LayoutDirection.Rtl) size.width - width else 0f
             drawRoundRect(color, Offset(left, 0f), Size(width, size.height), radius)

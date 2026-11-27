@@ -16,8 +16,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -41,8 +44,44 @@ import dev.mangaflow.anime.canonicalDoubanId
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.ui.glass.mangaHazeSource
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.platform.softwareBitmap
+
+/** The transfer follows the actual button as it passes behind the pinned back bar. */
+@Stable
+internal class AnimeDetailDockTransfer {
+    private var pageTop by mutableFloatStateOf(Float.NaN)
+    private var homeTop by mutableFloatStateOf(Float.NaN)
+    private var homeHeight by mutableIntStateOf(0)
+
+    fun recordPage(coordinates: LayoutCoordinates) {
+        pageTop = coordinates.positionInRoot().y
+    }
+
+    fun recordHome(coordinates: LayoutCoordinates) {
+        homeTop = coordinates.positionInRoot().y
+        homeHeight = coordinates.size.height
+    }
+
+    fun toolbarFraction(topInset: Int, collapsed: Boolean): Float {
+        if (!homeTop.isFinite() || !pageTop.isFinite() || homeHeight <= 0) return if (collapsed) 1f else 0f
+        val hidden = (pageTop + topInset - homeTop) / homeHeight.toFloat()
+        return MangaMotion.EnterEasing.transform(((hidden - .08f) / .78f).coerceIn(0f, 1f))
+    }
+}
+
+internal fun Modifier.animeDetailDockPresence(toolbar: Boolean, ownsAction: Boolean, motion: Boolean,
+    fraction: () -> Float): Modifier = graphicsLayer {
+    val presence = if (!motion) {
+        if (ownsAction) 1f else 0f
+    } else {
+        val position = fraction()
+        if (toolbar) position else 1f - position
+    }
+    alpha = presence
+    translationY = if (toolbar && motion) (1f - presence) * 6.dp.toPx() else 0f
+}.then(if (ownsAction) Modifier else Modifier.clearAndSetSemantics {})
 
 internal fun animeDetailFacts(subject: AnimeSubject, metadata: AnimeSubject?): String = listOfNotNull(
     (subject.year ?: metadata?.year)?.toString(),

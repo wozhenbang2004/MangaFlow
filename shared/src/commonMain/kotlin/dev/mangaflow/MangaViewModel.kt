@@ -4027,13 +4027,16 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         else openSavedChapter(current.manga, current.chapterId, current.chapterTitle)
     }
 
-    fun toggleFavorite(manga: Manga) {
+    fun toggleFavorite(manga: Manga) = toggleFavorite(manga) {}
+
+    fun toggleFavorite(manga: Manga, onChanged: (Boolean) -> Unit) {
         if (!library.ready.value) {
-            viewModelScope.launch { library.awaitReady(); toggleFavorite(manga) }
+            viewModelScope.launch { library.awaitReady(); toggleFavorite(manga, onChanged) }
             return
         }
-        library.toggleFavorite(manga)
-        copyShelfSync.onLocalFavoriteChanged(manga, library.favorites.value.any { it.id == manga.id })
+        val saved = library.toggleFavoriteAndGet(manga) ?: return
+        copyShelfSync.onLocalFavoriteChanged(manga, saved)
+        onChanged(saved)
     }
 
     fun removeFavorite(manga: Manga) {

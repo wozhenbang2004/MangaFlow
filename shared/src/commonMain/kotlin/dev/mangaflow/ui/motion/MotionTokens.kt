@@ -3,7 +3,12 @@ package dev.mangaflow.ui.motion
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.runtime.staticCompositionLocalOf
 
-/** beUI motion roles adapted to Compose. Fixed upstreams and licenses are in THIRD_PARTY_NOTICES. */
+/**
+ * beUI motion roles adapted to Compose. Fixed upstreams and licenses are in THIRD_PARTY_NOTICES.
+ * Draw direct manipulation at the input position. On release, carry velocity into the settling spring.
+ * Use navigation timing for a change of pane and the shorter swap timing for a glyph or label in place.
+ * Action callbacks own state and haptics; interruption or reduced motion may skip any visual frame.
+ */
 object MangaMotion {
     const val Quick = 120
     const val Content = 180
@@ -16,6 +21,9 @@ object MangaMotion {
     const val PressDamping = .866f
     const val PressAttackStiffness = 1_600f
     const val PressMinimumDuration = 75L
+    // Cancelled contact has no release accent. This is also used when a parent takes a drag.
+    const val CancelDamping = 1f
+    const val CancelStiffness = 1_250f
     const val IconPressScale = .94f
     const val SurfacePressScale = .985f
     const val HapticInterval = 70L
@@ -33,6 +41,10 @@ object MangaMotion {
     const val NavigationStiffness = 520f
     const val NavigationDamping = 1f
     const val NavigationFade = 160
+    // A small state change can read immediately without making both labels compete for a full pane transition.
+    const val StateSwapEnter = 150
+    const val StateSwapExit = 85
+    const val PaneExitDelay = 35
     const val RootEntryAlpha = .9f
     const val RootFadeIn = 180
     const val GestureStiffness = 420f

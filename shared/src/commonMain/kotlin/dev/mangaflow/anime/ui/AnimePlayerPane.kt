@@ -195,7 +195,27 @@ internal fun AnimePlayerPane(
         target.episode.id == state.selectedEpisodeId && playback.phase == AnimePlayerPhase.READY &&
         !playback.isBuffering && !awaitingVideo
     val blockingResolution = state.resolving && !keepingCurrentVideo
-    val recoveringHere = blockingResolution && target?.recoveringPlayback == true
+    val recoveryRequested = blockingResolution && target?.recoveringPlayback == true
+    // Native open and controller selection advance independently. Keep their two phases
+    // in the same compact recovery presentation until the new episode surface is ready.
+    var recoverySession by remember(player, detail?.subject?.id, episode?.id) { mutableStateOf<Long?>(null) }
+    val awaitingNativeOpen = recoverySession == playback.sessionGeneration && playback.phase == AnimePlayerPhase.ERROR
+    val recoveryOpening = recoverySession != null && target == null && state.playbackRecoveryStopReason == null &&
+        episode != null && episode.id == state.selectedEpisodeId && episode.id == playback.episodeId &&
+        (awaitingNativeOpen || playback.phase == AnimePlayerPhase.OPENING ||
+            playback.phase == AnimePlayerPhase.READY && awaitingVideo)
+    val recoveringHere = recoveryRequested || recoveryOpening
+    LaunchedEffect(recoveryRequested, recoveryOpening, awaitingNativeOpen, playback.sessionGeneration, playback.phase) {
+        if (recoveryRequested) {
+            if (recoverySession == null) recoverySession = playback.sessionGeneration
+        } else if (!recoveryOpening) {
+            recoverySession = null
+        } else if (awaitingNativeOpen) {
+            withFrameNanos { }
+            val live = player.state.value
+            if (live.sessionGeneration == recoverySession && live.phase == AnimePlayerPhase.ERROR) recoverySession = null
+        }
+    }
     val showingCurrentPlayback = (target == null || keepingCurrentVideo) && playback.assetKey != null &&
         playback.episodeId == state.selectedEpisodeId
     val currentOption = state.selectedPlaybackOption.takeIf {
@@ -275,8 +295,8 @@ internal fun AnimePlayerPane(
         (controlsVisible || forceControls)
     val motion = LocalMotionEnabled.current
     val reveal = animateFloatAsState(if (showChrome) 1f else 0f,
-        if (!motion) snap() else if (showChrome) spring(dampingRatio = .92f, stiffness = 650f)
-        else spring(dampingRatio = 1f, stiffness = 1_050f),
+        if (!motion) snap() else if (showChrome) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness)
+        else spring(MangaMotion.NavigationDamping, MangaMotion.PressStiffness),
         label = "anime-player-controls")
     // Only the small chrome layers observe the spring on each frame. Native video and its
     // sampling source need to know only when those layers actually mount or leave.
@@ -321,11 +341,20 @@ internal fun AnimePlayerPane(
     val showStage = blockingResolution || failure != null || opening
     val showArtwork = showStage && !recoveringHere && subject?.coverUrl?.isNotBlank() == true &&
         !(playback.firstFrameRendered == true && playback.episodeId == episode?.id) && !playback.inPictureInPicture
-    val posterSource = if (showArtwork && subject != null) animePosterSourceId(subject) else null
-    val posterLayer = if (showArtwork) key(subject?.id, subject?.coverUrl, posterSource) { rememberHazeState() } else null
-    val posterLoaded = remember(posterLayer) { mutableStateOf(false) }
+    val posterLoaded = remember(player, subject?.id, subject?.coverUrl, episode?.id) { mutableStateOf(false) }
+    val revealFrame = motion && posterLoaded.value && showingCurrentPlayback && !showStage && !recoveringHere &&
+        !playback.inPictureInPicture && (playback.firstFrameRendered == true || playback.canSourceVideoGlass)
+    val posterOpacity = key(player, subject?.id, subject?.coverUrl, episode?.id) {
+        animateFloatAsState(if (showArtwork) 1f else 0f,
+            if (revealFrame) tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing) else snap(),
+            label = "anime-artwork-to-frame")
+    }
+    val posterVisible by remember(posterOpacity) { derivedStateOf { posterOpacity.value > .001f } }
+    val keepPoster = showArtwork || revealFrame && posterVisible
+    val posterSource = if (keepPoster && subject != null) animePosterSourceId(subject) else null
+    val posterLayer = if (keepPoster) key(subject?.id, subject?.coverUrl, episode?.id, posterSource) { rememberHazeState() } else null
     val glassAccessibility = LocalGlassAccessibilitySettings.current
-    val artwork = posterLayer?.takeIf { active && posterLoaded.value &&
+    val artwork = posterLayer?.takeIf { showArtwork && active && posterLoaded.value &&
         !glassAccessibility.reduceTransparency && !glassAccessibility.increaseContrast }
     val windowsDockRenderer = LocalWindowsVideoDock.current
     // Desktop has no firstFrameRendered acknowledgement. Use its current libmpv decoder
@@ -375,18 +404,19 @@ internal fun AnimePlayerPane(
         if (difference != 0L) player.seekTo(destination)
         val after = player.state.value
         if (!playback.sameMedia(after) || after.phase == AnimePlayerPhase.ERROR || after.error != null) return
+        // Direct timeline edits already show their target under the pointer.
         if (desktop || forward != null) {
             val now = monotonicTimeMillis()
             val previous = feedbackNotice.value as? AnimePlayerCue.Seek
-            val distance = if (desktop && forward != null && difference != 0L && previous != null &&
+            val distance = if (forward != null && difference != 0L && previous != null &&
                 previous.forward == forward && previous.canContinue(current.timelineGeneration, now))
                 previous.distanceMs + difference else difference
             val expected = if (difference == 0L) current.timelineGeneration else current.timelineGeneration + 1L
             val cue = AnimePlayerCue.Seek(destination, forward, distance, atLimit = difference == 0L && forward != null,
-                point = point, inputTimeline = playback.timelineGeneration,
+                point = point, inputTimeline = playback.timelineGeneration, requestedTimeline = expected,
                 acceptedTimeline = after.timelineGeneration.takeIf { it == expected }, inputTime = now)
             if (desktop) lastDesktopSeek = cue
-            feedbackNotice.value = cue
+            feedbackNotice.value = cue.takeIf { forward != null }
         }
         keepTransportVisibility()
     }
@@ -442,19 +472,17 @@ internal fun AnimePlayerPane(
         else if (feedbackNotice.value is AnimePlayerCue.Volume) feedbackNotice.value = null
         return true
     }
-    fun toggle(): Boolean {
+    fun toggle(showCue: Boolean = false): Boolean {
         val current = player.state.value
         if (!canControl || !ownsPlaybackInput(playback, current) || current.phase != AnimePlayerPhase.READY && !current.ended) return false
         keepTransportVisibility()
-        when {
-            current.ended -> { player.seekTo(0L); player.play() }
-            current.playWhenReady -> player.pause()
-            else -> player.play()
-        }
+        val resume = current.ended || !current.playWhenReady
+        if (resume) player.play() else player.pause()
         val after = player.state.value
-        if (desktop && playback.sameMedia(after) && after.phase != AnimePlayerPhase.ERROR && after.error == null) {
-            feedbackNotice.value = AnimePlayerCue.Transport(current.ended || !current.playWhenReady, current.ended)
-        }
+        if (showCue && desktop && playback.sameMedia(after) && after.phase != AnimePlayerPhase.ERROR && after.error == null) {
+            val generation = current.timelineGeneration + if (current.ended) 1L else 0L
+            feedbackNotice.value = AnimePlayerCue.Transport(resume, current.ended, generation)
+        } else if (!showCue) feedbackNotice.value = null
         return true
     }
     LaunchedEffect(Unit) { focus.requestFocus() }
@@ -543,7 +571,7 @@ internal fun AnimePlayerPane(
                 } else if (event.type != KeyEventType.KeyUp) false
                 else if (locked) { if (event.key == Key.Escape) { locked = false; true } else false }
                 else when (event.key) {
-                    Key.Spacebar -> toggle()
+                    Key.Spacebar -> toggle(showCue = true)
                     Key.DirectionLeft, Key.DirectionRight -> if (!desktop) {
                         seek(if (event.key == Key.DirectionRight) 10_000L else -10_000L); true
                     } else false
@@ -630,7 +658,6 @@ internal fun AnimePlayerPane(
             val controlsTop = videoTop + videoHeight
             val statusBottom = if (chromeMounted) footerHeight else 0.dp
             val statusTop = if (headerOverVideo && chromeMounted) headerHeight else 0.dp
-            val seekReadoutFits = videoHeight - statusTop - statusBottom >= with(density) { 18.sp.toDp() } + 14.dp
             val compactStage = videoHeight - (if (headerOverVideo) headerHeight else 0.dp) - footerHeight < 108.dp
             val pointerMedia = playback
             val latestChrome by rememberUpdatedState(playback)
@@ -732,10 +759,12 @@ internal fun AnimePlayerPane(
                         ImageRequest.Builder(imagePlatformContext(context))
                             .animeArtwork(subject.coverUrl, posterSource).build()
                     }
+                    DisposableEffect(posterLayer, posterLoaded) { onDispose { posterLoaded.value = false } }
                     AsyncImage(request, contentDescription = null, contentScale = ContentScale.Crop,
                         onSuccess = { posterLoaded.value = true }, onError = { posterLoaded.value = false },
                         onLoading = { posterLoaded.value = false },
-                        modifier = Modifier.fillMaxSize().then(if (artwork != null) Modifier.mangaHazeSource(artwork) else Modifier))
+                        modifier = Modifier.fillMaxSize().graphicsLayer { alpha = posterOpacity.value }
+                            .then(if (artwork != null) Modifier.mangaHazeSource(artwork) else Modifier))
                 }
                 if (!playback.inPictureInPicture) Box(Modifier.fillMaxSize()
                     .padding(top = statusTop, bottom = statusBottom)
@@ -867,8 +896,6 @@ internal fun AnimePlayerPane(
                 val scrubbing by remember(seekPreview) { derivedStateOf { seekPreview.value != null } }
                 AnimePlayerFeedback(feedbackNotice, active && !obscured && !locked && !panelPresent && !scrubbing &&
                     !playback.inPictureInPicture && showingCurrentPlayback && failure == null, desktop, observations)
-                if (timelineInteractive && seekReadoutFits) AnimeTimelinePreview(seekPreview,
-                    Modifier.align(Alignment.BottomCenter).padding(start = 8.dp, end = 8.dp, bottom = statusBottom + 6.dp))
             }
 
             val headerInteractive = !headerOverVideo || showChrome
@@ -881,8 +908,8 @@ internal fun AnimePlayerPane(
                         val amount = if (headerOverVideo) reveal.value.coerceIn(0f, 1f) else 1f
                         alpha = amount
                         transformOrigin = TransformOrigin(.5f, 0f)
-                        scaleY = .96f + .04f * amount
-                        translationY = (1f - amount) * -11.dp.toPx()
+                        scaleY = .99f + .01f * amount
+                        translationY = (1f - amount) * -8.dp.toPx()
                     }
                     .motionInputGate(active && headerInteractive && !obscured && !settingsPresent && !watchPanelPresent)
                     .onFocusChanged { headerFocused = it.hasFocus }.focusGroup()
@@ -974,9 +1001,9 @@ internal fun AnimePlayerPane(
                         val amount = reveal.value.coerceIn(0f, 1f)
                         alpha = amount
                         transformOrigin = TransformOrigin(.5f, 1f)
-                        scaleX = .98f + .02f * amount
-                        scaleY = .92f + .08f * amount
-                        translationY = (1f - amount) * 16.dp.toPx()
+                        scaleX = .995f + .005f * amount
+                        scaleY = .985f + .015f * amount
+                        translationY = (1f - amount) * 10.dp.toPx()
                     }
                     .motionInputGate(active && showChrome && !locked && !obscured && !settingsPresent && !watchPanelPresent)
                     .onFocusChanged { transportFocused = it.hasFocus }.focusGroup()
@@ -1475,7 +1502,9 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
             val timelineFocus = remember(state.sessionGeneration, state.assetKey, state.episodeId) { FocusRequester() }
             var timelineFocused by remember(state.sessionGeneration, state.assetKey, state.episodeId) { mutableStateOf(false) }
             AnimePlaybackObservation(observations) { current ->
-                if (!state.owns(current) || current.durationMs <= 0L) return@AnimePlaybackObservation
+                // A seek updates the observed clock before its slower chrome snapshot.
+                // Keep the row painted; only the gesture from its owning timeline can commit.
+                if (!state.sameMedia(current) || current.durationMs <= 0L) return@AnimePlaybackObservation
                 val duration = current.durationMs
                 val bufferedRange = current.bufferedMs.takeIf {
                     current.phase == AnimePlayerPhase.READY && current.assetKey != null &&
@@ -1485,7 +1514,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     val timeStyle = MaterialTheme.typography.labelSmall.copy(fontFamily = mangaFontFamily(MangaFontScene.NUMBERS),
                         fontFeatureSettings = "tnum", fontSize = 12.sp, lineHeight = 18.sp)
-                    val position = seekPreview.value?.positionMs ?: current.positionMs
+                    val position = seekPreview.value?.positionMs?.takeIf { state.owns(current) } ?: current.positionMs
                     Text(animeTime(position), modifier = ink, style = timeStyle, fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold, maxLines = 1, color = MaterialTheme.colorScheme.onSurface)
                     MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(surface = MaterialTheme.colorScheme.onSurface)) {
@@ -1498,7 +1527,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                                     if (editOpen && window.isWindowFocused) timelineFocus.requestFocus()
                                 }
                             }
-                            AnimeTimelineSlot(desktop, duration, Modifier.weight(1f)) { track ->
+                            AnimeTimelineSlot(desktop && timelineInteractive, duration, seekPreview, Modifier.weight(1f)) { track ->
                                 MotionSlider(value = position.toFloat(), enabled = timelineInteractive,
                                     onValueChange = { requested ->
                                         val live = player.state.value
@@ -1515,12 +1544,12 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                                         if (editOpen) {
                                             val requested = seekPreview.value
                                             val live = player.state.value
-                                            seekPreview.value = null
                                             if (requested != null && window.isWindowFocused && state.owns(live) &&
                                                 !live.inPictureInPicture && live.durationMs > 0L &&
                                                 (live.phase == AnimePlayerPhase.READY || live.ended)) {
                                                 onSeekTo(live, requested.positionMs.coerceIn(0L, live.durationMs))
                                             } else if (window.isWindowFocused) onInteraction()
+                                            seekPreview.value = null
                                         }
                                     },
                                     formatValue = { animeTime(it.toLong()) },

@@ -46,6 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
@@ -63,6 +64,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.platform.LocalDensity
@@ -351,6 +353,13 @@ internal fun AnimeDetailPane(
         val contentInsets = screenFitContentInsets()
         val bottomInset = contentInsets.asPaddingValues().calculateBottomPadding()
         val showDock = playControl != null && WindowInsets.ime.getBottom(density) == 0
+        val dockTransfer = remember(subject.id, landscapeStage, showDock) { AnimeDetailDockTransfer() }
+        val dockTransferFraction = remember(dockTransfer, toolbarPixels, header) {
+            { dockTransfer.toolbarFraction(toolbarPixels, header.heightOffsetLimit < 0f &&
+                header.heightOffset <= header.heightOffsetLimit + 1f) }
+        }
+        val toolbarOwnsPlay by remember(dockTransferFraction) { derivedStateOf { dockTransferFraction() >= .5f } }
+        val movePlay = motion && !LocalTouchExplorationEnabled.current
         var measuredDock by remember(subject.id, width, density, compactHero) { mutableIntStateOf(0) }
         // Lists draw edge-to-edge, but their last row must scroll completely clear of the dock.
         val dockClearance = if (showDock && !wide) maxOf((38f * fontScale + 10f).coerceAtLeast(56f).dp,
@@ -481,7 +490,10 @@ internal fun AnimeDetailPane(
         }
         val hero: @Composable () -> Unit = {
             if (landscapeStage) {
-                val primary: (@Composable (Modifier) -> Unit)? = if (showDock) ({ playDock(it, !stageCollapsed) }) else null
+                val primary: (@Composable (Modifier) -> Unit)? = if (showDock) ({ slot ->
+                    playDock(slot.onGloballyPositioned(dockTransfer::recordHome)
+                        .animeDetailDockPresence(false, !toolbarOwnsPlay, movePlay, dockTransferFraction), !toolbarOwnsPlay)
+                }) else null
                 AnimeDetailStage(subject, canonicalInfo, liveScores, backdrop, contentTopPadding,
                     compactStage, active, stageCollapsed, primary, follow, onSummary = { selectDetailTab(1) })
             } else AnimeDetailHero(subject, canonicalInfo, liveScores, wide, compactHero, active, backdrop,
@@ -501,7 +513,8 @@ internal fun AnimeDetailPane(
                                 fontSize = 13.sp, fullWidthIndicator = true)
                         }
                     }
-                    if (stageCollapsed && showDock) playDock(Modifier.padding(start = 8.dp).width(206.dp * fontScale), true)
+                    if (landscapeStage && showDock) playDock(Modifier.padding(start = 8.dp).width(206.dp * fontScale)
+                        .animeDetailDockPresence(true, toolbarOwnsPlay, movePlay, dockTransferFraction), toolbarOwnsPlay)
                     if (detailTab == 2 && observedWork != null) {
                         AnimeDiscussionSourcesStrip(subject.id, currentDiscussion.checks, backdrop,
                             enabled = active, canRetry = true,
@@ -929,7 +942,8 @@ internal fun AnimeDetailPane(
             Column(Modifier.weight(1f).fillMaxHeight().padding(top = contentTopPadding + 8.dp)) {
                 sectionPane(Modifier.fillMaxSize())
             }
-        } else Box(Modifier.widthIn(max = if (landscapeStage) 1400.dp else 1080.dp).fillMaxSize()) {
+        } else Box(Modifier.widthIn(max = if (landscapeStage) 1400.dp else 1080.dp).fillMaxSize()
+            .then(if (landscapeStage) Modifier.onGloballyPositioned(dockTransfer::recordPage) else Modifier)) {
             // Like the manga detail, drags outside a tile share the current catalogue's scroll owner.
             val catalogueDrag = Modifier.scrollable(activeCatalogScroll, Orientation.Vertical, reverseDirection = true,
                 enabled = active && detailTab == 0 && !statusPresent && !discussionChecksPresent &&
@@ -1283,6 +1297,10 @@ private fun AnimeEpisodeRanges(
     val groupHeight = 6
     val scope = rememberCoroutineScope()
     val ranges = remember(rows) { rows.chunked(groupHeight) }
+    val motion = LocalMotionEnabled.current && !LocalTouchExplorationEnabled.current
+    val feedback = rememberFeelFeedback()
+    var jump by remember(position) { mutableStateOf<Job?>(null) }
+    DisposableEffect(position, rows, prefix, active) { onDispose { jump?.cancel() } }
     val selected by remember(position, prefix) {
         derivedStateOf {
             val lastRangeReached = position.canScrollBackward && !position.canScrollForward
@@ -1308,11 +1326,26 @@ private fun AnimeEpisodeRanges(
             val interaction = remember { MutableInteractionSource() }
             val colors = MaterialTheme.colorScheme
             val current = index == selected
+            val fill = animateFloatAsState(if (current) 1f else 0f,
+                if (motion) tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing) else snap(),
+                label = "episode-range-selection")
             Box(Modifier.clip(RoundedCornerShape(12.dp))
-                .background(if (current) colors.primaryContainer else Color.Transparent)
+                .drawBehind { drawRect(colors.primaryContainer, alpha = fill.value) }
                 .clickable(enabled = active, role = Role.Button, onClickLabel = "跳到第 $label 集",
                     interactionSource = interaction, indication = null,
-                    onClick = { scope.launch { position.scrollToItem(prefix + index * groupHeight) } })
+                    onClick = {
+                        jump?.cancel()
+                        val target = prefix + index * groupHeight
+                        val distance = abs(target - position.firstVisibleItemIndex)
+                        if (distance > 0 || position.firstVisibleItemScrollOffset != 0) {
+                            if (motion && !current) feedback.perform(FeelEvent.Selection)
+                            val nearby = distance <= position.layoutInfo.visibleItemsInfo.size.coerceAtLeast(1) * 2
+                            jump = scope.launch {
+                                if (motion && nearby) position.animateScrollToItem(target)
+                                else position.scrollToItem(target)
+                            }
+                        }
+                    })
                 .motionPress(interaction, enabled = active).heightIn(min = 44.dp)
                 .semantics { this.selected = current }.padding(horizontal = 12.dp),
                 contentAlignment = Alignment.Center) {
@@ -1534,17 +1567,25 @@ private fun AnimeEpisodeCell(
     var menuVisible by remember(episode.id) { mutableStateOf(false) }
     var menuMounted by remember(episode.id) { mutableStateOf(false) }
     var sourcesAfterMenu by remember(episode.id) { mutableStateOf(false) }
+    val feedback = rememberFeelFeedback()
+    val acknowledge = LocalMotionEnabled.current && !LocalTouchExplorationEnabled.current
+    val selectEpisode = {
+        if (active && !menuMounted) {
+            if (acknowledge) feedback.perform(FeelEvent.Selection)
+            onPlay()
+        }
+    }
     LaunchedEffect(active) { if (!active) { menuVisible = false; sourcesAfterMenu = false } }
     Box(modifier) {
         val openMenu = { menuMounted = true; menuVisible = true }
         if (listRow) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             AnimeEpisodeTile(episode, availability, progress, completed, "上次观看".takeIf { resume },
-                active, onPlay, onSources, modifier = Modifier.weight(1f), listRow = true, onMore = openMenu, titleFirst = true)
+                active, selectEpisode, onSources, modifier = Modifier.weight(1f), listRow = true, onMore = openMenu, titleFirst = true)
             MotionIconButton(onClick = openMenu, enabled = active, modifier = Modifier.size(38.dp), tooltip = "本集操作") {
                 Icon(Icons.Outlined.MoreHoriz, "本集操作", Modifier.size(18.dp))
             }
         } else AnimeEpisodeTile(episode, availability, progress, completed, "上次观看".takeIf { resume },
-            active, onPlay, onSources, onMore = openMenu)
+            active, selectEpisode, onSources, onMore = openMenu)
         if (menuMounted) CompactGlassPopover(menuVisible, backdrop,
             onDismiss = { menuVisible = false; sourcesAfterMenu = false },
             onPresenceChange = { present ->

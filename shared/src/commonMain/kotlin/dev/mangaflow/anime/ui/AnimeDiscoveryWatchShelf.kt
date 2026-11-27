@@ -1,9 +1,15 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
@@ -23,8 +29,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
@@ -34,6 +43,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import coil3.decode.DataSource
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
@@ -45,6 +55,7 @@ import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
@@ -130,6 +141,7 @@ private fun AnimeDiscoveryResumeCard(entry: AnimeLibraryEntry, action: String, a
     val accessibility = LocalGlassAccessibilitySettings.current
     val opaque = accessibility.increaseContrast || accessibility.reduceTransparency
     val interaction = remember(entry.subject.id) { MutableInteractionSource() }
+    val motion = LocalMotionEnabled.current
     val coverWidth = if (reflow) 43.dp else 55.dp
     val title = entry.subject.title.ifBlank { entry.subject.originalTitle.ifBlank { "未命名番剧" } }
     val click = Modifier.fillMaxWidth().clip(RoundedCornerShape(if (wide) 12.dp else 16.dp))
@@ -137,11 +149,30 @@ private fun AnimeDiscoveryResumeCard(entry: AnimeLibraryEntry, action: String, a
             enabled = active, role = Role.Button, onClickLabel = action, onClick = onResume)
         .motionPress(interaction, enabled = active, pressedScale = .985f)
     if (wide) {
+        val hovered by interaction.collectIsHoveredAsState()
+        val focused by interaction.collectIsFocusedAsState()
+        val pressed by interaction.collectIsPressedAsState()
+        val keyboard = LocalInputModeManager.current.inputMode == InputMode.Keyboard
+        val highlighted = active && (pressed || hovered || focused && keyboard)
+        val highlight = animateFloatAsState(if (highlighted) 1f else 0f,
+            if (!motion) snap() else if (highlighted) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing)
+            else tween(MangaMotion.Quick, easing = MangaMotion.ExitEasing), label = "resume-art-focus")
         val episode = animeWatchedEpisodeName(entry, progress)
         Column(click.semantics { stateDescription = episode + "，" + animeWatchPosition(progress) },
             verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Box(Modifier.fillMaxWidth().aspectRatio(2.04f).clip(RoundedCornerShape(11.dp))) {
-                AnimeResumePoster(entry, title, Modifier.matchParentSize(), wide = true)
+                AnimeResumePoster(entry, title, Modifier.matchParentSize().graphicsLayer {
+                    val scale = if (motion && !opaque) 1f + .025f * highlight.value else 1f
+                    scaleX = scale
+                    scaleY = scale
+                }, wide = true)
+                Box(Modifier.align(Alignment.TopStart).padding(8.dp).size(30.dp).graphicsLayer {
+                    alpha = highlight.value
+                    if (motion) translationY = (1f - highlight.value) * 3.dp.toPx()
+                }.background(colors.surface, RoundedCornerShape(50)).clearAndSetSemantics { },
+                    contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.PlayArrow, null, Modifier.size(18.dp), tint = colors.onSurface)
+                }
                 Text(if (progress.completed) "已看完" else "看到 " + animeTime(progress.positionMs),
                     Modifier.align(Alignment.BottomEnd).padding(7.dp).clearAndSetSemantics { }
                         .background(colors.surface.copy(alpha = if (opaque) 1f else .93f), RoundedCornerShape(6.dp))
@@ -204,30 +235,44 @@ private fun AnimeResumePoster(entry: AnimeLibraryEntry, title: String, modifier:
             entry.nativeMetadata ?: detail?.metadataSubject?.takeUnless { entry.metadataAutoMatchDisabled }
         else null
         listOfNotNull(subject, detail?.subject, linked?.takeIf { it.canonicalBangumiId() != null })
-            .filter { it.coverUrl.isNotBlank() }.distinctBy { it.coverUrl to animePosterSourceId(it) }
+            .filter { it.coverUrl.isNotBlank() }.map { it.coverUrl to animePosterSourceId(it) }.distinct()
     }
     var selection by remember(candidates) { mutableIntStateOf(0) }
     var imageVisible by remember(candidates) { mutableStateOf(false) }
+    var freshImage by remember(candidates) { mutableStateOf(false) }
+    val access = LocalGlassAccessibilitySettings.current
+    val fade = LocalMotionEnabled.current && !access.increaseContrast && !access.reduceTransparency
+    val imageAlpha = key(candidates) {
+        animateFloatAsState(if (imageVisible) 1f else 0f,
+            if (fade && freshImage) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
+            label = "resume-art-arrival")
+    }
     val colors = MaterialTheme.colorScheme
     val initial = remember(title) { title.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() }
     Box(modifier.clearAndSetSemantics { }
         .clip(RoundedCornerShape(if (wide) 11.dp else 9.dp)).background(colors.secondaryContainer), contentAlignment = Alignment.Center) {
-        if (!imageVisible) {
+        val placeholder by remember(imageAlpha) { derivedStateOf { imageAlpha.value < 1f } }
+        if (placeholder) Box(Modifier.matchParentSize().graphicsLayer { alpha = 1f - imageAlpha.value },
+            contentAlignment = Alignment.Center) {
             if (initial != null) Text(initial, style = animeWorkTitleStyle(large = true), color = colors.onSecondaryContainer,
                 maxLines = 1)
             else Icon(Icons.Outlined.Movie, null, Modifier.size(22.dp), tint = colors.onSecondaryContainer)
         }
         val index = selection
-        candidates.getOrNull(index)?.let { artwork ->
+        candidates.getOrNull(index)?.let { (url, source) ->
             val context = LocalMangaContext.current
-            val source = animePosterSourceId(artwork)
-            val request = remember(context, source, artwork.coverUrl) {
-                ImageRequest.Builder(imagePlatformContext(context)).animeArtwork(artwork.coverUrl, source).crossfade(false).build()
+            val request = remember(context, source, url) {
+                ImageRequest.Builder(imagePlatformContext(context)).animeArtwork(url, source).crossfade(false).build()
             }
             key(request) {
-                AsyncImage(request, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
+                AsyncImage(request, null, Modifier.fillMaxSize().graphicsLayer { alpha = imageAlpha.value }, contentScale = ContentScale.Crop,
                     alignment = if (wide) BiasAlignment(0f, -.56f) else Alignment.Center,
-                    onSuccess = { if (selection == index) imageVisible = true },
+                    onSuccess = {
+                        if (selection == index) {
+                            if (!imageVisible) freshImage = it.result.dataSource != DataSource.MEMORY_CACHE
+                            imageVisible = true
+                        }
+                    },
                     onError = {
                         if (selection == index) {
                             imageVisible = false

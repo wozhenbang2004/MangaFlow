@@ -228,6 +228,10 @@ fun LibraryScreen(
         copyShelfAvailable && scopeName == UnifiedShelfScope.COPY.name -> UnifiedShelfScope.COPY
         else -> UnifiedShelfScope.LOCAL
     }
+    val coverRoute = LocalMangaCoverTransition.current
+    val coverPlacement = remember(adultProfile, shelfScope, siteSource?.id) {
+        "library-" + (if (adultProfile) "private-" else "manga-") + (siteSource?.id ?: shelfScope.name)
+    }
     val siteShelves = siteSources.associate { source -> key(source.id) {
         source.id to remember(source, repository, siteAccountRevision) { ProfileSiteShelf(source, repository) }
     } }
@@ -271,10 +275,12 @@ fun LibraryScreen(
     var draggedFavorite by remember { mutableStateOf<Manga?>(null) }
     var dragPoint by remember { mutableStateOf(Offset.Unspecified) }
     var trashBounds by remember { mutableStateOf<Rect?>(null) }
-    fun isTrashDrop(point: Offset): Boolean {
+    fun ownsFavoriteDrag(manga: Manga): Boolean =
+        draggedFavorite?.let { it.sourceId == manga.sourceId && it.id == manga.id } == true
+    fun isTrashDrop(point: Offset, extraRadius: Float = 0f): Boolean {
         val bounds = trashBounds ?: return false
         if (point == Offset.Unspecified || bounds.isEmpty) return false
-        val radius = minOf(bounds.width, bounds.height) / 2f
+        val radius = minOf(bounds.width, bounds.height) / 2f + extraRadius
         return (point - bounds.center).getDistanceSquared() <= radius * radius
     }
     val trashArmed by remember { derivedStateOf { draggedFavorite != null && isTrashDrop(dragPoint) } }
@@ -284,7 +290,16 @@ fun LibraryScreen(
     val trashEmphasis = animateFloatAsState(if (trashArmed) 1.12f else 1f,
         if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else androidx.compose.animation.core.snap(),
         label = "trash-target-press")
-    LaunchedEffect(trashArmed) { if (trashArmed) haptics.perform(FeelEvent.Threshold) }
+    val rim = with(density) { 7.dp.toPx() }
+    val outsideRim by remember(rim) { derivedStateOf { !isTrashDrop(dragPoint, rim) } }
+    var targetAnnounced by remember(draggedFavorite?.sourceId, draggedFavorite?.id) { mutableStateOf(false) }
+    LaunchedEffect(trashArmed, outsideRim) {
+        if (outsideRim) targetAnnounced = false
+        else if (trashArmed && !targetAnnounced) {
+            targetAnnounced = true
+            haptics.perform(FeelEvent.Threshold)
+        }
+    }
     val localBooksPosition = rememberLazyGridState()
     val copyBooksPosition = rememberLazyGridState()
     val siteBookPositions = siteSources.associate { source -> key(source.id) {
@@ -363,10 +378,11 @@ fun LibraryScreen(
         it.owner != null && (it.differences.isNotEmpty() || it.favoritesError != null || it.progressError != null)
     }
     val importCopy = onImportCopy ?: onCopySync
-    fun removeFavoriteWithUndo(manga: Manga) {
-        if (!sourceIncluded(manga.sourceId) || (manga.sourceId to manga.id) !in localKeys ||
-            manga.id in pendingFavorites) return
+    fun removeFavoriteWithUndo(manga: Manga): Boolean {
+        if (!active || !sourceIncluded(manga.sourceId) || (manga.sourceId to manga.id) !in localKeys ||
+            manga.id in pendingFavorites) return false
         pendingFavorites = pendingFavorites + manga.id
+        haptics.perform(FeelEvent.Confirm)
         snackbar.currentSnackbarData?.dismiss()
         removalScope.launch {
             var undone = false
@@ -381,6 +397,7 @@ fun LibraryScreen(
                 pendingFavorites = pendingFavorites - manga.id
             }
         }
+        return true
     }
     fun removeHistoryWithUndo(mangaId: String) {
         if (scopedHistory.any { it.manga.id == mangaId }) historyRemoval.request(mangaId, onRemoveHistory)
@@ -644,15 +661,22 @@ fun LibraryScreen(
                                 val saved = progressById[manga.id]
                                 val preferred = preferredResumeTargets[manga.id]?.takeIf { it.mangaId == manga.id }
                                 val hasContinuation = preferred != null || saved != null
-                                val dragged = draggedFavorite?.id == manga.id
+                                val dragged = ownsFavoriteDrag(manga)
                                 val interaction = remember(manga.id) { MutableInteractionSource() }
                                 val hovered by interaction.collectIsHoveredAsState()
                                 var cardFocused by remember(manga.id) { mutableStateOf(false) }
                                 var bookMenuOpen by remember(manga.id) { mutableStateOf(false) }
                                 val desktopTools = desktop && (hovered || cardFocused || bookMenuOpen)
+                                val coverKey = remember(manga.id, coverPlacement) { MangaCoverKey(manga.id, coverPlacement) }
+                                val shareArtwork = managedId == manga.id || desktopTools || coverRoute?.selected == coverKey
+                                val openBookDetails = {
+                                    onCancelOpen()
+                                    coverRoute?.select?.invoke(coverKey)
+                                    onDetails(manga)
+                                }
                                 val bookActions = listOf(
                                     DesktopMenuAction(if (hasContinuation) "继续阅读" else "开始阅读", icon = Icons.Outlined.AutoStories) { onOpen(manga) },
-                                    DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList) { onCancelOpen(); onDetails(manga) },
+                                    DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList, onClick = openBookDetails),
                                     DesktopMenuAction("章节记录", icon = Icons.Outlined.History) { onCancelOpen(); chapterHistoryManga = manga },
                                     when {
                                         allowLocalRemoval -> DesktopMenuAction("移出本机收藏", icon = Icons.Outlined.BookmarkRemove, destructive = true) { removeFavoriteWithUndo(manga) }
@@ -683,19 +707,24 @@ fun LibraryScreen(
                                                 managedId = null
                                                 if (allowLocalRemoval) { draggedFavorite = manga; dragPoint = point }
                                             },
-                                            onDragMove = { dragPoint = it },
+                                            onDragMove = { if (ownsFavoriteDrag(manga)) dragPoint = it },
                                             onDragEnd = { point ->
-                                                val shouldRemove = draggedFavorite?.id == manga.id && isTrashDrop(point)
-                                                draggedFavorite = null
-                                                dragPoint = Offset.Unspecified
-                                                if (shouldRemove && allowLocalRemoval) removeFavoriteWithUndo(manga)
+                                                if (ownsFavoriteDrag(manga)) {
+                                                    val removed = allowLocalRemoval && isTrashDrop(point) && removeFavoriteWithUndo(manga)
+                                                    draggedFavorite = null
+                                                    dragPoint = Offset.Unspecified
+                                                    removed && shelfScope == UnifiedShelfScope.LOCAL
+                                                } else false
                                             },
                                             onDragCancel = {
-                                                draggedFavorite = null
-                                                dragPoint = Offset.Unspecified
+                                                if (ownsFavoriteDrag(manga)) {
+                                                    draggedFavorite = null
+                                                    dragPoint = Offset.Unspecified
+                                                }
                                             },
                                             modifier = Modifier.fillMaxWidth().aspectRatio(.7f),
                                             decodeSize = decodeSize,
+                                            coverPlacement = coverPlacement.takeIf { shareArtwork },
                                         )
                                     }
                                     if (fromCopy) Row(Modifier.align(Alignment.TopStart).padding(6.dp)
@@ -717,7 +746,7 @@ fun LibraryScreen(
                                         Surface(shape = RoundedCornerShape(10.dp),
                                             color = MaterialTheme.colorScheme.surface.copy(alpha = .94f)) {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                                MotionIconButton(onClick = { onCancelOpen(); onDetails(manga) },
+                                                MotionIconButton(onClick = openBookDetails,
                                                     modifier = Modifier.size(32.dp)) {
                                                     Icon(Icons.AutoMirrored.Outlined.MenuBook, "详情与目录", Modifier.size(17.dp))
                                                 }
@@ -757,12 +786,12 @@ fun LibraryScreen(
                                                 Modifier.padding(top = 3.dp))
                                         }
                                         if (remote) CloudFavoriteActionsMenu(managedId == manga.id,
-                                            onDismiss = { managedId = null }, onDetails = { onDetails(manga) },
+                                            onDismiss = { managedId = null }, onDetails = openBookDetails,
                                             onRemove = { removeSiteBook(manga) },
                                             removeEnabled = siteVisible && siteShelf?.busy == false, removeLabel = "移出站点收藏")
                                         else RecordActionsMenu(managedId == manga.id,
                                             onDismiss = { managedId = null },
-                                            onDetails = { onDetails(manga) })
+                                            onDetails = openBookDetails)
                                     }
                                 }
                                 }

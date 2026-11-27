@@ -65,6 +65,8 @@ import androidx.compose.material3.contentColorFor
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
@@ -86,6 +88,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
@@ -122,6 +125,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 internal val LocalTabVisibilityScope = staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
 
@@ -216,6 +220,18 @@ private fun desktopPressState(source: MutableInteractionSource, enabled: Boolean
     return state
 }
 
+private fun DrawScope.drawContactLight(brush: Brush, origin: TransformOrigin, maxRadius: Dp,
+    amount: Float, motion: Boolean) {
+    if (amount <= .001f || size.minDimension <= 0f) return
+    val reach = minOf(size.minDimension * .49f, maxRadius.toPx())
+    val x = (size.width * origin.pivotFractionX).coerceIn(reach, size.width - reach)
+    val y = (size.height * origin.pivotFractionY).coerceIn(reach, size.height - reach)
+    val radius = if (motion) reach * (.85f + .15f * amount) else reach
+    withTransform({ translate(x, y); scale(radius, radius, Offset.Zero) }) {
+        drawCircle(brush, radius = 1f, center = Offset.Zero, alpha = amount)
+    }
+}
+
 @Composable
 private fun Modifier.motionPressFeedback(
     interaction: MutableInteractionSource,
@@ -236,11 +252,12 @@ private fun Modifier.motionPressFeedback(
     val feedbackColor = MaterialTheme.colorScheme.onSurface
     var down by remember(interaction) { mutableStateOf(false) }
     var directPress by remember(interaction) { mutableStateOf(false) }
+    var cancelledContact by remember(interaction) { mutableStateOf(false) }
     var contact by remember(interaction) { mutableStateOf(TransformOrigin.Center) }
     var mouseContact by remember(interaction) { mutableStateOf(false) }
     var release by remember(interaction) { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
-    val pressed = feedbackEnabled && (directPress || (!down && interactionPressed))
+    val pressed = feedbackEnabled && (directPress || (!down && !cancelledContact && interactionPressed))
     val motion = LocalMotionEnabled.current
     LaunchedEffect(feedbackEnabled) {
         if (!feedbackEnabled) {
@@ -252,14 +269,19 @@ private fun Modifier.motionPressFeedback(
     }
     val pressure = animateFloatAsState(
         if (pressed) 1f else 0f,
-        if (!motion) snap() else if (pressed) spring(1f, MangaMotion.PressAttackStiffness)
-        else spring(MangaMotion.PressDamping, MangaMotion.PressStiffness),
+        when {
+            !motion || !feedbackEnabled -> snap()
+            pressed -> spring(1f, MangaMotion.PressAttackStiffness)
+            cancelledContact -> spring(MangaMotion.CancelDamping, MangaMotion.CancelStiffness)
+            else -> spring(MangaMotion.PressDamping, MangaMotion.PressStiffness)
+        },
         label = "contact-pressure",
     )
     // clickable intentionally delays its Press inside scrolling parents. Observe down without
     // consuming it; Foundation still owns click/long-click/scroll, keyboard and TalkBack.
     val input = if (feedbackEnabled) Modifier.onPreviewKeyEvent {
         if (!down && it.type == KeyEventType.KeyDown) {
+            cancelledContact = false
             contact = TransformOrigin.Center
             mouseContact = false
         }
@@ -276,6 +298,7 @@ private fun Modifier.motionPressFeedback(
             release?.cancel()
             release = null
             mouseContact = mousePress
+            cancelledContact = false
             contact = TransformOrigin((first.position.x / size.width.coerceAtLeast(1)).coerceIn(.06f, .94f),
                 (first.position.y / size.height.coerceAtLeast(1)).coerceIn(.06f, .94f))
             val startedAt = monotonicTimeMillis()
@@ -290,7 +313,10 @@ private fun Modifier.motionPressFeedback(
                         (change.position - first.position).getDistance() > viewConfiguration.touchSlop ||
                         (change.pressed && change.isConsumed && change.position != change.previousPosition) ||
                         change.position.x !in 0f..size.width.toFloat() ||
-                        change.position.y !in 0f..size.height.toFloat()) directPress = false
+                        change.position.y !in 0f..size.height.toFloat()) {
+                        directPress = false
+                        cancelledContact = true
+                    }
                     if (!change.pressed) {
                         released = change.previousPressed
                         break
@@ -298,6 +324,7 @@ private fun Modifier.motionPressFeedback(
                 } while (true)
             } finally {
                 if (mousePress) desktopIcon?.mousePressed(false)
+                if (!released) cancelledContact = true
                 down = false
                 // A quick valid UP can precede the next draw. Keep only its visual attack
                 // alive briefly; clickable still commits immediately and owns semantics.
@@ -318,11 +345,11 @@ private fun Modifier.motionPressFeedback(
         if (motion) tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing) else snap(), label = "hover-ink") else null
     // The resting hover lives behind the artwork. Contact and keyboard focus must still
     // be visible over an opaque cover, button or thumbnail drawn by a child Surface.
-    val contactBrush = if (desktop) remember(feedbackColor) {
+    val contactBrush = remember(feedbackColor) {
         Brush.radialGradient(0f to feedbackColor.copy(alpha = .16f),
             .48f to feedbackColor.copy(alpha = .095f), 1f to feedbackColor.copy(alpha = 0f),
             center = Offset.Zero, radius = 1f)
-    } else null
+    }
     val desktopFeedback = if (desktop) Modifier.drawWithContent {
         if (!feedbackEnabled) {
             drawContent()
@@ -344,15 +371,7 @@ private fun Modifier.motionPressFeedback(
         drawContent()
         val amount = if (motion) maxOf(if (pressed) .45f else 0f, pressure.value.coerceIn(0f, 1f))
             else if (pressed) 1f else 0f
-        if (amount > .001f && size.minDimension > 0f && contactBrush != null) {
-            val reach = minOf(size.minDimension * .49f, (if (glyph) 16.dp else 38.dp).toPx())
-            val radius = if (motion) reach * (.85f + .15f * amount) else reach
-            val x = (size.width * contact.pivotFractionX).coerceIn(reach, size.width - reach)
-            val y = (size.height * contact.pivotFractionY).coerceIn(reach, size.height - reach)
-            withTransform({ translate(x, y); scale(radius, radius, Offset.Zero) }) {
-                drawCircle(contactBrush, radius = 1f, center = Offset.Zero, alpha = amount)
-            }
-        }
+        drawContactLight(contactBrush, contact, if (glyph) 16.dp else 38.dp, amount, motion)
         if (focusVisible) {
             val stroke = (if (contrast) 2.dp else if (glyph) 1.dp else 1.25.dp).toPx()
             val width = if (glyph && !contrast) minOf(34.dp.toPx(), size.minDimension - stroke) else size.width - stroke
@@ -374,6 +393,14 @@ private fun Modifier.motionPressFeedback(
             drawCircle(feedbackColor.copy(alpha = .075f * amount), radius, center + offset)
         }
     } else Modifier
+    // A wide opaque cover hardly moves under a finger. Put its contact feedback above
+    // the artwork and keep the footprint local so the title remains readable.
+    val touchSurface = if (!desktop && !icon) Modifier.drawWithContent {
+        drawContent()
+        val amount = if (motion) maxOf(if (pressed) .38f else 0f, pressure.value.coerceIn(0f, 1f))
+            else if (pressed) 1f else 0f
+        drawContactLight(contactBrush, contact, 42.dp, amount, motion)
+    } else Modifier
     val cursor = if (desktop && enabled) Modifier.pointerHoverIcon(PointerIcon.Hand) else Modifier
     return then(input).then(cursor).then(desktopFeedback).graphicsLayer {
         val extent = maxOf(size.width, size.height).coerceAtLeast(1f)
@@ -383,8 +410,8 @@ private fun Modifier.motionPressFeedback(
         transformOrigin = contact
         scaleX = scale
         scaleY = scale
-        alpha = if (!desktop && !motion && pressed) .72f else 1f
-    }.then(iconContact)
+        alpha = if (icon && !desktop && !motion && pressed) .72f else 1f
+    }.then(iconContact).then(touchSurface)
 }
 
 /** beUI PresenceGate: outgoing visuals do not expose controls or handle new input. */
@@ -432,14 +459,19 @@ internal fun <T> MotionSwap(
     content: @Composable (T) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
+    if (!motion) {
+        Box(modifier, contentAlignment = Alignment.Center) { key(target) { content(target) } }
+        return
+    }
     AnimatedContent(targetState = target, modifier = modifier, contentAlignment = Alignment.Center,
         transitionSpec = {
-            if (!motion) (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
-            else if (scaleContent) {
-                ((fadeIn(tween(MangaMotion.Quick)) + scaleIn(spring(.943f, 836f), initialScale = .86f)) togetherWith
-                    (fadeOut(tween(90)) + scaleOut(tween(MangaMotion.Quick), targetScale = .92f))).using(null)
-            } else (fadeIn(tween(MangaMotion.Quick, delayMillis = 25, easing = MangaMotion.EnterEasing)) togetherWith
-                fadeOut(tween(75))).using(null)
+            val appear = fadeIn(tween(MangaMotion.StateSwapEnter, easing = MangaMotion.EnterEasing))
+            val clear = fadeOut(tween(MangaMotion.StateSwapExit, easing = MangaMotion.ExitEasing))
+            if (scaleContent) {
+                val grow = scaleIn(spring(MangaMotion.PressDamping, MangaMotion.PressStiffness), initialScale = .9f)
+                val shrink = scaleOut(tween(MangaMotion.StateSwapExit, easing = MangaMotion.ExitEasing), targetScale = .95f)
+                ((appear + grow) togetherWith (clear + shrink)).using(null)
+            } else (appear togetherWith clear).using(null)
         }, label = "state-slot",
     ) { value -> Box(Modifier.motionInputGate(value == target), contentAlignment = Alignment.Center) { content(value) } }
 }
@@ -465,7 +497,7 @@ internal fun <T> MotionTabContent(
     content: @Composable (T) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
-    val distance = with(LocalDensity.current) { (if (soft) 24.dp else 10.dp).roundToPx() }
+    val distance = with(LocalDensity.current) { (if (soft) 10.dp else 18.dp).roundToPx() }
     val layoutDirection = LocalLayoutDirection.current
     AnimatedContent(targetState = selected, contentKey = contentKey, modifier = modifier.clipToBounds(),
         contentAlignment = Alignment.TopStart,
@@ -474,15 +506,15 @@ internal fun <T> MotionTabContent(
             else {
                 val step = order(targetState).compareTo(order(initialState))
                 val direction = if (layoutDirection == LayoutDirection.Rtl) -step else step
-                if (soft) {
-                    ((fadeIn(tween(MangaMotion.ListEnter, easing = MangaMotion.ListFadeEasing)) +
-                        slideInHorizontally(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) { direction * distance }) togetherWith
-                        (fadeOut(tween(MangaMotion.ListExit, easing = MangaMotion.ListFadeEasing)) +
-                            slideOutHorizontally(tween(MangaMotion.ListEnter, easing = MangaMotion.EnterEasing)) { -direction * distance / 3 }))
-                } else ((fadeIn(tween(MangaMotion.Content)) +
-                    slideInHorizontally(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) { direction * distance }) togetherWith
-                    (fadeOut(tween(MangaMotion.Quick)) +
-                        slideOutHorizontally(tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing)) { -direction * distance / 2 }))
+                // Full panes cover the backdrop; clear transparent list rows sooner to keep text legible.
+                val incoming = fadeIn(tween(if (soft) MangaMotion.ListEnter else MangaMotion.NavigationFade,
+                    easing = MangaMotion.EnterEasing)) + slideInHorizontally(
+                    spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) { direction * distance }
+                val outgoing = fadeOut(tween(if (soft) MangaMotion.StateSwapExit else MangaMotion.ListExit,
+                    delayMillis = if (soft) 0 else MangaMotion.PaneExitDelay,
+                    easing = if (soft) MangaMotion.ListFadeEasing else MangaMotion.ExitEasing)) + slideOutHorizontally(
+                    tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing)) { -direction * distance / 2 }
+                incoming togetherWith outgoing
             }
             transform.using(if (motion && !fillContent) SizeTransform(clip = false) { _, _ ->
                 tween(MangaMotion.Content, easing = MangaMotion.EnterEasing)
@@ -518,7 +550,7 @@ internal fun MotionDialog(
     val desktop = platformKind == PlatformKind.DESKTOP
     if (state.currentState || state.targetState || !state.isIdle) {
         Dialog(onDismissRequest = { if (visible) onDismissRequest() }, properties = properties) {
-            MotionDialogWindowPolicy(visible, backgroundDim = mangaOverlayScrim().alpha)
+            DialogBackdrop(visible, motion, reveal)
             val focus = LocalFocusManager.current
             SideEffect { if (!visible) focus.clearFocus(force = true) }
             // Read the dialog's own constraints: split-screen and the IME can be smaller
@@ -541,6 +573,17 @@ internal fun MotionDialog(
             }
         }
     }
+}
+
+/** Share the panel's reversible reveal with the Android window dim, without recomposing its content. */
+@Composable
+private fun DialogBackdrop(visible: Boolean, motion: Boolean, reveal: State<Float>) {
+    val opacity = if (platformKind == PlatformKind.ANDROID && motion) {
+        // Native window updates cross a process boundary. Only publish visible changes.
+        val level by remember(reveal) { derivedStateOf { (reveal.value.coerceIn(0f, 1f) * 24).roundToInt() } }
+        level / 24f
+    } else if (visible) 1f else 0f
+    MotionDialogWindowPolicy(visible, backgroundDim = mangaOverlayScrim().alpha * opacity)
 }
 
 /** A single dismissal path for buttons, outside taps and the platform sheet gesture. */

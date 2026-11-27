@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import coil3.Image as CoilImage
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateDpAsState
@@ -85,6 +86,8 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.TopAppBarState
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -258,6 +261,7 @@ fun DetailScreen(
     onOpenTracking: (() -> Unit)? = null,
     desktopFindRequest: Int = 0,
     onDesktopFindHandled: (Int) -> Unit = {},
+    onFavoriteResult: (((Boolean) -> Unit) -> Unit)? = null,
 ) {
     val current = detail?.manga ?: manga
     var batchChapterIds by remember(current.id) { mutableStateOf<Set<String>?>(null) }
@@ -273,7 +277,6 @@ fun DetailScreen(
             batchChapterIds = null
         }
     }
-    val feedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
     val downloaded = remember(downloadEntries, manga.id) {
         downloadEntries.filter { it.manga.id == manga.id }.associateBy { it.chapter.id }
     }
@@ -859,7 +862,9 @@ fun DetailScreen(
                 comments = activeSection == 1, commentCount = commentCount,
                 onBack = onBack, onIntroduction = { fullIntroduction = true },
                 onOpenTracking = onOpenTracking?.takeUnless { adultProfile },
-                onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() },
+                onToggleFavorite = { changed ->
+                    if (onFavoriteResult != null) onFavoriteResult(changed) else onToggleFavorite()
+                },
                 onRetryCover = { coverFailed = false; coverRetry++ })
         }
         if (!desktopDetail) Box(Modifier.fillMaxWidth().align(Alignment.BottomCenter)
@@ -917,7 +922,7 @@ private fun ArtworkToolbar(
     commentCount: String?,
     onBack: () -> Unit,
     onIntroduction: () -> Unit,
-    onToggleFavorite: () -> Unit,
+    onToggleFavorite: ((Boolean) -> Unit) -> Unit,
     onRetryCover: () -> Unit,
     onOpenTracking: (() -> Unit)? = null,
 ) {
@@ -970,20 +975,19 @@ private fun ArtworkToolbar(
             ArtworkAction(Icons.Outlined.CloudSync, "漫画账号进度", backdrop, glassAlpha, tint, glassTone, open)
         }
         key(manga.sourceId, manga.id) {
-            ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                if (favorite) "从书架移除" else "加入书架", backdrop, glassAlpha, tint, glassTone, onToggleFavorite,
-                favorite = favorite)
+            ArtworkFavoriteAction(favorite, active, backdrop, glassAlpha, tint, glassTone, onToggleFavorite)
         }
     }
 }
 
 @Composable
 private fun ArtworkAction(icon: ImageVector, description: String, backdrop: HazeState, glassAlpha: Float,
-    tint: Color, glassTone: Color, onClick: () -> Unit, favorite: Boolean? = null) {
+    tint: Color, glassTone: Color, onClick: () -> Unit, enabled: Boolean = true,
+    glyph: (@Composable () -> Unit)? = null) {
     val interaction = remember { MutableInteractionSource() }
     Box(Modifier.size(48.dp)
-        .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
-        .motionPress(interaction, pressedScale = .965f), contentAlignment = Alignment.Center) {
+        .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+        .motionPress(interaction, enabled = enabled, pressedScale = .965f), contentAlignment = Alignment.Center) {
         Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
             if (glassAlpha > 0f) LiquidGlassSurface(backdrop,
                 Modifier.matchParentSize().graphicsLayer {
@@ -992,31 +996,74 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
                 }, cornerRadius = 20.dp, elevation = 0.dp, role = GlassSurfaceRole.ARTWORK,
                 interactionSource = interaction, preferSource = true, surfaceColor = glassTone, contentColor = tint,
                 softCard = false) {}
-            if (favorite != null && platformKind == PlatformKind.DESKTOP) ArtworkBookmark(favorite, description, tint)
+            if (glyph != null) glyph()
             else MotionSwap(icon, Modifier.size(21.dp)) { shown ->
                 Icon(shown, description, tint = tint, modifier = Modifier.size(21.dp))
             }
         }
-        DesktopIconTooltip(description, interaction, enabled = true)
+        DesktopIconTooltip(description, interaction, enabled = enabled)
+    }
+}
+
+private data class BookmarkChange(val sequence: Int, val saved: Boolean, val start: Float)
+
+@Composable
+private fun ArtworkFavoriteAction(saved: Boolean, active: Boolean, backdrop: HazeState, glassAlpha: Float,
+    tint: Color, glassTone: Color, toggle: ((Boolean) -> Unit) -> Unit) {
+    val motion = LocalMotionEnabled.current
+    val feedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
+    val scope = rememberCoroutineScope()
+    val activeNow by rememberUpdatedState(active)
+    var sequence by remember { mutableIntStateOf(0) }
+    var change by remember { mutableStateOf<BookmarkChange?>(null) }
+    val confirmed = change
+    val phase = remember(confirmed) { Animatable(0f) }
+    val acknowledge = active && motion && confirmed != null && confirmed.saved == saved
+    val ink: () -> Float = {
+        val end = if (saved) 1f else 0f
+        if (acknowledge && confirmed != null) confirmed.start + (end - confirmed.start) * phase.value else end
+    }
+    DisposableEffect(active) {
+        onDispose { sequence++; change = null }
+    }
+    LaunchedEffect(confirmed, active, motion) {
+        if (confirmed != null && active && motion)
+            phase.animateTo(1f, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness,
+                visibilityThreshold = .01f))
+        if (change == confirmed) change = null
+    }
+    val label = if (saved) "从书架移除" else "加入书架"
+    ArtworkAction(if (saved) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+        label, backdrop, glassAlpha, tint, glassTone, enabled = active, onClick = {
+            val request = ++sequence
+            val start = ink()
+            toggle { added ->
+                scope.launch {
+                    if (!activeNow || request != sequence) return@launch
+                    feedback.perform(if (added) dev.mangaflow.ui.motion.FeelEvent.Confirm else dev.mangaflow.ui.motion.FeelEvent.Selection)
+                    change = BookmarkChange(request, added, start)
+                }
+            }
+        }) {
+        ArtworkBookmark(saved, label, tint, ink) {
+            val p = phase.value
+            if (acknowledge) 4f * p * (1f - p) * (if (saved) 1f else -1f) else 0f
+        }
     }
 }
 
 @Composable
-private fun ArtworkBookmark(saved: Boolean, label: String, tint: Color) {
-    val motion = LocalMotionEnabled.current
-    val target = if (saved) 1f else 0f
-    val fill = animateFloatAsState(target, if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
-        label = "shelf-bookmark-fill")
-    Box(Modifier.size(21.dp).clearAndSetSemantics {
+private fun ArtworkBookmark(saved: Boolean, label: String, tint: Color, fill: () -> Float, travel: () -> Float) {
+    Box(Modifier.size(21.dp).graphicsLayer { translationY = 2.dp.toPx() * travel() }.clearAndSetSemantics {
         contentDescription = label
         stateDescription = if (saved) "已加入书架" else "未加入书架"
     }) {
         Icon(Icons.Outlined.BookmarkBorder, null, Modifier.matchParentSize().drawWithContent {
-            val edge = size.height * (1f - if (motion) fill.value else target)
+            val edge = size.height * (1f - fill())
             if (edge > 0f) clipRect(bottom = edge) { this@drawWithContent.drawContent() }
         }, tint = tint)
         Icon(Icons.Filled.Bookmark, null, Modifier.matchParentSize().drawWithContent {
-            val edge = size.height * (1f - if (motion) fill.value else target)
+            val edge = size.height * (1f - fill())
             if (edge < size.height) clipRect(top = edge) { this@drawWithContent.drawContent() }
         }, tint = tint)
     }

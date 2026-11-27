@@ -1713,6 +1713,7 @@ private fun MangaFlowContent(
                                 volumeImageHeaders = { chapter -> model.repository.imageHeaders(chapterSourceMangaId(current.state.manga.id, chapter), chapter.id) },
                                 onBack = model::closeDetail, onRetry = model::retryDetail,
                                 onToggleFavorite = { model.toggleFavorite(current.state.manga) },
+                                onFavoriteResult = { changed -> model.toggleFavorite(current.state.manga, changed) },
                                 onRead = model::readChapter, onAuthor = { _, name ->
                                     model.closeDetail()
                                     changeSection(Section.DISCOVER)
@@ -2097,6 +2098,7 @@ private fun MangaFlowContent(
                                         onRetry = model::retryDownload, onDetails = model::openManga,
                                         onRetryUsingLatestRoute = model::retryDownloadUsingLatestRoute,
                                         onRefreshForQueue = model::refreshDownloadForQueue,
+                                        onRetryForQueue = model.downloads::retryCommand,
                                         backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
                                         backgroundInParent = true,
                                         active = rootActive && !searchVisible, refreshingIds = refreshingDownloads,

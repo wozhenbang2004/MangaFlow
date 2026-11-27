@@ -62,6 +62,7 @@ import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** The app's ordinary MangaCover with existing flat press, swipe and drag ownership. */
@@ -76,12 +77,13 @@ internal fun BookshelfBook(
     deleteArmed: Boolean,
     onDragStart: (Offset) -> Unit,
     onDragMove: (Offset) -> Unit,
-    onDragEnd: (Offset) -> Unit,
+    onDragEnd: (Offset) -> Boolean,
     onDragCancel: () -> Unit,
     modifier: Modifier = Modifier,
     resumeTarget: SavedResumeTarget? = null,
     dragEnabled: Boolean = true,
     decodeSize: IntSize? = null,
+    coverPlacement: String? = null,
 ) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -106,7 +108,9 @@ internal fun BookshelfBook(
         .clickable(interactionSource = interaction, indication = null, enabled = !dragging,
             role = Role.Button, onClickLabel = if (resumeTarget != null || progress != null) "继续阅读" else "开始阅读",
             onClick = onOpen)) {
-        MangaCover(manga, repository, Modifier.fillMaxSize().mangaCoverCard(12.dp, shadowRadius = 8.dp),
+        val coverBounds = if (coverPlacement == null) Modifier.fillMaxSize()
+            else Modifier.fillMaxSize().mangaSharedCover(manga.id, coverPlacement)
+        MangaCover(manga, repository, coverBounds.mangaCoverCard(12.dp, shadowRadius = 8.dp),
             decodeSize = decodeSize, scale = ContentScale.Crop)
         if (opening) Box(Modifier.align(Alignment.BottomEnd).padding(7.dp).size(22.dp)
             .background(colors.surface.copy(alpha = .94f), RoundedCornerShape(11.dp)),
@@ -133,7 +137,7 @@ private fun Modifier.shelfBookGesture(
     dragEnabled: Boolean,
     onDragStart: (Offset) -> Unit,
     onDragMove: (Offset) -> Unit,
-    onDragEnd: (Offset) -> Unit,
+    onDragEnd: (Offset) -> Boolean,
     onDragCancel: () -> Unit,
 ): Modifier {
     // Desktop uses the context menu for book management. Its cells only need press feedback.
@@ -147,8 +151,11 @@ private fun Modifier.shelfBookGesture(
     val velocityTracker = remember(mangaId) { VelocityTracker() }
     val scope = rememberCoroutineScope()
     var returning by remember(mangaId) { mutableStateOf(false) }
+    var releasedAtTarget by remember(mangaId) { mutableStateOf(false) }
     var settleJob by remember(mangaId) { mutableStateOf<Job?>(null) }
     val latestMotion by rememberUpdatedState(motion)
+    val latestDragStart by rememberUpdatedState(onDragStart)
+    val latestDragMove by rememberUpdatedState(onDragMove)
     val latestDragEnd by rememberUpdatedState(onDragEnd)
     val latestDragCancel by rememberUpdatedState(onDragCancel)
     fun returnToSlot(velocity: Offset = Offset.Zero) {
@@ -165,15 +172,16 @@ private fun Modifier.shelfBookGesture(
         }
     }
     LaunchedEffect(motion) {
-        if (!motion && returning) {
+        if (!motion && (returning || releasedAtTarget)) {
             settleJob?.cancel()
             returning = false
+            releasedAtTarget = false
             dragOffset = Offset.Zero
         }
     }
-    val lift = animateFloatAsState(if (dragging && motion) 1f else 0f,
+    val lift = animateFloatAsState(if ((dragging || releasedAtTarget) && motion) 1f else 0f,
         if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(), label = "shelf-lift")
-    val drop = animateFloatAsState(if (dragging && deleteArmed && motion) 1f else 0f,
+    val drop = animateFloatAsState(if ((dragging && deleteArmed || releasedAtTarget) && motion) 1f else 0f,
         if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(), label = "shelf-drop-target")
     val artworkShape = remember { RoundedCornerShape(12.dp) }
     return this
@@ -181,27 +189,39 @@ private fun Modifier.shelfBookGesture(
         .pointerInput(mangaId, dragEnabled) {
             if (dragEnabled) detectDragGesturesAfterLongPress(
                 onDragStart = { local ->
-                    val caught = if (returning) returnPosition.value else Offset.Zero
+                    val caught = if (returning) returnPosition.value else dragOffset
                     settleJob?.cancel()
                     returning = false
+                    releasedAtTarget = false
                     dragOffset = caught
                     velocityTracker.resetTracking()
                     grip = TransformOrigin((local.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f),
                         (local.y / size.height.coerceAtLeast(1)).coerceIn(0f, 1f))
                     dragPoint = rootOrigin + local
-                    onDragStart(dragPoint)
+                    latestDragStart(dragPoint)
                 },
                 onDrag = { change, amount ->
                     velocityTracker.addPosition(change.uptimeMillis, change.position)
                     change.consume()
                     dragOffset += amount
                     dragPoint += amount
-                    onDragMove(dragPoint)
+                    latestDragMove(dragPoint)
                 },
                 onDragEnd = {
-                    val velocity = velocityTracker.calculateVelocity()
-                    latestDragEnd(dragPoint)
-                    returnToSlot(Offset(velocity.x, velocity.y))
+                    if (latestDragEnd(dragPoint)) {
+                        // The lazy item's removal fade owns this frame at the bin. A retained
+                        // cloud copy or a missed target instead returns with the release velocity.
+                        settleJob?.cancel()
+                        releasedAtTarget = true
+                        settleJob = scope.launch {
+                            if (latestMotion) delay(MangaMotion.Quick.toLong())
+                            releasedAtTarget = false
+                            dragOffset = Offset.Zero
+                        }
+                    } else {
+                        val velocity = velocityTracker.calculateVelocity()
+                        returnToSlot(Offset(velocity.x, velocity.y))
+                    }
                 },
                 onDragCancel = {
                     latestDragCancel()
@@ -224,5 +244,5 @@ private fun Modifier.shelfBookGesture(
             shadowElevation = 8.dp.toPx() * raised
             alpha = 1f - .14f * overTarget
         }
-        .motionPress(interaction, enabled = !dragging && !returning)
+        .motionPress(interaction, enabled = !dragging && !returning && !releasedAtTarget)
 }

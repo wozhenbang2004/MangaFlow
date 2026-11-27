@@ -135,6 +135,16 @@ internal fun ChapterEndFooter(
     }
 }
 
+/** Reserve the dock's final clearance once; travel with it without remeasuring the comment field each frame. */
+@Composable
+internal fun Modifier.readerChapterEndClearance(clearance: Dp): Modifier {
+    val motion = LocalMotionEnabled.current
+    val animated = animateDpAsState(clearance,
+        animationSpec = if (motion) tween(MangaMotion.Chrome, easing = MangaMotion.EnterEasing) else snap(),
+        label = "chapter-comments-anchor")
+    return padding(bottom = clearance).graphicsLayer { translationY = (clearance - animated.value).toPx() }
+}
+
 /**
  * Keep bounded, keyed presence while individual previews drift through a shallow bubble field.
  * These are real chapter rows. Leaving this composition cancels all decorative work.
@@ -164,13 +174,8 @@ internal fun ChapterEndComments(
     }
     var bubbles by remember(chapterId) { mutableStateOf<List<FloatingComment>>(emptyList()) }
     val latestCandidates by rememberUpdatedState(candidates)
-    val bottom by animateDpAsState(
-        bottomClearance,
-        animationSpec = if (motion) tween(MangaMotion.Chrome, easing = MangaMotion.EnterEasing) else snap(),
-        label = "chapter-comments-anchor",
-    )
     LaunchedEffect(state) { state.ensureLoaded() }
-    BoxWithConstraints(modifier.fillMaxWidth().padding(bottom = bottom).heightIn(max = 380.dp).height(360.dp)) {
+    BoxWithConstraints(modifier.fillMaxWidth().readerChapterEndClearance(bottomClearance).heightIn(max = 380.dp).height(360.dp)) {
         val fieldWidth = maxWidth
         val fieldHeight = maxHeight
         val singlePreview = largeText || fieldHeight < 280.dp

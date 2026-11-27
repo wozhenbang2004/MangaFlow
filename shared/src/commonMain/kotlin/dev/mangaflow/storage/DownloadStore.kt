@@ -580,21 +580,30 @@ class DownloadStore private constructor(context: Context) {
         }
     }
 
+    internal fun retryCommand(expected: DownloadEntry, useLatestRoute: Boolean): Deferred<DownloadCommandResult> =
+        scope.async {
+            try { resumeDownload(expected.id, includePaused = true, useLatestRoute = useLatestRoute, expected = expected) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { DownloadCommandResult.FAILED }
+        }
+
     private suspend fun resumeDownload(
-        id: String, includePaused: Boolean, useLatestRoute: Boolean = false,
-    ) = withContext(Dispatchers.IO) {
+        id: String, includePaused: Boolean, useLatestRoute: Boolean = false, expected: DownloadEntry? = null,
+    ): DownloadCommandResult = withContext(Dispatchers.IO) {
         awaitReady()
         changeChapter(id) {
             var generation: String? = null
             try {
                 val (change, capturedRoute) = synchronized(lock) {
-                    val record = records[id] ?: return@changeChapter
-                    if (record.entry.manga.sourceUrl == LOCAL_SOURCE_URL) {
-                        if (record.entry.status == DownloadStatus.COMPLETED) return@changeChapter
-                        throw IOException("本地文件已损坏，请删除后重新导入")
-                    }
-                    if (record.entry.needsSourceRefresh || record.entry.status in setOf(DownloadStatus.COMPLETED, DownloadStatus.RUNNING, DownloadStatus.QUEUED) ||
-                        (!includePaused && record.entry.status == DownloadStatus.PAUSED)) return@changeChapter
+                    val record = records[id] ?: return@changeChapter DownloadCommandResult.CHANGED
+                    if (expected != null && (record.entry.createdAt != expected.createdAt || record.entry.manga.id != expected.manga.id ||
+                            record.entry.chapter.id != expected.chapter.id || expected.progress.generation.isNotBlank() &&
+                            record.generation != expected.progress.generation)) return@changeChapter DownloadCommandResult.CHANGED
+                    if (record.entry.status == DownloadStatus.COMPLETED) return@changeChapter DownloadCommandResult.SAVED
+                    if (record.entry.manga.sourceUrl == LOCAL_SOURCE_URL) throw IOException("本地文件已损坏，请删除后重新导入")
+                    if (record.entry.needsSourceRefresh || record.entry.status == DownloadStatus.RUNNING || record.entry.status == DownloadStatus.QUEUED ||
+                        (!includePaused && record.entry.status == DownloadStatus.PAUSED) || expected != null && record.entry.status != expected.status)
+                        return@changeChapter DownloadCommandResult.CHANGED
                     generation = record.generation
                     // Ordinary retry and reader recovery keep the frozen route. Only the
                     // separately labelled explicit action adopts the latest defaults.
@@ -605,11 +614,12 @@ class DownloadStore private constructor(context: Context) {
                 generation = change.detached.generation
                 stopWriter(change)
                 synchronized(lock) {
-                    if (records[id] !== change.detached) return@changeChapter
+                    if (records[id] !== change.detached) return@changeChapter DownloadCommandResult.CHANGED
                     save(change.detached.copy(route = capturedRoute, networkAttempts = 0,
                         entry = change.detached.entry.copy(status = DownloadStatus.QUEUED, error = "", routingError = false,
                             progress = DownloadProgress(routeLabel = capturedRoute.progressLabel()))))
                     schedule(id, userInitiated = true)
+                    DownloadCommandResult.ACCEPTED
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled

@@ -31,7 +31,11 @@ internal fun Transition<Boolean>.surfaceReveal(motion: Boolean, compact: Boolean
             visibilityThreshold = .007f)
     }, label = "surface-reveal") { if (it) 1f else 0f }
 
-internal fun surfaceRevealAlpha(progress: Float): Float = (progress * 1.55f).coerceIn(0f, 1f)
+internal fun surfaceRevealAlpha(progress: Float): Float {
+    // Restore contrast early while keeping the final part of a reversal continuous.
+    val remaining = 1f - progress.coerceIn(0f, 1f)
+    return 1f - remaining * remaining
+}
 
 /** Uncover real menu rows from their button or mouse position, at their final type size. */
 internal fun Modifier.anchoredMenuReveal(progress: State<Float>, radius: Dp, origin: () -> TransformOrigin): Modifier =

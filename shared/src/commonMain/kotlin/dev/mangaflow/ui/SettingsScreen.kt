@@ -5,7 +5,6 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import dev.mangaflow.anime.ui.AnimeSourceManager
 import dev.mangaflow.background.ApplicationOperations
-import dev.mangaflow.background.ApplicationOperation
 import dev.mangaflow.background.ApplicationOperationKind
 import dev.mangaflow.background.ApplicationOperationPhase
 import dev.mangaflow.background.UserOperationKeys
@@ -348,8 +347,7 @@ fun SettingsScreen(
         backupNotice = when {
             result.saved -> BackupNotice("阅读备份已导出")
             result.error != null -> BackupNotice(result.error, PreferenceNoticeKind.ERROR)
-            desktop -> BackupNotice("已取消导出", PreferenceNoticeKind.INFO)
-            else -> null
+            else -> BackupNotice("已取消导出", PreferenceNoticeKind.INFO)
         }
         exportSaving = false
     }
@@ -371,7 +369,7 @@ fun SettingsScreen(
                     backupNotice = BackupNotice("已有备份操作，请稍后再选择文件。", PreferenceNoticeKind.ERROR)
                 }
             } else releasePickedDocuments(listOf(uri))
-        } else if (desktop && backupBusy == null) {
+        } else if (backupBusy == null) {
             webDavNotice = null
             backupNotice = BackupNotice("已取消选择备份文件", PreferenceNoticeKind.INFO)
         }
@@ -387,10 +385,9 @@ fun SettingsScreen(
             webDavNotice = if (remote) receipt else null
         }
         if (operation.phase != ApplicationOperationPhase.SUCCEEDED) {
-            deliver(operation.message?.let { message ->
-                BackupNotice(message, if (operation.phase == ApplicationOperationPhase.CANCELLED)
-                    PreferenceNoticeKind.INFO else PreferenceNoticeKind.ERROR)
-            })
+            val cancelled = operation.phase == ApplicationOperationPhase.CANCELLED
+            deliver(BackupNotice(operation.message ?: if (cancelled) "已取消${operation.title}" else "${operation.title}未完成",
+                if (cancelled) PreferenceNoticeKind.INFO else PreferenceNoticeKind.ERROR))
             operations.consumeResult(operation.id)
             receivedBackupOperation = operation.id
             return@LaunchedEffect
@@ -434,7 +431,7 @@ fun SettingsScreen(
             }
             else -> Unit
         }
-        if (desktop && !operation.statusDurable && operation.message != null) {
+        if (!operation.statusDurable && operation.message != null) {
             val receipt = if (remote) webDavNotice else backupNotice
             deliver(receipt?.copy(message = "${receipt.message}（操作记录未保存，重启后请确认结果）", kind = PreferenceNoticeKind.INFO)
                 ?: BackupNotice(operation.message, PreferenceNoticeKind.INFO))
@@ -469,6 +466,17 @@ fun SettingsScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    val backupFeedback = when {
+        exportSaving -> PreferenceNotice("等待选择保存位置", PreferenceNoticeKind.INFO)
+        backupOperation?.active == true -> PreferenceNotice(backupOperation.message ?: backupOperation.title, PreferenceNoticeKind.WORKING)
+        backupNotice != null || webDavNotice != null -> (backupNotice ?: webDavNotice)?.presentation()
+        backupOperation != null && (backupOperation.phase == ApplicationOperationPhase.FAILED ||
+            backupOperation.phase == ApplicationOperationPhase.INTERRUPTED) ->
+            PreferenceNotice(backupOperation.message ?: "${backupOperation.title}未完成", PreferenceNoticeKind.ERROR)
+        backupOperation != null && !backupOperation.statusDurable -> PreferenceNotice(
+            backupOperation.message ?: "操作记录未保存", PreferenceNoticeKind.INFO)
+        else -> null
+    }
     val settingsContent: @Composable (Dp) -> Unit = { paneTopPadding ->
     Box(Modifier.fillMaxSize()) {
     LazyColumn(state = settingsScroll,
@@ -582,11 +590,10 @@ fun SettingsScreen(
                         lanReadingSyncEntry()
                     } else sourceActions()
                     SettingsDisclosure("备份与同步", when {
-                        desktop && expandedSetting == "backup" -> "漫画账号 · 阅读备份"
-                        backupBusy == "export-saving" -> "等待选择保存位置"
-                        backupBusy != null -> backupOperation?.message ?: "正在处理…"
-                        desktop && (backupNotice != null || webDavNotice != null) -> (backupNotice ?: webDavNotice)?.message.orEmpty()
+                        expandedSetting != "backup" && (backupBusy != null || backupFeedback?.kind == PreferenceNoticeKind.ERROR) ->
+                            backupFeedback?.message.orEmpty()
                         !desktop && lanReadingConflictCount > 0 -> "$lanReadingConflictCount 处阅读差异待确认"
+                        expandedSetting != "backup" && backupFeedback != null -> backupFeedback.message
                         desktop -> "漫画账号 · 阅读备份"
                         else -> "设备 · 漫画账号 · 阅读备份"
                     },
@@ -614,20 +621,12 @@ fun SettingsScreen(
                                 webDavNotice = null; showWebDav = true
                             }
                         }
-                        if (desktop) {
+                        PreferenceOperationFeedback(backupFeedback) {
                             val op = backupOperation
-                            val confirmed = backupNotice ?: webDavNotice
-                            val notice = when {
-                                exportSaving -> PreferenceNotice("等待选择保存位置", PreferenceNoticeKind.INFO)
-                                op?.active == true -> PreferenceNotice(op.message ?: op.title, PreferenceNoticeKind.WORKING)
-                                else -> confirmed?.presentation()
+                            if (op?.cancellable == true && !exportSaving) TextButton(onClick = { operations.cancel(op.id) }) {
+                                Text("取消")
                             }
-                            PreferenceOperationFeedback(notice) {
-                                if (op?.cancellable == true && !exportSaving) TextButton(onClick = { operations.cancel(op.id) }) {
-                                    Text("取消")
-                                }
-                            }
-                        } else SettingsOperationStatus(backupOperation) { operations.cancel(it) }
+                        }
                         Text("备份不包含账号、密码、缓存与漫画文件；恢复前会再次确认。",
                             style = MaterialTheme.typography.bodySmall, color = secondary)
                     }
@@ -637,12 +636,6 @@ fun SettingsScreen(
                         PreferenceSectionLabel("内容来源", Modifier.padding(top = 12.dp))
                         sourceActions()
                     }
-                    if (!desktop) backupNotice?.let { Text(it.message, style = MaterialTheme.typography.bodySmall,
-                        color = if (it.failed) colors.error else secondary,
-                        modifier = Modifier.padding(vertical = 6.dp)) }
-                    if (!desktop) webDavNotice?.let { Text(it.message, style = MaterialTheme.typography.bodySmall,
-                        color = if (it.failed) colors.error else secondary,
-                        modifier = Modifier.padding(vertical = 6.dp)) }
                 }
                 }
                 RetainedSettingsCategory(3, selected) {
@@ -730,7 +723,8 @@ fun SettingsScreen(
                             if (!status.isNullOrBlank()) {
                                 Text(status, style = MaterialTheme.typography.bodySmall,
                                     color = if (update.phase == UpdatePhase.ERROR) colors.error else secondary,
-                                    modifier = Modifier.padding(start = 32.dp, bottom = 2.dp))
+                                    modifier = Modifier.padding(start = 32.dp, bottom = 2.dp)
+                                        .semantics { liveRegion = LiveRegionMode.Polite })
                             }
                             update.release?.let { release ->
                                 if (release.notes.isNotBlank()) {
@@ -943,22 +937,6 @@ private data class WebDavBackupDraft(
 )
 
 @Composable
-private fun SettingsOperationStatus(operation: ApplicationOperation?, onCancel: (String) -> Unit) {
-    if (operation == null || !operation.active && operation.statusDurable &&
-        operation.phase != ApplicationOperationPhase.FAILED && operation.phase != ApplicationOperationPhase.INTERRUPTED) return
-    val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (operation.active) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
-        else Icon(Icons.Outlined.Info, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
-        Text(if (operation.active) operation.message ?: "后台处理中 · 可离开此页" else operation.message.orEmpty(),
-            Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-            color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        if (operation.cancellable) TextButton(onClick = { onCancel(operation.id) }) { Text("取消") }
-    }
-}
-
-@Composable
 private fun ReadingBackupPanel(backdrop: HazeState?, modifier: Modifier, content: @Composable () -> Unit) {
     if (backdrop != null) {
         LiquidGlassSurface(backdrop, modifier, cornerRadius = 22.dp,
@@ -1115,35 +1093,15 @@ private fun WebDavBackupDialog(
                                 }
                             }
                         }
-                        if (platformKind == PlatformKind.DESKTOP) {
-                            val phase = when (busy) {
-                                "webdav-save" -> "正在保存连接"
-                                "webdav-upload" -> "正在上传备份"
-                                "webdav-download" -> "正在读取备份"
-                                null -> null
-                                else -> "正在处理配置"
-                            }
-                            PreferenceOperationFeedback(phase?.let { PreferenceNotice(it, PreferenceNoticeKind.WORKING) }
-                                ?: notice?.presentation())
-                        } else {
-                            CopyShelfValue(notice) { feedback ->
-                                Text(feedback.message, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (feedback.failed) colors.error else colors.onSurfaceVariant)
-                            }
-                            CopyShelfValue(busy) { operation ->
-                                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
-                                    Text(when (operation) {
-                                        "webdav-save" -> "正在保存连接"
-                                        "webdav-upload" -> "正在上传备份"
-                                        "webdav-download" -> "正在读取备份"
-                                        else -> "正在处理配置"
-                                    }, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                                }
-                            }
+                        val phase = when (busy) {
+                            "webdav-save" -> "正在保存连接"
+                            "webdav-upload" -> "正在上传备份"
+                            "webdav-download" -> "正在读取备份"
+                            null -> null
+                            else -> "正在处理配置"
                         }
+                        PreferenceOperationFeedback(phase?.let { PreferenceNotice(it, PreferenceNoticeKind.WORKING) }
+                            ?: notice?.presentation())
                         Text(if (connectionOnly) "成人阅读进度使用此目录中的独立文件。"
                             else "书架、阅读位置与偏好；不含账号、缓存和漫画文件。手动备份，不自动双向同步。",
                             style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
@@ -1424,15 +1382,19 @@ internal fun SettingsDisclosure(
 @Composable
 internal fun SettingsRowIcon(icon: ImageVector, selected: Boolean = false) {
     val colors = MaterialTheme.colorScheme
+    val motion = LocalMotionEnabled.current
+    val ink by animateColorAsState(if (selected) colors.primary else colors.onSurfaceVariant,
+        if (motion) tween(MangaMotion.Quick) else snap(), label = "settings-control-ink")
     if (platformKind == PlatformKind.DESKTOP) {
-        Box(Modifier.size(32.dp).background(if (selected) colors.primary.copy(alpha = .12f)
-            else colors.onSurface.copy(alpha = .045f), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
-            Icon(icon, null, Modifier.size(18.dp), tint = if (selected) colors.primary else colors.onSurfaceVariant)
+        val surface = animateColorAsState(if (selected) colors.primary.copy(alpha = .12f) else colors.onSurface.copy(alpha = .045f),
+            if (motion) tween(MangaMotion.Quick) else snap(), label = "settings-control-surface")
+        Box(Modifier.size(32.dp).drawBehind {
+            drawRoundRect(surface.value, cornerRadius = CornerRadius(10.dp.toPx()))
+        }, contentAlignment = Alignment.Center) {
+            Icon(icon, null, Modifier.size(18.dp), tint = ink)
         }
-        return
-    }
-    Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) {
-        Icon(icon, null, Modifier.size(19.dp), tint = if (selected) colors.primary else colors.onSurfaceVariant)
+    } else Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) {
+        Icon(icon, null, Modifier.size(19.dp), tint = ink)
     }
 }
 
@@ -1472,14 +1434,15 @@ internal fun SettingsToggle(title: String, checked: Boolean, icon: ImageVector, 
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).preferencePointerSurface(interaction)
             .toggleable(checked, enabled = enabled, interactionSource = interaction, indication = null,
-                role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = 52.dp)
+                role = Role.Switch, onValueChange = onCheckedChange)
+            .motionPress(interaction, enabled = enabled, pressedScale = .99f)
+            .graphicsLayer { alpha = if (enabled) 1f else .45f }.heightIn(min = 52.dp)
             .padding(horizontal = if (platformKind == PlatformKind.DESKTOP) 10.dp else 0.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        SettingsRowIcon(icon)
-        Text(title, Modifier.weight(1f),
-            style = MaterialTheme.typography.titleSmall, color = colors.onSurface.copy(alpha = if (enabled) 1f else .45f))
+        SettingsRowIcon(icon, selected = checked)
+        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall, color = colors.onSurface)
         Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
             MotionSwitchThumb(checked, interaction)
         }

@@ -24,6 +24,7 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
@@ -43,6 +44,18 @@ internal class MotionBackState {
     var gesturing by mutableStateOf(false)
     var completed by mutableStateOf(false)
     var settling: Job? = null
+    var gesture: Any? = null
+
+    fun settle(scope: CoroutineScope, target: Float, velocity: Float) {
+        settling?.cancel()
+        settling = scope.launch {
+            // A reversing finger can still be travelling away from the destination on release.
+            // Carry that velocity into the spring so an interrupted cancellation can be picked up again.
+            val speed = if (velocity.isFinite()) velocity.coerceIn(-5f, 5f) else 0f
+            val stiffness = if (target == 0f) MangaMotion.GestureStiffness else MangaMotion.NavigationStiffness
+            progress.animateTo(target, spring(MangaMotion.NavigationDamping, stiffness), initialVelocity = speed)
+        }
+    }
 }
 
 internal val LocalMotionBackState = staticCompositionLocalOf<MotionBackState?> { null }
@@ -58,7 +71,8 @@ internal fun MotionBackHandler(
     val latestBack by rememberUpdatedState(onBack)
     val latestEnabled by rememberUpdatedState(enabled)
     LaunchedEffect(enabled, state, motion) {
-        if (enabled && state != null && (state.completed || !motion)) {
+        if (state != null && (!motion || enabled && state.completed)) {
+            state.gesture = null
             state.settling?.cancel()
             state.gesturing = false
             state.completed = false
@@ -70,13 +84,16 @@ internal fun MotionBackHandler(
         return
     }
     PredictiveBackHandler(enabled) { events ->
-        state.settling?.cancel()
-        state.progress.stop()
-        val origin = state.progress.value * if (state.fromLeft) 1f else -1f
+        val gesture = Any()
+        state.gesture = gesture
         val velocity = VelocityTracker()
         var hasProgress = false
         try {
+            state.settling?.cancel()
+            state.progress.stop()
+            val origin = state.progress.value * if (state.fromLeft) 1f else -1f
             events.collect { event ->
+                if (state.gesture !== gesture) return@collect
                 hasProgress = true
                 state.gesturing = true
                 val p = event.progress.coerceIn(0f, 1f)
@@ -85,30 +102,26 @@ internal fun MotionBackHandler(
                 velocity.addPosition(monotonicTimeMillis(), Offset(abs(signed), 0f))
                 state.progress.snapTo(abs(signed))
             }
+            if (state.gesture !== gesture) return@PredictiveBackHandler
             state.gesturing = false
             if (latestEnabled) {
                 // A three-button/keyboard back has no preview and keeps the shared-cover return.
                 if (hasProgress) {
                     state.completed = true
-                    state.settling = scope.launch {
-                        state.progress.animateTo(1f, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness),
-                            initialVelocity = velocity.calculateVelocity().x.coerceIn(0f, 5f))
-                    }
+                    state.settle(scope, 1f, velocity.calculateVelocity().x)
                 }
                 latestBack()
             } else {
-                state.settling = scope.launch {
-                    state.progress.animateTo(0f, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness),
-                        initialVelocity = velocity.calculateVelocity().x.coerceIn(-5f, 0f))
-                }
+                state.settle(scope, 0f, velocity.calculateVelocity().x)
             }
         } catch (cancelled: CancellationException) {
-            state.gesturing = false
-            state.settling = scope.launch {
-                state.progress.animateTo(0f, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness),
-                    initialVelocity = velocity.calculateVelocity().x.coerceIn(-5f, 0f))
+            if (state.gesture === gesture) {
+                state.gesturing = false
+                state.settle(scope, 0f, velocity.calculateVelocity().x)
             }
             throw cancelled
+        } finally {
+            if (state.gesture === gesture) state.gesture = null
         }
     }
 }

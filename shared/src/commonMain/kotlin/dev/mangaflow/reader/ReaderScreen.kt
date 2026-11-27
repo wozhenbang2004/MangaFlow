@@ -204,6 +204,7 @@ import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.storage.StorageFile
+import androidx.compose.ui.platform.LocalAccessibilityManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -536,6 +537,8 @@ fun ReaderScreen(
     val titleInteraction = remember { MutableInteractionSource() }
     val toolsInteraction = remember { MutableInteractionSource() }
     val bottomChromeInteraction = remember { MutableInteractionSource() }
+    val chromeContacts = remember { MutableInteractionSource() }
+    val chromePressed by chromeContacts.collectIsPressedAsState()
     val titleHovered by titleInteraction.collectIsHoveredAsState()
     val toolsHovered by toolsInteraction.collectIsHoveredAsState()
     val bottomChromeHovered by bottomChromeInteraction.collectIsHoveredAsState()
@@ -1172,14 +1175,23 @@ fun ReaderScreen(
         if (pages.isNotEmpty()) downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
     }
 
-    LaunchedEffect(controlsVisible, showSettings, showEnhancement, compareEnhancement, showChapters, showSpreadAdjustment, showComments,
-        showPageNavigator, showReaderActions, readerActionsPresent, sourcePickerBlocking, readerStatusInspecting,
-        loading, error, imageVisible, progressInteracting, touchExploration, chromeEngaged) {
-        if (controlsVisible && !showSettings && !showEnhancement && !compareEnhancement && !showChapters && !showSpreadAdjustment && !showComments &&
-            !showPageNavigator && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking && !readerStatusInspecting &&
-            !loading && error == null && imageVisible && !progressInteracting && !touchExploration && !chromeEngaged) {
-            delay(5000)
+    val toolsMayRetreat = readerToolsVisible && readerForeground && !leavingReader && !inspectorOpen &&
+        !showReaderActions && !readerActionsPresent && !sourcePickerBlocking && !sourceLoading &&
+        !chapterChangeRequested && repairState.selection == null && !loading && error == null && imageVisible &&
+        !progressInteracting && !touchExploration && !chromePressed
+    val idleTools = toolsMayRetreat && !chromeEngaged
+    val accessibility = LocalAccessibilityManager.current
+    LaunchedEffect(idleTools, chapterId, accessibility) {
+        if (idleTools) {
+            delay(accessibility?.calculateRecommendedTimeoutMillis(5000L, containsIcons = true,
+                containsText = true, containsControls = true) ?: 5000L)
             controlsVisible = false
+        }
+    }
+    val dismissReadingTools: () -> Unit = remember(desktop) {
+        {
+            controlsVisible = false
+            if (desktop) keyboardFocusRestore++
         }
     }
     LaunchedEffect(controlsVisible, active, leavingReader) {
@@ -1198,8 +1210,10 @@ fun ReaderScreen(
             discussionState?.ensureLoaded()
         }
     }
-    LaunchedEffect(atChapterEnd, touchExploration, chromeEngaged) {
-        if (atChapterEnd && !(desktop && inspectorOpen) && !touchExploration && !chromeEngaged && !readerStatusInspecting) controlsVisible = false
+    // Only arrival at the chapter edge can dismiss the bars. Releasing a scrub or editor
+    // on the last page starts the normal idle countdown instead of taking the tools away.
+    LaunchedEffect(chapterId, atChapterEnd) {
+        if (atChapterEnd && idleTools) controlsVisible = false
     }
 
     val keyboard = LocalReaderKeyboard.current
@@ -1335,7 +1349,8 @@ fun ReaderScreen(
     }) {
         // Exactly one viewport owns the page sample. Record its final pan, handoff and dim,
         // leaving chapter-edge controls, scrollbars and the guided-mode dock outside the layer.
-        val artworkModifier = Modifier.mangaHazeSource(readerBackdrop).graphicsLayer {
+        val artworkModifier = Modifier.readerArtworkGesture(toolsMayRetreat, dismissReadingTools)
+            .mangaHazeSource(readerBackdrop).graphicsLayer {
             alpha = .90f + .10f * sourceArrival.value
             translationX = (1f - sourceArrival.value) * 6.dp.toPx()
         }.background(background).drawWithContent {
@@ -1639,7 +1654,7 @@ fun ReaderScreen(
                 backdrop = readerBackdrop, bottomClearance = bottom, touchExploration = touchExploration,
                 onOpen = { showComments = true }, modifier = anchor)
             else PrivateChapterDiscussionButton(readerBackdrop, onOpen = { showComments = true },
-                modifier = anchor.padding(bottom = bottom))
+                modifier = anchor.readerChapterEndClearance(bottom))
         }
 
         val statusAvailable = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
@@ -1666,7 +1681,7 @@ fun ReaderScreen(
         val repairActions = statusPlacement == ReaderStatusPlacement.HIDDEN && repairState.replacements.containsKey(pageIndex)
         ReaderToolPresence(toolsPresence, top = true, modifier = Modifier.align(Alignment.TopCenter)
             .onSizeChanged { topControlsHeightPx = it.height }) { interactive ->
-            ReaderHeadingBar(desktop, readerBackdrop, interactive, titleInteraction, toolsInteraction,
+            ReaderHeadingBar(desktop, readerBackdrop, interactive, titleInteraction, toolsInteraction, chromeContacts,
                 modifier = (if (desktop) Modifier.onFocusChanged { topChromeFocused = it.hasFocus }.focusGroup() else Modifier)
                     .windowInsetsPadding(dev.mangaflow.reader.readerStatusInsets().union(WindowInsets.displayCutout)
                         .union(WindowInsets.captionBar).only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
@@ -1750,7 +1765,7 @@ fun ReaderScreen(
                     modifier = Modifier.fillMaxWidth(),
                     cornerRadius = 28.dp,
                 ) {
-                    ReaderDockGroups(desktop, Modifier.motionInputGate(interactive)
+                    ReaderDockGroups(desktop, Modifier.motionInputGate(interactive).readerControlContact(chromeContacts)
                         .hoverable(bottomChromeInteraction, enabled = desktop && interactive), progress = {
                         if (pages.isNotEmpty()) key(chapterId) {
                             ReaderProgressSlider(
