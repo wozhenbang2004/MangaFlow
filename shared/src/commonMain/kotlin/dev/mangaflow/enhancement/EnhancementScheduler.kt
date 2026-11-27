@@ -2,10 +2,9 @@ package dev.mangaflow.enhancement
 
 import dev.mangaflow.enhancement.engine.EngineOutput
 import dev.mangaflow.enhancement.engine.EngineProgress
+import dev.mangaflow.enhancement.engine.EngineStage
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.platform.monotonicTimeMillis
-import dev.mangaflow.platform.PlatformKind
-import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.storage.StorageLock
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.*
@@ -13,6 +12,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 
 enum class EnhancementPriority { P0, P1, P2, P3 }
+internal data class ReaderQueuePosition(val priority: EnhancementPriority, val order: Int)
 enum class EnhancementTaskPhase(val label: String) {
     QUEUED("排队中"), WAITING("等待资源"), RUNNING("处理中"), PAUSED("已暂停"),
     COMPLETED("已完成"), FAILED("失败"), CANCELLED("已取消")
@@ -56,6 +56,7 @@ class EnhancementScheduler(
         val estimatedBytes: Long,
         val isCurrent: () -> Boolean,
         val work: suspend (EnhancementJobContext) -> EngineOutput,
+        var queueOrder: Int,
         val result: CompletableDeferred<EngineOutput> = CompletableDeferred(),
         var run: Deferred<EngineOutput>? = null,
         var pauseRequested: Boolean = false,
@@ -93,6 +94,7 @@ class EnhancementScheduler(
         sessionKey: String? = null, generation: Long = 0L, estimatedBytes: Long = 0L,
         isCurrent: () -> Boolean = { true },
         title: String? = null,
+        queueOrder: Int = 0,
         work: suspend (EnhancementJobContext) -> EngineOutput,
     ): Deferred<EngineOutput> = synchronized(lock) {
         require(id.isNotBlank())
@@ -106,31 +108,44 @@ class EnhancementScheduler(
             cancelEntry(existing, "任务已被新的内容替代")
         }
         val entry = Entry(EnhancementTask(id, content, priority, sessionKey, generation, title = title?.take(240)),
-            estimatedBytes.coerceAtLeast(0L), isCurrent, work)
+            estimatedBytes.coerceAtLeast(0L), isCurrent, work, queueOrder)
         entries[id] = entry
         // Cancellation happens at real engine checkpoints; the permit stays held until the old work exits.
-        entries.values.filter { it !== entry && it.task.priority > priority && it.run != null }
-            .forEach { it.run?.cancel(EnhancementYield("临近内容优先")) }
+        yieldLowerPriorityWork(entry)
         trimHistory(); publish(); wake.trySend(Unit)
         entry.result
     }
 
-    /** Promote a whole visible spread without cancelling either page's existing attempt. */
-    fun updatePriorities(priorities: Map<String, EnhancementPriority>): Unit = synchronized(lock) {
+    fun updatePriorities(priorities: Map<String, EnhancementPriority>) =
+        updateReaderPositions(priorities.mapValues { ReaderQueuePosition(it.value, 0) })
+
+    /** Reorder queued pages in the reading direction without restarting work of equal priority. */
+    internal fun updateReaderPositions(positions: Map<String, ReaderQueuePosition>): Unit = synchronized(lock) {
         var changed = false
-        priorities.forEach { (id, priority) ->
+        positions.forEach { (id, position) ->
             val entry = entries[id]?.takeIf { !it.result.isCompleted && it.isCurrent() } ?: return@forEach
-            if (priority != entry.task.priority) {
-                entry.task = entry.task.copy(priority = priority)
+            if (entry.task.priority != position.priority || entry.queueOrder != position.order) {
+                entry.task = entry.task.copy(priority = position.priority)
+                entry.queueOrder = position.order
                 changed = true
             }
         }
         if (!changed) return@synchronized
-        val highest = entries.values.filter { !it.result.isCompleted && !it.pauseRequested && it.isCurrent() }
-            .minOfOrNull { it.task.priority }
-        if (highest != null) entries.values.filter { it.run != null && it.task.priority > highest }
-            .forEach { it.run?.cancel(EnhancementYield("当前页优先")) }
+        entries.values.filter { !it.result.isCompleted && !it.pauseRequested && it.isCurrent() }
+            .minByOrNull { it.task.priority }?.let(::yieldLowerPriorityWork)
         publish(); wake.trySend(Unit)
+    }
+
+    private fun yieldLowerPriorityWork(urgent: Entry) {
+        entries.values.forEach { running ->
+            if (running.run == null || running.task.priority <= urgent.task.priority) return@forEach
+            // This page has finished its expensive pixels and is already validating/publishing.
+            // A flip within the same reader shouldn't throw it away and run the whole model again.
+            val finishingNeighbor = running.task.priority == EnhancementPriority.P1 &&
+                running.task.content != EnhancementContent.ANIME && running.task.sessionKey == urgent.task.sessionKey &&
+                running.task.progress?.stage.let { it == EngineStage.VALIDATE || it == EngineStage.COMPLETE }
+            if (!finishingNeighbor) running.run?.cancel(EnhancementYield("当前页优先"))
+        }
     }
 
     fun pause(id: String) = synchronized(lock) {
@@ -161,7 +176,8 @@ class EnhancementScheduler(
             it.task.phase == EnhancementTaskPhase.FAILED && it.isCurrent()
         } } ?: return null
         return submit(id, entry.task.content, entry.task.priority, entry.task.sessionKey, entry.task.generation,
-            entry.estimatedBytes, entry.isCurrent, title = entry.task.title, work = entry.work)
+            entry.estimatedBytes, entry.isCurrent, title = entry.task.title,
+            queueOrder = entry.queueOrder, work = entry.work)
     }
     private fun cancelEntry(entry: Entry, reason: String) {
         if (entry.result.isCompleted) return
@@ -176,7 +192,8 @@ class EnhancementScheduler(
             val picked = synchronized(lock) {
                 var chosen: Pair<Entry, () -> Unit>? = null
                 entries.values.filter { !it.result.isCompleted && !it.pauseRequested && it.run == null }
-                    .sortedWith(compareBy<Entry> { it.task.priority.ordinal }.thenBy { it.task.createdAtMillis })
+                    .sortedWith(compareBy<Entry> { it.task.priority.ordinal }
+                        .thenBy { it.queueOrder }.thenBy { it.task.createdAtMillis })
                     .forEach { entry ->
                         if (!entry.isCurrent()) {
                             cancelEntry(entry, "内容已切换")
@@ -184,7 +201,7 @@ class EnhancementScheduler(
                             val reason = resources.enhancementWaitReason(entry.task.priority.ordinal, entry.estimatedBytes)
                             val release = if (reason == null) resources.tryAcquireEnhancement(entry.task.priority.ordinal, entry.estimatedBytes) else null
                             if (release != null) {
-                                entry.task = entry.task.copy(phase = EnhancementTaskPhase.RUNNING, reason = null)
+                                entry.task = entry.task.copy(phase = EnhancementTaskPhase.RUNNING, progress = null, reason = null)
                                 chosen = entry to release
                             } else entry.task = entry.task.copy(phase = EnhancementTaskPhase.WAITING, reason = reason ?: "等待增强引擎")
                         }
@@ -198,12 +215,12 @@ class EnhancementScheduler(
             try {
                 val ctx = EnhancementJobContext(progress = { value -> synchronized(lock) {
                     if (!entry.cancelRequested && entry.isCurrent()) {
-                        val previousStage = entry.task.progress?.stage
-                        entry.task = entry.task.copy(progress = value)
+                        val previous = entry.task.progress
                         val now = monotonicTimeMillis()
-                        if (platformKind != PlatformKind.DESKTOP || previousStage != value.stage ||
+                        if (previous == null || previous.stage != value.stage || previous.failed != value.failed ||
                             now - entry.lastProgressPublishedAt >= 100L ||
                             value.total?.let { it > 0L && value.completed >= it } == true) {
+                            entry.task = entry.task.copy(progress = value)
                             entry.lastProgressPublishedAt = now
                             publish()
                         }

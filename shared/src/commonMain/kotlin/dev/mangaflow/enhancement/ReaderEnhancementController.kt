@@ -86,6 +86,7 @@ internal class ReaderEnhancementController(
     private val details = mutableMapOf<Int, String>()
     private val held = mutableMapOf<Int, EnhancedAssetLease>()
     private val heldBytes = mutableMapOf<Int, Long>()
+    private val pageOutputBytes = mutableMapOf<Int, Long>()
     private val budgetDeferred = mutableSetOf<Int>()
     private var budgetBlocked = false
     private val cacheWaitDetail = "前方增强等待缓存额度，翻页或增加增强缓存后继续"
@@ -100,6 +101,7 @@ internal class ReaderEnhancementController(
     private var visible = emptySet<Int>()
     private var ahead = emptySet<Int>()
     private var nextVisible = emptySet<Int>()
+    private var queueOrder = emptyMap<Int, Int>()
     private var current = 0
     private var direction = 1
     private var closed = false
@@ -241,6 +243,7 @@ internal class ReaderEnhancementController(
                 pending.keys.toList().forEach { cancelPendingLocked(it, "画质设置已变更") }
                 held.values.forEach(EnhancedAssetLease::close); held.clear(); heldBytes.clear(); assets.clear()
                 details.clear(); failed.clear(); cacheMisses.clear(); waitingOriginals.clear()
+                pageOutputBytes.clear()
                 lastAttempts.clear(); manuallyStopped.clear()
             } else if (processingChanged) {
                 pending.keys.toList().forEach { cancelPendingLocked(it, "即时处理模式已变更") }
@@ -285,18 +288,38 @@ internal class ReaderEnhancementController(
             retainWithinBudgetLocked()
             // Keep only nearby identity observations. The original prefetcher remains responsible for fetching.
             originals.keys.filter { it !in wanted && abs(it - page) > 16 }.forEach { index ->
-                originals.remove(index); lastAttempts.remove(index); failed.remove(index)
+                originals.remove(index); lastAttempts.remove(index); failed.remove(index); pageOutputBytes.remove(index)
                 cacheMisses.remove(index); waitingOriginals.remove(index); details.remove(index); manuallyStopped.remove(index)
             }
-            val relevant = wanted.sortedWith(compareBy<Int> { if (it in visible) 0 else if (it in ahead) 1 else 2 }
-                .thenBy { abs(it - page) })
+            val relevant = wanted.sortedWith(compareBy<Int> {
+                when (it) {
+                    current -> 0
+                    in visible -> 1
+                    in nextVisible -> 2
+                    in ahead -> 3
+                    else -> 4
+                }
+            }.thenBy { abs(it - current) })
+            queueOrder = relevant.withIndex().associate { (order, index) -> index to order }
             publishLocked()
-            center.scheduler.updatePriorities(pending.map { (index, entry) ->
-                entry.id to if (index in visible) EnhancementPriority.P0 else EnhancementPriority.P1
+            center.scheduler.updateReaderPositions(pending.map { (index, entry) ->
+                entry.id to positionLocked(index)
             }.toMap())
             relevant
         }
         restart.forEach(::queueIfUseful)
+    }
+
+    private fun positionLocked(index: Int) = ReaderQueuePosition(
+        if (index in visible) EnhancementPriority.P0 else EnhancementPriority.P1,
+        queueOrder[index] ?: Int.MAX_VALUE,
+    )
+
+    /** Give presentation its own lease while the exact current page still belongs to this reader. */
+    fun retainForDisplay(asset: ReaderEnhancedPage): EnhancedAssetLease? = synchronized(lock) {
+        val index = asset.identity.pageId.toIntOrNull() ?: return@synchronized null
+        if (closed || assets[index] !== asset) return@synchronized null
+        held[index]?.fork()
     }
 
     /** Called with the exact materialized resource, after original bytes become available. */
@@ -311,6 +334,7 @@ internal class ReaderEnhancementController(
             if (originals[index]?.identity != original.identity) {
                 cancelPendingLocked(index, "原图身份已更新")
                 releaseHeldLocked(index)
+                pageOutputBytes.remove(index)
                 failed.remove(index); cacheMisses.remove(index); waitingOriginals.remove(index)
                 lastAttempts.remove(index); details.remove(index); manuallyStopped.remove(index)
             } else if (waitingOriginals.remove(index) != null) {
@@ -327,7 +351,7 @@ internal class ReaderEnhancementController(
 
     fun invalidate(index: Int) = synchronized(lock) {
         cancelPendingLocked(index, "本页正在重新加载")
-        originals.remove(index); releaseHeldLocked(index)
+        originals.remove(index); releaseHeldLocked(index); pageOutputBytes.remove(index)
         failed.remove(index); cacheMisses.remove(index); waitingOriginals.remove(index)
         lastAttempts.remove(index); details.remove(index); manuallyStopped.remove(index)
         publishLocked()
@@ -392,7 +416,8 @@ internal class ReaderEnhancementController(
         if (manuallyStopped[index]?.let { attemptMatchesLocked(index, it) } == true) return null
         if (failed[index]?.originalIdentity == original.identity || cacheMisses[index] == original.identity ||
             waitingOriginals[index] == original.identity) return null
-        if (index !in visible && budgetBlocked) {
+        val cacheBytes = policy.cacheMiB.toLong() * 1024 * 1024
+        if (index !in visible && (budgetBlocked || (pageOutputBytes[index] ?: 0L) > cacheBytes)) {
             budgetDeferred += index; details[index] = cacheWaitDetail
             publishLocked()
             return null
@@ -418,11 +443,17 @@ internal class ReaderEnhancementController(
         var completedLease: EnhancedAssetLease? = null
         var cacheHit = false
         try {
-            val priority = synchronized(lock) { if (index in visible) EnhancementPriority.P0 else EnhancementPriority.P1 }
-            val result = center.scheduler.submit(id, content, priority, sessionKey, epoch,
-                estimatedBytes = 16L * 1024 * 1024,
-                isCurrent = { valid(index, id, epoch, original) }, title = "第 ${index + 1} 页") { task ->
+            val inventoryFailure = try {
+                center.awaitImageInventory()
+                null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                error
+            }
+            suspend fun process(task: EnhancementJobContext): EngineOutput {
                 task.checkpoint()
+                if (inventoryFailure != null && center.inventory.value.engines.isEmpty()) throw inventoryFailure
                 val cacheWait = synchronized(lock) {
                     (index !in visible && budgetBlocked).also { wait -> if (wait && valid(index, id, epoch, original)) {
                         budgetDeferred += index; details[index] = cacheWaitDetail; publishLocked()
@@ -445,7 +476,7 @@ internal class ReaderEnhancementController(
                     throw CancellationException("等待原图缓存")
                 }
                 var work: EnhancedAssetWork? = null
-                try {
+                return try {
                     val sourceFile = StorageFile(source.path)
                     val before = withContext(Dispatchers.IO) { sourceFile.length() to sourceFile.lastModified() }
                     val info = center.engine.describeImage(source.path)
@@ -469,13 +500,13 @@ internal class ReaderEnhancementController(
                         selection.model?.version ?: EnhancementEngineIds.LOCAL_DETAIL_VERSION,
                         selection.model?.sha256 ?: EnhancementEngineIds.LOCAL_DETAIL_DIGEST,
                         selected.scale, parameters.cacheIdentity, "png")
-                    val cached = cache.acquire(identity)
+                    val cached = cache.acquireForReader(identity)
                     synchronized(lock) { cacheLookups++; if (cached != null) cacheHits++; publishLocked() }
                     center.telemetry.recordCacheLookup(sessionKey, content, cached != null)
                     if (cached != null) {
                         completedLease?.close(); completedLease = cached; cacheHit = true
                         task.checkpoint()
-                        return@submit EngineOutput(cached.file.path, cached.width, cached.height, cached.outputDigest,
+                        return EngineOutput(cached.file.path, cached.width, cached.height, cached.outputDigest,
                             withContext(Dispatchers.IO) { cached.file.length() }, selection.engine,
                             parameters.engineVersion,
                             identity.modelDigest, elapsedMillis = 0L)
@@ -491,21 +522,22 @@ internal class ReaderEnhancementController(
                         throw CacheOnlyMiss()
                     }
                     val currentWork = cache.prepare(identity).also { work = it }
-                    val input = StorageFile(currentWork.directory, "original.${sourceFile.extension.takeIf { it.isNotBlank() } ?: "image"}")
-                    withContext(Dispatchers.IO) {
-                        sourceFile.copyTo(input)
-                        check(sha256File(input.path) == originalDigest) { "原图在复制时发生变化" }
+                    // A Coil snapshot pins these exact bytes until close. Local/import paths
+                    // can be replaced and need a private, content-checked copy for inference.
+                    val input = if (source.pinned) sourceFile else {
+                        val copy = StorageFile(currentWork.directory,
+                            "original.${sourceFile.extension.takeIf { it.isNotBlank() } ?: "image"}")
+                        copyReaderEnhancementInput(sourceFile, copy, originalDigest)
+                        copy
                     }
-                    source.close()
                     task.checkpoint()
                     val workingBytes = readerEnhancementWorkingBytes(center)
                     task.checkpoint()
                     val output = center.engine.processImage(EngineImageRequest(input.path, currentWork.output.path,
                         engineId = selection.engine, content = imageContent, scale = selected.scale, model = selection.model,
                         tileSize = parameters.tileSize, overlap = parameters.overlap,
-                        maximumOutputBytes = minOf(center.resources.state.value.runtime.maxImageBytes,
-                            cacheBudgetBytes()).coerceAtLeast(1L),
-                        maximumWorkingBytes = workingBytes), task.progress)
+                        maximumOutputBytes = center.resources.state.value.runtime.maxImageBytes,
+                        maximumWorkingBytes = workingBytes, expectedSourceSha256 = originalDigest), task.progress)
                     task.checkpoint()
                     check(output.engineId == parameters.engineId &&
                         output.modelSha256 == identity.modelDigest && StorageFile(output.path) == currentWork.output) {
@@ -514,20 +546,32 @@ internal class ReaderEnhancementController(
                     check(output.width.toLong() == info.width.toLong() * selected.scale &&
                         output.height.toLong() == info.height.toLong() * selected.scale) { "增强输出倍率与请求不符" }
                     completedLease?.close()
-                    completedLease = cache.publish(currentWork, output.width, output.height) { valid(index, id, epoch, original) }
+                    completedLease = cache.publish(currentWork, output.width, output.height, cacheBudgetBytes()) {
+                        valid(index, id, epoch, original)
+                    }
                     work = null
                     output
                 } finally {
                     source.close()
                     withContext(NonCancellable) { work?.let { cache.abandon(it) } }
                 }
-            }.await()
+            }
+            val ticket = synchronized(lock) {
+                if (!valid(index, id, epoch, original)) return
+                val position = positionLocked(index)
+                center.scheduler.submit(id, content, position.priority, sessionKey, epoch,
+                    estimatedBytes = 16L * 1024 * 1024, isCurrent = { valid(index, id, epoch, original) },
+                    title = "第 ${index + 1} 页", queueOrder = position.order, work = ::process)
+            }
+            val result = ticket.await()
             currentCoroutineContext().ensureActive()
             val lease = completedLease ?: error("增强结果尚未发布")
             if (!valid(index, id, epoch, original)) return
             synchronized(lock) {
                 if (!valid(index, id, epoch, original)) return
-                held.remove(index)?.close(); held[index] = lease; heldBytes[index] = result.bytes.coerceAtLeast(0L)
+                val bytes = result.bytes.coerceAtLeast(0L)
+                pageOutputBytes[index] = bytes
+                held.remove(index)?.close(); held[index] = lease; heldBytes[index] = bytes
                 completedLease = null
                 assets[index] = ReaderEnhancedPage(lease.identity, lease.file.toURI(), lease.width, lease.height,
                     original.diskKey, result.elapsedMillis, cacheHit)
@@ -571,6 +615,7 @@ internal class ReaderEnhancementController(
     }
 
     private class OriginalFile(val path: String, private var snapshot: DiskCache.Snapshot?) : AutoCloseable {
+        val pinned: Boolean get() = snapshot != null
         override fun close() { snapshot?.close(); snapshot = null }
     }
     private fun openOriginal(original: Original): OriginalFile? {
@@ -625,7 +670,7 @@ internal class ReaderEnhancementController(
             validity = validity.copy(closed = true, generation = generation)
             center.scheduler.cancelSession(sessionKey, "阅读已结束")
             held.values.forEach(EnhancedAssetLease::close); held.clear(); heldBytes.clear(); assets.clear(); originals.clear()
-            budgetDeferred.clear()
+            budgetDeferred.clear(); pageOutputBytes.clear()
             pending.values.forEach { it.job.cancel() }; pending.clear()
             lastAttempts.clear(); failed.clear(); cacheMisses.clear(); waitingOriginals.clear()
             details.clear(); manuallyStopped.clear()
@@ -670,7 +715,11 @@ internal fun readerEnhancementParameters(center: EnhancementCenter, engineId: St
     val engine = center.inventory.value.engines.firstOrNull { it.id == engineId }
         ?: error("无法确认当前增强引擎版本，请刷新模型详情")
     check(engine.version.isNotBlank()) { "增强引擎版本尚未确认" }
-    val tile = if (engine.id == EnhancementEngineIds.ANDROID_CUGAN) EnhancementEngineIds.ANDROID_CUGAN_TILE_SIZE else 256
+    val tile = when (engine.id) {
+        EnhancementEngineIds.ANDROID_CUGAN -> EnhancementEngineIds.ANDROID_CUGAN_TILE_SIZE
+        EnhancementEngineIds.MANGAJANAI -> 0 // The CLI sizes tiles for the GPU's memory.
+        else -> 256
+    }
     val overlap = when (engine.id) {
         EnhancementEngineIds.ANDROID_CUGAN -> EnhancementEngineIds.ANDROID_CUGAN_PADDING
         EnhancementEngineIds.MANGAJANAI -> 128
@@ -687,7 +736,8 @@ internal fun readerEnhancementParameters(center: EnhancementCenter, engineId: St
 internal fun selectReaderEnhancementModel(center: EnhancementCenter, selected: EnhancementPolicy,
     image: EngineContent): ReaderEnhancementModel = selectReaderEnhancementModel(center.inventory.value, selected, image)
 
-private class IncompatibleReaderModel(message: String) : IllegalArgumentException(message)
+internal class IncompatibleReaderModel(message: String, val pageSpecific: Boolean = false) :
+    IllegalArgumentException(message)
 
 internal fun selectReaderEnhancementModel(inventory: EngineInventory, selected: EnhancementPolicy,
     image: EngineContent): ReaderEnhancementModel {
@@ -697,12 +747,15 @@ internal fun selectReaderEnhancementModel(inventory: EngineInventory, selected: 
         selected.tier in setOf(QualityTier.AUTO, QualityTier.BALANCED) && selected.scale > 1
     val compatible = if (explicit == null && automaticModel)
         inventory.models.filter { it.nativeScale == selected.scale && image in it.contents } else emptyList()
-    // Inventory order is only a deterministic compatible choice, not a measured quality ranking.
-    val model = explicit ?: compatible.firstOrNull { candidate ->
+    val ready = compatible.filter { candidate ->
         inventory.engines.any { it.id == candidate.engineId && image in it.contents &&
             it.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL) &&
             selected.scale in it.supportedScales }
     }
+    val preferVulkan = selected.tier == QualityTier.AUTO && selected.scale == 2 &&
+        (image == EngineContent.COLOR || image == EngineContent.WEBTOON)
+    val model = explicit ?: (if (preferVulkan) ready.firstOrNull { it.engineId == EnhancementEngineIds.ANDROID_CUGAN } else null)
+        ?: ready.firstOrNull()
     if (model != null) {
         if (image !in model.contents) {
             val content = when (image) {
@@ -711,7 +764,7 @@ internal fun selectReaderEnhancementModel(inventory: EngineInventory, selected: 
                 EngineContent.WEBTOON -> "条漫"
                 EngineContent.VIDEO -> "视频"
             }
-            throw IncompatibleReaderModel("${model.title} 不支持${content}，这页继续显示原图")
+            throw IncompatibleReaderModel("${model.title} 不支持${content}，这页继续显示原图", pageSpecific = true)
         }
         if (model.nativeScale != selected.scale) {
             throw IncompatibleReaderModel("${model.title} 支持 ${model.nativeScale}×，当前设为 ${selected.scale}×")

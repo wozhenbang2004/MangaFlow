@@ -2,11 +2,6 @@ package dev.mangaflow.enhancement.engine
 
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.BitmapRegionDecoder
-import android.graphics.ColorSpace
-import android.graphics.Rect
 import dev.mangaflow.enhancement.EnhancedAssetIdentity
 import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeStore
@@ -35,18 +30,19 @@ internal class AndroidCuganVulkan(context: Context, root: File) {
         if (video) VIDEO_VERSION else ENGINE_VERSION, "MIT / BSD-3-Clause",
         SOURCE_URL, when {
             !available -> EngineReadiness.UNSUPPORTED
-            !runtime.installed || runtime.pendingRemoval -> EngineReadiness.NOT_INSTALLED
+            !runtime.installed || runtime.pendingRemoval || runtime.requiresUpdate -> EngineReadiness.NOT_INSTALLED
             model == null -> EngineReadiness.NEEDS_MODELS
             else -> EngineReadiness.READY_FOR_TRIAL
         }, when {
             !hardwareAdvertised -> "此设备未报告 Vulkan 硬件能力，继续使用原图或 ONNX"
             !available -> "当前应用架构没有可加载的 ncnn Vulkan 组件"
             runtime.pendingRemoval -> "ncnn Vulkan 组件将在重启后移除"
+            runtime.requiresUpdate -> "请更新已安装的 ncnn Vulkan 组件，已下载的模型可继续使用"
             !runtime.installed -> "先下载签名 Vulkan 组件，再准备官方 NOSE 2× 模型"
             model == null -> "安装需下载并校验官方 NOSE 2× 权重与网络参数（约 2.6 MB）"
             else -> if (video) "兼容 SDR 视频可前方预处理、即时试用或离线增强。实时成功以实际处理回执为准。"
                 else "彩色漫画和条漫可选用原版 NOSE 2× 无降噪模型，实际设备兼容性在处理时确认"
-        }, setOf(2), if (video) setOf(EngineContent.VIDEO) else CONTENTS, canInstall = available && !runtime.pendingRemoval && (!runtime.installed || model == null),
+        }, setOf(2), if (video) setOf(EngineContent.VIDEO) else CONTENTS, canInstall = available && !runtime.pendingRemoval && (!runtime.installed || runtime.requiresUpdate || model == null),
         downloadBytes = MODEL_BYTES.takeIf { runtime.installed && model == null },
         videoOutput = EngineVideoContainer.MP4.takeIf { video }, supportsInterpolation = video, realtime = video,
     )
@@ -77,28 +73,21 @@ internal class AndroidCuganVulkan(context: Context, root: File) {
         installAndroidVulkanModel(runtimes, installed, MODEL_URL, PARTS, progress)
     }
 
-    suspend fun render(decoder: BitmapRegionDecoder, output: File, request: EngineImageRequest,
+    suspend fun render(source: AndroidMangaPixels, output: File, request: EngineImageRequest,
         progress: (EngineProgress) -> Unit) {
         val model = checkNotNull(request.model) { "Real-CUGAN 模型尚未选择" }
         require(model.engineId == EnhancementEngineIds.ANDROID_CUGAN && request.scale == 2 && request.content in CONTENTS &&
             request.tileSize == TILE_SIZE && request.overlap == PADDING) {
             "Real-CUGAN 模型、范围、倍率或分块身份不匹配"
         }
+        check(!runtime.pendingRemoval && !runtime.requiresUpdate) { "Vulkan 组件待移除或更新，请在组件管理中处理" }
         val coroutine = currentCoroutineContext()
         progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "加载 ncnn Vulkan 和 Real-CUGAN NOSE"))
         open(model).use { session ->
-            val tiles = session.tiles(decoder.width, decoder.height, request.maximumWorkingBytes)
-            val options = BitmapFactory.Options().apply {
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-                inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
-            }
+            val tiles = session.tiles(source.width, source.height, request.maximumWorkingBytes, opaqueBitmapSource = true)
+            source.reserve(tiles.sourceCacheBytes, requireOpaque = true)
             EnginePngWriter(output, tiles.outWidth, tiles.outHeight).use { writer ->
-                tiles.render(coroutine::ensureActive, { left, top, width, height, pixels ->
-                    val bitmap = decoder.decodeRegion(Rect(left, top, left + width, top + height), options)
-                        ?: error("无法解码 Real-CUGAN 分块")
-                    try { bitmap.getPixels(pixels, 0, width, 0, 0, width, height) }
-                    finally { bitmap.recycle() }
-                }, { _, row -> writer.row(row) }) { completed, total ->
+                tiles.render(coroutine::ensureActive, source::read, { _, row -> writer.row(row) }) { completed, total ->
                     progress(EngineProgress(EngineStage.PROCESS, completed, total,
                         detail = if (completed == 0L) "正在处理首个分块 · Vulkan Real-CUGAN" else "Real-CUGAN · Vulkan 已完成分块"))
                 }
@@ -137,11 +126,13 @@ internal typealias AndroidRgbRegion = (left: Int, top: Int, width: Int, height: 
 internal typealias AndroidRgbRow = (y: Int, pixels: IntArray) -> Unit
 
 internal class AndroidCuganSession(private val handle: Long) : AutoCloseable {
-    fun tiles(width: Int, height: Int, budget: Long) = AndroidCuganTiles(handle, width, height, budget)
+    fun tiles(width: Int, height: Int, budget: Long, opaqueBitmapSource: Boolean = false) =
+        AndroidCuganTiles(handle, width, height, budget, opaqueBitmapSource)
     override fun close() = AndroidCuganVulkanJni.close(handle)
 }
 
-internal class AndroidCuganTiles(private val handle: Long, private val width: Int, private val height: Int, budget: Long) {
+internal class AndroidCuganTiles(private val handle: Long, private val width: Int, private val height: Int, budget: Long,
+    private val opaqueBitmapSource: Boolean = false) {
     val outWidth = Math.multiplyExact(width, 2)
     val outHeight = Math.multiplyExact(height, 2)
     private val tileSize = AndroidCuganVulkan.TILE_SIZE
@@ -149,6 +140,7 @@ internal class AndroidCuganTiles(private val handle: Long, private val width: In
     private val bandHeight = minOf(height, tileSize) * 2
     private val band: IntArray
     private val row: IntArray
+    val sourceCacheBytes = budget - outWidth.toLong() * bandHeight * Int.SIZE_BYTES - 8L * 1024 * 1024
     private val columns = (0 until width step tileSize).associateWith { regionAxis(it, width) }
     private val rows = (0 until height step tileSize).associateWith { regionAxis(it, height) }
     private val raw = IntArray((tileSize + padding * 2) * (tileSize + padding * 2))
@@ -172,12 +164,25 @@ internal class AndroidCuganTiles(private val handle: Long, private val width: In
             for ((left, xs) in columns) {
                 checkActive()
                 read(xs.minimum, ys.minimum, xs.span, ys.span, raw)
-                require((0 until xs.span * ys.span).all { raw[it] ushr 24 == 255 }) { "Real-CUGAN 路径保留含透明像素的原图" }
-                val padded = paddedBuffers.getOrPut(xs.offsets.size * ys.offsets.size) { IntArray(xs.offsets.size * ys.offsets.size) }
-                val result = outputBuffers.getOrPut(xs.size * ys.size * 4) { IntArray(xs.size * ys.size * 4) }
-                for (index in padded.indices) {
-                    padded[index] = raw[ys.offsets[index / xs.offsets.size] * xs.span + xs.offsets[index % xs.offsets.size]]
+                if (!opaqueBitmapSource) require((0 until xs.span * ys.span).all { raw[it] ushr 24 == 255 }) {
+                    "Real-CUGAN 路径保留含透明像素的原图"
                 }
+                val count = xs.offsets.size * ys.offsets.size
+                // Interior tiles already contain the contiguous padded rectangle the native graph expects.
+                val padded = if (xs.contiguous && ys.contiguous && count == raw.size) raw else {
+                    val dest = paddedBuffers.getOrPut(count) { IntArray(count) }
+                    for (y in ys.offsets.indices) {
+                        val src = ys.offsets[y] * xs.span
+                        val dst = y * xs.offsets.size
+                        if (xs.contiguous) {
+                            raw.copyInto(dest, dst, src, src + xs.offsets.size)
+                        } else {
+                            for (x in xs.offsets.indices) dest[dst + x] = raw[src + xs.offsets[x]]
+                        }
+                    }
+                    dest
+                }
+                val result = outputBuffers.getOrPut(xs.size * ys.size * 4) { IntArray(xs.size * ys.size * 4) }
                 val status = AndroidCuganVulkanJni.process(handle, padded, result, xs.size, ys.size)
                 check(status == 0) { when (status) {
                     -2 -> "Vulkan 分块资源不足"
@@ -199,7 +204,7 @@ internal class AndroidCuganTiles(private val handle: Long, private val width: In
         }
     }
 
-    private data class Axis(val minimum: Int, val span: Int, val size: Int, val offsets: IntArray)
+    private data class Axis(val minimum: Int, val span: Int, val size: Int, val offsets: IntArray, val contiguous: Boolean)
 
     private fun regionAxis(start: Int, limit: Int): Axis {
         val size = minOf(tileSize, limit - start)
@@ -213,6 +218,6 @@ internal class AndroidCuganTiles(private val handle: Long, private val width: In
         val minimum = coordinates.min()
         val span = coordinates.max() - minimum + 1
         for (index in coordinates.indices) coordinates[index] -= minimum
-        return Axis(minimum, span, size, coordinates)
+        return Axis(minimum, span, size, coordinates, coordinates.indices.all { coordinates[it] == it })
     }
 }

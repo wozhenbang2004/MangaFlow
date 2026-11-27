@@ -60,9 +60,19 @@ private data class ModelChoice(
     val scaleLabel: String get() = scales.sorted().joinToString(" / ") { "$it×" }
     val sizeLabel: String? get() = model?.let { enhancementBytes(it.bytes) } ?: offer?.sizeLabel
         ?: profile?.downloadBytes?.let(::enhancementBytes)
-    val progressKey: String? get() = offer?.let { "model:${it.id}" } ?: profile?.id
+    fun progress(values: Map<String, EngineProgress>, engine: EngineDescriptor?): EngineProgress? = when {
+        model != null && engine.needsMangaRuntime() -> values[engineId]
+        offer != null -> values["model:${offer.id}"]
+        else -> profile?.let { values[it.id] }
+    }
 
-    fun stateLabel(selectedModel: String?, pending: EngineProgress?): String = when {
+    fun stateLabel(selectedModel: String?, pending: EngineProgress?, engine: EngineDescriptor?): String = when {
+        engine?.readiness == EngineReadiness.UNSUPPORTED -> "此设备不支持"
+        model != null && engine.needsMangaRuntime() -> when {
+            pending?.failed == true -> "运行组件未就绪 · 查看详情"
+            pending?.installing() == true -> pending.shortProgress()
+            else -> "模型已安装 · 运行组件待准备"
+        }
         selectionId != null && selectionId == selectedModel -> if (builtIn) "内置 · 已选用" else "已选用"
         builtIn -> "内置 · 可直接选用"
         model != null -> "已安装"
@@ -73,6 +83,10 @@ private data class ModelChoice(
     }
 }
 
+private fun EngineDescriptor?.needsMangaRuntime(): Boolean =
+    this != null && (id == EnhancementEngineIds.ANDROID_ONNX || id == EnhancementEngineIds.ANDROID_CUGAN) &&
+        (readiness == EngineReadiness.NOT_INSTALLED || readiness == EngineReadiness.FAILED)
+
 private fun EngineDescriptor.matches(content: EnhancementContent): Boolean =
     if (content == EnhancementContent.ANIME) EngineContent.VIDEO in contents
     else contents.any { it != EngineContent.VIDEO }
@@ -81,7 +95,8 @@ private fun modelChoices(inventory: EngineInventory, content: EnhancementContent
     val compatibleEngines = inventory.engines.filter { it.matches(content) }
     val engines = compatibleEngines.map { it.id }.toSet()
     val profiles = compatibleEngines.filter {
-        it.id in setOf(EnhancementEngineIds.ANIME4K_SMALL, EnhancementEngineIds.ANIME4K_MEDIUM) ||
+        it.id in setOf(EnhancementEngineIds.ANIME4K_SMALL, EnhancementEngineIds.ANIME4K_MEDIUM,
+            EnhancementEngineIds.ANDROID_CUGAN) ||
             Anime4KOptionalModels.supports(it.id)
     }
     val profileIds = profiles.map { it.id }.toSet()
@@ -162,18 +177,25 @@ internal fun EnhancementModelList(
     if (choices.isEmpty()) EnhancementQuiet("还没有可选模型，可先准备运行组件或导入模型。")
     else if (visibleChoices.isEmpty()) EnhancementQuiet(if (modelFilter == 1) "本机还没有此类模型。" else "列表中的模型均已在本机。")
     visibleChoices.forEach { choice ->
-        val pending = choice.progressKey?.let { progress[it] }
+        val engine = choice.profile ?: inventory.engines.firstOrNull { it.id == choice.engineId }
+        val pending = choice.progress(progress, engine)
         val selectionId = choice.selectionId
         val selection = selectionId?.let { enhancementModelSelectionPolicy(content, policy, inventory, it) }
         val selected = selectionId != null && selectionId == selectedModel
         val unavailable = selectionId != null && selection == null
-        val summary = listOfNotNull("当前不可选".takeIf { unavailable }, anime4kSizeLabel(choice.engineId), choice.scaleLabel, choice.sizeLabel,
-            choice.stateLabel(selectedModel, pending).takeUnless { unavailable }).joinToString(" · ")
+        val backend = when (choice.engineId) {
+            EnhancementEngineIds.ANDROID_ONNX -> "CPU"
+            EnhancementEngineIds.ANDROID_CUGAN -> "Vulkan GPU"
+            else -> anime4kSizeLabel(choice.engineId)
+        }
+        val status = if (unavailable && !engine.needsMangaRuntime() && engine?.readiness != EngineReadiness.UNSUPPORTED)
+            "当前不可选" else choice.stateLabel(selectedModel, pending, engine)
+        val summary = listOfNotNull(backend, choice.scaleLabel, choice.sizeLabel, status).joinToString(" · ")
         key(choice.key) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 ModelChoiceRow(choice.title, summary, selected, selection != null,
                     onClick = { if (selection != null) onSelectModel(selection) else onOpenModel(choice.key) },
-                    modifier = Modifier.weight(1f), failed = pending?.failed == true && selectionId == null,
+                    modifier = Modifier.weight(1f), failed = pending?.failed == true && selection == null,
                     actionLabel = when {
                         selection == null -> null
                         content != EnhancementContent.ANIME && policy.tier == QualityTier.ORIGINAL -> "选用并开启 ${selection.scale}×"
@@ -267,9 +289,8 @@ private fun mangaModelGuidance(choice: ModelChoice): ModelGuidance? {
                 "4× 会生成原图 16 倍像素；同页 2× 只有 4 倍像素。黑白漫画要特别比较小字、网点和细线，不能只看输出尺寸。",
             "https://github.com/xinntao/Real-ESRGAN/blob/master/docs/model_zoo.md")
         choice.engineId == EnhancementEngineIds.ANDROID_CUGAN -> ModelGuidance(
-            "彩页／条漫 · 无降噪 2×",
-            "当前接入的是 NOSE 包中的 2× 无降噪权重，适合先比较原本较干净的彩页或条漫。" +
-                "它不会因为文件小就自动更差，也不能当成强力去噪模型；处理速度取决于实际 GPU、驱动和页面。",
+            "彩页／条漫 · Vulkan 2×",
+            "在手机 GPU 上分块处理彩页和条漫，使用 Real-CUGAN NOSE 2× 无降噪权重。自动识别为黑白的页面需使用支持黑白漫画的模型。",
             "https://github.com/nihui/realcugan-ncnn-vulkan")
         choice.engineId == EnhancementEngineIds.MANGAJANAI && title.contains("IllustrationJaNai", true) -> {
             val variant = when {
@@ -384,7 +405,11 @@ internal fun EnhancementModelDetail(
     center: EnhancementCenter,
     onOpenEngine: (String) -> Unit,
 ) {
-    val choice = remember(inventory, content, modelKey) { modelChoices(inventory, content).firstOrNull { it.key == modelKey } }
+    val choice = remember(inventory, content, modelKey) {
+        modelChoices(inventory, content).firstOrNull { choice ->
+            choice.key == modelKey || choice.model?.let { "model:${it.id}" == modelKey } == true
+        }
+    }
     if (choice == null) {
         EnhancementQuiet("模型信息暂不可用，返回模型列表后重新检查。")
         return
@@ -392,7 +417,9 @@ internal fun EnhancementModelDetail(
     val model = choice.model
     val offer = choice.offer
     val engine = choice.profile ?: inventory.engines.firstOrNull { it.id == choice.engineId }
-    val pending = choice.progressKey?.let { progress[it] }
+    val pending = choice.progress(progress, engine)
+    val needsRuntime = engine.needsMangaRuntime()
+    val installWithRuntime = offer != null && model == null && needsRuntime && engine?.canInstall == true
     val selectionId = choice.selectionId
     val selectedModel = policy.modelId
     val selection = selectionId?.let { enhancementModelSelectionPolicy(content, policy, inventory, it) }
@@ -405,10 +432,10 @@ internal fun EnhancementModelDetail(
     val busy = downloading || pending?.installing() == true
     Text(choice.title, style = MaterialTheme.typography.titleMedium)
     EnhancementQuiet(listOfNotNull(choice.scaleLabel, choice.sizeLabel,
-        choice.stateLabel(selectedModel, pending)).joinToString(" · "))
+        choice.stateLabel(selectedModel, pending, engine)).joinToString(" · "))
     val guidance = modelGuidance(choice, content)
     if (content == EnhancementContent.ANIME) guidance?.let { EnhancementQuiet(it.detail) }
-    if (selectionId != null) {
+    if (selectionId != null && !needsRuntime) {
         MotionButton({ selection?.let(onSelectModel) }, modifier = Modifier.fillMaxWidth(), enabled = selection != null && !selected) {
             Icon(if (selected) Icons.Outlined.Check else Icons.Outlined.RadioButtonUnchecked, null, Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
@@ -419,40 +446,51 @@ internal fun EnhancementModelDetail(
                 else -> "使用此模型"
             })
         }
-    } else if (offer != null) {
+    } else if (offer != null && model == null) {
         MotionButton(onClick = {
             downloading = true; notice = null; noticeFailed = false
+            if (installWithRuntime && engine != null) center.installEngine(engine.id)
             val receipt = center.downloadModel(offer)
             scope.launch {
                 try {
                     receipt.await()
-                    notice = "已安装，可点击使用此模型。"
+                    notice = "模型文件已安装。"
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (failure: Exception) { notice = failure.message ?: "下载未完成，请重试。"; noticeFailed = true }
                 finally { downloading = false }
             }
         }, modifier = Modifier.fillMaxWidth(), enabled = !busy) {
             Icon(Icons.Outlined.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
-            Text(if (busy) pending?.shortProgress() ?: "准备下载" else if (pending?.failed == true || noticeFailed) "重试下载" else "下载并安装")
+            Text(when {
+                busy -> pending?.shortProgress() ?: "准备下载"
+                installWithRuntime -> "安装模型和运行组件"
+                pending?.failed == true || noticeFailed -> "重试下载"
+                else -> "下载并安装"
+            })
         }
     } else if (engine != null && (engine.canInstall || busy)) {
         MotionButton({ center.installEngine(engine.id) }, modifier = Modifier.fillMaxWidth(),
             enabled = engine.canInstall && !busy) {
             Icon(Icons.Outlined.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
-            Text(if (busy) pending?.shortProgress() ?: "准备下载"
-                else if (pending?.failed == true) "重试下载" else "下载并安装")
+            Text(when {
+                busy -> pending?.shortProgress() ?: "准备下载"
+                model != null && needsRuntime -> "准备运行组件"
+                pending?.failed == true -> "重试下载"
+                else -> "下载并安装"
+            })
         }
-    } else if (choice.profile != null) {
+    } else if (choice.profile != null || needsRuntime) {
         MotionButton({ center.refreshInventory() }, modifier = Modifier.fillMaxWidth()) { Text("重新检查安装") }
     }
     val feedback = pending?.takeIf { it.failed }?.detail ?: notice
         ?: "已安装，可点击使用此模型。".takeIf {
-            choice.profile != null && model != null && pending?.stage == EngineStage.COMPLETE && selectionId != selectedModel
+            choice.profile != null && selection != null && pending?.stage == EngineStage.COMPLETE && selectionId != selectedModel
         }
     feedback?.let { EnhancementQuiet(it, error = pending?.failed == true || noticeFailed) }
     InstallationProgress(pending)
     if (busy && pending?.detail != null && !pending.failed) EnhancementQuiet(pending.detail)
     when {
+        model != null && needsRuntime && engine != null -> if (choice.profile == null) EnhancementQuiet(engine.detail)
         selectionId != null && selection == null ->
             EnhancementQuiet("模型与当前内容或运行组件不兼容；请检查适用内容与运行组件，原设置会保留。")
         selection != null && selection.scale != policy.scale ->
@@ -475,7 +513,8 @@ internal fun EnhancementModelDetail(
         EnhancementQuiet("可按作者标注的适用片源、原生倍率和运行组件选择，再用同一片段比较效果。")
     }
     (offer?.detail ?: choice.profile?.detail)?.let { EnhancementQuiet(it) }
-    if (choice.profile != null) EnhancementQuiet("用于即时播放增强，不生成完整离线增强视频。")
+    if (content == EnhancementContent.ANIME && choice.profile != null)
+        EnhancementQuiet("用于即时播放增强，不生成完整离线增强视频。")
     EnhancementValue("适用内容", (model?.contents ?: offer?.contents ?: choice.profile?.contents.orEmpty())
         .joinToString(" · ", transform = ::modelContentLabel))
     (model?.version ?: choice.profile?.version)?.let { EnhancementValue("版本", it) }

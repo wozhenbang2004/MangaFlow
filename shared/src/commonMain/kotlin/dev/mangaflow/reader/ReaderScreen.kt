@@ -1283,13 +1283,18 @@ fun ReaderScreen(
         Modifier.readerMouseEdgeReveal(readerDockWidth, readerDockWidth) { revealDesktopTools() }
     else Modifier
 
+    val presentationAssets = rememberUpdatedState(enhancementState.assets)
+    val comparisonPage = pageIndex.takeIf { compareEnhancement }
+    val pagePresentation = remember(enhancement, presentationAssets, comparisonPage, enhancementDivider) {
+        ReaderEnhancementPresentation(enhancement, presentationAssets,
+            comparisonFraction = enhancementDivider.takeIf { comparisonPage != null },
+            comparisonPageIndex = comparisonPage,
+            onComparisonFractionChange = { enhancementDivider.floatValue = it.coerceIn(0f, 1f) })
+    }
     CompositionLocalProvider(LocalReaderActionFinished provides { if (desktop) keyboardFocusRestore++ },
         LocalReaderEnhancement provides enhancement,
         LocalReaderEnhancementSources provides enhancementSources,
-        LocalReaderEnhancementPresentation provides ReaderEnhancementPresentation(enhancement, enhancementState,
-            comparisonFraction = enhancementDivider.takeIf { compareEnhancement },
-            comparisonPageIndex = pageIndex.takeIf { compareEnhancement },
-            onComparisonFractionChange = { enhancementDivider.floatValue = it.coerceIn(0f, 1f) }),
+        LocalReaderEnhancementPresentation provides pagePresentation,
         LocalReaderPreparationTracker provides preparationTracker,
         LocalReaderCacheRangeOwner provides cacheRangeOwner,
         LocalReaderPageRepair provides ReaderRepairRenderContext(repairState, repairs) { index, waiting ->
@@ -4425,11 +4430,14 @@ private fun ReaderPageImage(
             maxWidthPx = imageRuntime.previewWidthPx, maxHeightPx = imageRuntime.previewHeightPx)
         val currentPreviewSize by rememberUpdatedState(previewSize)
         val resource = resolvedPage
-        val enhancementSource = remember(attempt, resource, loadedImage, originalCacheIdentity) {
-            resource?.let { resolved -> loadedImage?.let { image ->
-                ReaderEnhancementSourceReceipt(originalCacheIdentity,
-                    image.diskCacheKey ?: readerPageCacheKey(resolved, headers, sourceId))
-            } }
+        val resolvedImage = loadedImage?.takeIf { it.attempt === attempt && it.resource == resource }
+        val resolvedCacheKey = remember(resource, resolvedImage?.diskCacheKey, headers, sourceId) {
+            resource?.let { resolvedImage?.diskCacheKey ?: readerPageCacheKey(it, headers, sourceId) }
+        }
+        val enhancementController = enhancementPresentation?.controller
+        val enhancementSource = remember(resolvedImage, originalCacheIdentity, resolvedCacheKey) {
+            if (resolvedImage != null && resolvedCacheKey != null)
+                ReaderEnhancementSourceReceipt(originalCacheIdentity, resolvedCacheKey) else null
         }
         DisposableEffect(enhancementSources, logicalPageIndex, enhancementSource) {
             if (enhancementSource != null) enhancementSources?.set(logicalPageIndex, enhancementSource)
@@ -4518,33 +4526,36 @@ private fun ReaderPageImage(
                 .build()
             },
         )
-        LaunchedEffect(resource, loadedImage, pageVisible, imageRangeOwner) {
-            val image = loadedImage ?: return@LaunchedEffect
-            if (resource != null) {
-                enhancementPresentation?.controller?.originalReady(logicalPageIndex, resource, headers, sourceId,
-                    image.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId))
-                imageRangeOwner?.let { imageRangeStore.registerReadingResource(it, logicalPageIndex, resource,
-                    image.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId)) }
-                readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
-                    image.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId),
-                    originalPage = page.takeIf { reload == 0 || resource.url == page.url }, refresh = true,
-                    originalCacheIdentity = originalCacheIdentity, runtime = experience.state.value.runtime)?.let { size ->
-                    observedDimensions = size
-                    dimensionsMeasured(size)
-                }
+        LaunchedEffect(resource, resolvedImage, resolvedCacheKey, enhancementController, imageRangeOwner) {
+            if (resolvedImage == null || resource == null || resolvedCacheKey == null || !attempt.acceptsResult) return@LaunchedEffect
+            enhancementController?.originalReady(logicalPageIndex, resource, headers, sourceId, resolvedCacheKey)
+            imageRangeOwner?.let { imageRangeStore.registerReadingResource(it, logicalPageIndex, resource, resolvedCacheKey) }
+            readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource, resolvedCacheKey,
+                originalPage = page.takeIf { reload == 0 || resource.url == page.url }, refresh = true,
+                originalCacheIdentity = originalCacheIdentity, runtime = experience.state.value.runtime)?.let { size ->
+                observedDimensions = size
+                dimensionsMeasured(size)
             }
         }
-        LaunchedEffect(attempt, resource, loadedImage, pageVisible, previewSize) {
-            if (!pageVisible || resource == null) return@LaunchedEffect
+        LaunchedEffect(attempt, resource, resolvedImage, resolvedCacheKey, pageVisible, previewSize, enhancementController) {
+            if (!pageVisible || resource == null || resolvedCacheKey == null) return@LaunchedEffect
             var originalStamp: ReaderOriginalStamp? = null
+            var hadOriginal = false
             while (attempt.acceptsResult) {
                 val started = monotonicTimeMillis()
                 val interval = experience.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L
                 val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
-                    loadedImage?.diskCacheKey, loadedImage?.takeIf { it.requestedSize == previewSize }?.memoryCacheKey,
+                    resolvedCacheKey, resolvedImage?.takeIf { it.requestedSize == previewSize }?.memoryCacheKey,
                     previousOriginal = originalStamp)
-                originalStamp = artifact.originalStamp
-                if (attempt.acceptsResult) {
+                if (attempt.acceptsResult && pageVisible && resolvedPage == resource) {
+                    // A memory preview can precede the original returning to disk. Wake its waiting
+                    // enhancement exactly when the existing reader observes those bytes again.
+                    if (artifact.originalPresent == true && (!hadOriginal || artifact.originalStamp != originalStamp) &&
+                        (resolvedCacheKey != rejectedCacheKey || prefetchCacheRecovery.recovered)) {
+                        enhancementController?.originalReady(logicalPageIndex, resource, headers, sourceId, resolvedCacheKey)
+                    }
+                    artifact.originalPresent?.let { hadOriginal = it }
+                    originalStamp = artifact.originalStamp
                     preparationTracker?.artifact(page.index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident,
                         freshnessMillis = (interval + monotonicTimeMillis() - started) * 2L, startedAt = started)
                     preparationTracker?.sample()
@@ -4572,9 +4583,12 @@ private fun ReaderPageImage(
         // Vertical reading uses one continuous scroll surface for pages and long strips.
         val pageModifier = if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(naturalHeight)
             .onSizeChanged { measuredHeight = it.height }
-        val enhancedAsset = enhancementPresentation?.state?.assets?.get(logicalPageIndex)?.takeIf { enhanced ->
-            resource != null && enhanced.sourceCacheIdentity ==
-                (loadedImage?.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId))
+        val pageAssets = enhancementPresentation?.assets
+        val preparedEnhancement by remember(pageAssets, logicalPageIndex) {
+            derivedStateOf { pageAssets?.value?.get(logicalPageIndex) }
+        }
+        val enhancedAsset = preparedEnhancement?.takeIf { enhanced ->
+            enhanced.sourceCacheIdentity == resolvedCacheKey
         }
         val comparison = enhancementPresentation?.takeIf { it.comparisonPageIndex == logicalPageIndex }
         Box(pageModifier.clipToBounds(), contentAlignment = Alignment.Center) {

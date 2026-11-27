@@ -4,6 +4,7 @@ import dev.mangaflow.platform.PlatformContext
 import com.luciad.imageio.webp.WebPReadParam
 import java.awt.Rectangle
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.util.UUID
 import javax.imageio.ImageIO
@@ -19,7 +20,7 @@ actual fun createEnhancementEngine(context: PlatformContext): EnhancementEngine 
 private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEngine {
     private val root = File(context.dataRoot, "enhancement/engines")
     private val runtime = DesktopEngineRuntime(root)
-    private val inventoryDigests = DesktopInventoryDigests()
+    private val inventoryDigests = EngineInventoryDigests()
     private val animeJaNai = DesktopAnimeJaNai(root)
     private val anime4kVariants = dev.mangaflow.anime.player.Anime4KOptionalModels(context)
     private val imports = ImportedEngineModels(File(context.dataRoot, "enhancement/models"), EnhancementEngineIds.MANGAJANAI)
@@ -131,13 +132,18 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
         val destination = File(request.destinationPath)
         newEngineOutput(source, destination)
         require(engineJpegOrientation(source) == 1) { "此页面带旋转或镜像元数据；当前增强保留原图以维持阅读几何" }
-        val output = File(destination.parentFile, "render-${UUID.randomUUID()}.png")
         val started = System.nanoTime()
-        val sourceHash = engineSha256(source)
+        val sourceHash = request.expectedSourceSha256 ?: engineSha256(source)
+        val local = request.engineId == EnhancementEngineIds.LOCAL_DETAIL
+        val work = File(destination.parentFile, "image-${UUID.randomUUID()}")
+        check(work.mkdir())
         try {
-            if (request.engineId == EnhancementEngineIds.LOCAL_DETAIL) {
+            val output: File
+            val sourceSize: Pair<Int, Int>
+            if (local) {
                 require(request.scale == 1) { "轻量处理仅支持 1×；2×/4× 需要真实超分模型" }
-                renderDetail(source, output, request.maximumWorkingBytes, progress)
+                output = File(work, "result.png")
+                sourceSize = renderDetail(source, output, request.maximumWorkingBytes, progress)
             } else {
                 require(request.engineId == EnhancementEngineIds.MANGAJANAI && windows)
                 val model = request.model ?: error("请安装或导入适合此页面的真实模型")
@@ -146,40 +152,31 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                 val weights = File(model.path)
                 check(engineSha256(weights) == model.sha256) { "模型文件已改变，请重新检查" }
                 val executable = runtime.executable(DesktopEnginePackages.manga) ?: error("请先准备漫画增强组件")
-                val temporary = File(output.parentFile, "image-${UUID.randomUUID()}")
-                check(temporary.mkdir())
-                try {
-                    // Cache owners intentionally use opaque file names. The CLI classifies input by extension;
-                    // copy the unchanged bytes under the format actually identified by the image decoder.
-                    val extension = withImageReader(source) { reader -> when (reader.formatName.lowercase()) {
-                        "jpeg", "jpg" -> "jpg"
-                        "tif", "tiff" -> "tiff"
-                        "png", "webp", "bmp", "gif" -> reader.formatName.lowercase()
-                        else -> error("当前漫画组件不支持这一页面编码")
-                    } }
-                    val input = File(temporary, "input.$extension")
-                    Files.copy(source.toPath(), input.toPath())
-                    val results = File(temporary, "output").also { check(it.mkdir()) }
-                    val args = listOf("--no-config", input.canonicalPath, "-o", results.canonicalPath,
-                        "--model", weights.canonicalPath, "--format", "png", "--filename", "result",
-                        "--scale", request.scale.toString(), "--tile", request.tileSize.coerceIn(256, 1024).toString(),
-                        "--overlap", maxOf(128, request.overlap).toString(), "--workers", "1", "--streams", "1",
-                        "--progress", "lines")
-                    runEngineProcess(executable, args) { line ->
-                        if (line.startsWith("ENGINE_BUILD")) progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "首次准备此模型与分块尺寸"))
-                        else if (line.startsWith("NATIVE ")) progress(EngineProgress(EngineStage.PROCESS, detail = "原生 GPU Kernel 已实际启用"))
-                        else if (line.startsWith("BACKEND_FALLBACK")) progress(EngineProgress(EngineStage.PROCESS, detail = "引擎已切换到兼容后端"))
+                val input = prepareMangaJaNaiInput(source, work, request.maximumWorkingBytes)
+                sourceSize = input.width to input.height
+                val inputPath = input.file.canonicalPath
+                val results = File(work, "output").also { check(it.mkdir()) }
+                val tile = if (request.tileSize == 0) "auto" else request.tileSize.coerceIn(256, 1024).toString()
+                val args = listOf("--no-config", inputPath, "-o", results.canonicalPath,
+                    "--model", weights.canonicalPath, "--format", "png", "--filename", "result",
+                    "--scale", request.scale.toString(), "--tile", tile,
+                    "--overlap", maxOf(128, request.overlap).toString(), "--workers", "1", "--streams", "1",
+                    "--progress", "lines")
+                var copiedAnimation = false
+                runEngineProcess(executable, args) { line ->
+                    when {
+                        line.startsWith("ENGINE_BUILD ") -> progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "首次准备此模型与分块尺寸"))
+                        line.startsWith("ENGINE_READY ") -> progress(EngineProgress(EngineStage.PROCESS, detail = "模型已就绪，正在增强页面"))
+                        line.startsWith("NATIVE ") -> progress(EngineProgress(EngineStage.PROCESS, detail = "原生 GPU Kernel 已实际启用"))
+                        line.startsWith("BACKEND_FALLBACK") -> progress(EngineProgress(EngineStage.PROCESS, detail = "引擎已切换到兼容后端"))
+                        line.startsWith("$inputPath: animated ") && ", copied unchanged to " in line -> copiedAnimation = true
+                        else -> Unit
                     }
-                    currentCoroutineContext().ensureActive()
-                    val produced = results.listFiles().orEmpty().singleOrNull { it.extension.equals("png", true) }
-                        ?: error("引擎未生成唯一的完整 PNG 输出")
-                    val sourceInfo = describeImage(source.path)
-                    withImageReader(produced) { reader ->
-                        check(reader.getWidth(0).toLong() == sourceInfo.width.toLong() * request.scale &&
-                            reader.getHeight(0).toLong() == sourceInfo.height.toLong() * request.scale) { "增强结果尺寸与目标倍率不符" }
-                    }
-                    moveNewEngineFile(produced, output)
-                } finally { temporary.deleteRecursively() }
+                }
+                currentCoroutineContext().ensureActive()
+                check(!copiedAnimation) { "此页是动图，已保留原有动画" }
+                output = results.listFiles().orEmpty().singleOrNull { it.extension.equals("png", true) }
+                    ?: error("引擎未生成唯一的完整 PNG 输出")
             }
             currentCoroutineContext().ensureActive()
             check(engineSha256(source) == sourceHash) { "处理期间原始页面发生变化，结果已丢弃" }
@@ -188,17 +185,18 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
             require(output.length() <= request.maximumOutputBytes) {
                 "增强文件超过单图压缩或增强缓存额度，可调整对应额度后重试"
             }
-            val dimensions = verifyEnginePng(output)
-            val local = request.engineId == EnhancementEngineIds.LOCAL_DETAIL
-            val result = EngineOutput(destination.canonicalPath, dimensions.first, dimensions.second, engineSha256(output), output.length(),
+            val png = inspectEnginePng(output)
+            check(png.width.toLong() == sourceSize.first.toLong() * request.scale &&
+                png.height.toLong() == sourceSize.second.toLong() * request.scale) { "增强结果尺寸与目标倍率不符" }
+            val result = EngineOutput(destination.canonicalPath, png.width, png.height, png.sha256, output.length(),
                 request.engineId, if (local) EnhancementEngineIds.LOCAL_DETAIL_VERSION else DesktopEnginePackages.manga.version,
                 if (local) EnhancementEngineIds.LOCAL_DETAIL_DIGEST else checkNotNull(request.model).sha256,
                 (System.nanoTime() - started) / 1_000_000)
             currentCoroutineContext().ensureActive()
-            moveNewEngineFile(output, destination)
+            moveNewEngineFile(output, destination, png.sha256)
             progress(EngineProgress(EngineStage.COMPLETE, 1, 1))
             result
-        } catch (failure: Throwable) { output.delete(); throw failure }
+        } finally { work.deleteRecursively() }
     }
 
     override suspend fun processVideo(request: EngineVideoRequest, progress: (EngineProgress) -> Unit): EngineOutput {
@@ -280,41 +278,103 @@ private inline fun <T> withImageReader(file: File, block: (ImageReader) -> T): T
     }
 }
 
-private suspend fun renderDetail(source: File, output: File, budget: Long, progress: (EngineProgress) -> Unit) {
+private data class MangaJaNaiInput(val file: File, val width: Int, val height: Int)
+
+/** The CLI selects a decoder from the filename. Cache files can have an opaque extension. */
+private fun prepareMangaJaNaiInput(source: File, work: File, budget: Long): MangaJaNaiInput =
     withImageReader(source) { reader ->
-        val width = reader.getWidth(0); val height = reader.getHeight(0)
-        require(width > 0 && height > 0 && width.toLong() * 4 < budget)
-        val stripHeight = minOf(64, maxOf(1, (budget / (width.toLong() * 16)).toInt()))
-        EnginePngWriter(output, width, height).use { png ->
-            var top = 0
-            while (top < height) {
-                currentCoroutineContext().ensureActive()
-                val bottom = minOf(height, top + stripHeight)
-                val parameter = reader.defaultReadParam
-                val first = maxOf(0, top - 1)
-                // libwebp snaps crop origins to even pixels; include that row in the explicitly tracked halo.
-                val from = if (parameter is WebPReadParam) first - first % 2 else first
-                val to = minOf(height, bottom + 1)
-                parameter.apply {
-                    if (this is WebPReadParam) {
-                        isUseCropping = true; cropLeft = 0; cropTop = from
-                        cropWidth = width; cropHeight = to - from
-                    } else sourceRegion = Rectangle(0, from, width, to - from)
-                }
-                val strip = reader.read(0, parameter)
-                try {
-                    val pixels = IntArray(width * strip.height)
-                    strip.getRGB(0, 0, width, strip.height, pixels, 0, width)
-                    val row = IntArray(width)
-                    for (y in top until bottom) {
-                        for (x in 0 until width) row[x] = localDetailPixel(pixels, width, strip.height, x, y - from)
+        val width = reader.getWidth(0)
+        val height = reader.getHeight(0)
+        require(width > 0 && height > 0) { "原图尺寸无效" }
+        val format = reader.formatName.lowercase()
+        val extension = when (format) {
+            "jpeg", "jpg" -> "jpg"
+            "tif", "tiff" -> "tiff"
+            "png", "webp", "bmp", "avif", "jxl" -> format
+            "gif" -> {
+                // The pinned CLI accepts GIF only inside archives. Preserve alpha and all pixels
+                // of a single-frame GIF, and leave a genuinely animated page to the reader.
+                check(reader.getNumImages(true) == 1) { "此页是动图，已保留原有动画" }
+                require(width.toLong() * height <= budget / 8) { "此页的无损转换超出图片处理内存额度" }
+                val converted = File(work, "input.png")
+                val image = reader.read(0)
+                try { check(ImageIO.write(image, "png", converted)) { "无法写入静态 GIF 的无损输入" } }
+                finally { image.flush() }
+                return@withImageReader MangaJaNaiInput(converted, width, height)
+            }
+            else -> error("当前漫画组件不支持这一页面编码")
+        }
+        if (source.extension.equals(extension, true)) return@withImageReader MangaJaNaiInput(source, width, height)
+        val alias = File(work, "input.$extension")
+        try {
+            Files.createLink(alias.toPath(), source.toPath())
+        } catch (_: UnsupportedOperationException) {
+            Files.copy(source.toPath(), alias.toPath())
+        } catch (_: IOException) {
+            // Across volumes, or on a file system without hard links, keep the same decoded format.
+            Files.copy(source.toPath(), alias.toPath())
+        }
+        MangaJaNaiInput(alias, width, height)
+    }
+
+private suspend fun renderDetail(
+    source: File, output: File, budget: Long, progress: (EngineProgress) -> Unit,
+): Pair<Int, Int> = withImageReader(source) { reader ->
+    val width = reader.getWidth(0)
+    val height = reader.getHeight(0)
+    require(width > 0 && height > 0)
+    if (reader.formatName.equals("gif", true)) {
+        check(reader.getNumImages(true) == 1) { "此页是动图，已保留原有动画" }
+    }
+    // Reserve space for the decoded bitmap, converted ARGB rows, the output row and filter halo.
+    // A normal page can be decoded in one go, while a long strip uses the same bounded path.
+    val rowBytes = width.toLong() * 16
+    val availableRows = minOf(budget / rowBytes, Int.MAX_VALUE.toLong() / width)
+    require(availableRows >= minOf(height.toLong(), 4L) + 1) { "当前图片处理内存额度不足以容纳此页的一行及滤镜边缘" }
+    val bandRows = if (height < availableRows) height else (availableRows - 4L).toInt().coerceAtLeast(1)
+    val chunkRows = minOf(bandRows, 64)
+    val pixelRows = minOf(height.toLong(), chunkRows.toLong() + 2).toInt()
+    val pixels = IntArray(width * pixelRows)
+    val row = IntArray(width)
+    val context = currentCoroutineContext()
+    EnginePngWriter(output, width, height).use { png ->
+        var top = 0
+        while (top < height) {
+            context.ensureActive()
+            val bottom = top + minOf(bandRows, height - top)
+            val param = reader.defaultReadParam
+            val first = maxOf(0, top - 1)
+            // libwebp rounds the start of a crop down to an even coordinate.
+            val from = if (param is WebPReadParam) first - first % 2 else first
+            val to = if (bottom == height) bottom else bottom + 1
+            if (from > 0 || to < height) {
+                if (param is WebPReadParam) {
+                    param.isUseCropping = true; param.cropLeft = 0; param.cropTop = from
+                    param.cropWidth = width; param.cropHeight = to - from
+                } else param.sourceRegion = Rectangle(0, from, width, to - from)
+            }
+            val band = reader.read(0, param)
+            try {
+                check(band.width == width && band.height == to - from) { "原图解码区域尺寸不符" }
+                var next = top
+                while (next < bottom) {
+                    val end = next + minOf(chunkRows, bottom - next)
+                    val startRow = maxOf(0, next - 1)
+                    val endRow = if (end == height) end else end + 1
+                    val count = endRow - startRow
+                    band.getRGB(0, startRow - from, width, count, pixels, 0, width)
+                    for (y in next until end) {
+                        context.ensureActive()
+                        for (x in 0 until width) row[x] = localDetailPixel(pixels, width, count, x, y - startRow)
                         png.row(row)
                     }
-                } finally { strip.flush() }
-                top = bottom
-                progress(EngineProgress(EngineStage.PROCESS, top.toLong(), height.toLong(), detail = "1× 保守去噪"))
-            }
-            png.finish()
+                    next = end
+                    progress(EngineProgress(EngineStage.PROCESS, next.toLong(), height.toLong(), detail = "1× 保守去噪"))
+                }
+            } finally { band.flush() }
+            top = bottom
         }
+        png.finish()
     }
+    width to height
 }

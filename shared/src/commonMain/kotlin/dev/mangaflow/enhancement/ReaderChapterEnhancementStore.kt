@@ -48,6 +48,7 @@ class ReaderChapterEnhancementStore(context: PlatformContext, private val center
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = StorageLock()
     private val diskWriter = Mutex()
+    private val persistedChapters = mutableMapOf<EnhancementContent, String>()
     private val writes = Channel<Unit>(Channel.CONFLATED)
     private val records = linkedMapOf<String, ReaderChapterEnhancementTask>()
     private val jobs = mutableMapOf<String, Job>()
@@ -95,7 +96,7 @@ class ReaderChapterEnhancementStore(context: PlatformContext, private val center
                 complete.filter { "${it.id}:${it.createdAt}" !in prior }.forEach { entry ->
                     val content = contentFor(entry) ?: return@forEach
                     val policy = center.settings.policyForWork(content, entry.manga.id, entry.manga.sourceId)
-                    if (policy.enhanceAfterDownload && policy.tier != QualityTier.ORIGINAL)
+                    if (policy.enhanceAfterDownload && policy.tier != QualityTier.ORIGINAL && policy.cacheMiB > 0)
                         enqueue(entry, content, policy, automatic = true)
                 }
             }
@@ -185,7 +186,12 @@ class ReaderChapterEnhancementStore(context: PlatformContext, private val center
             val pages = store.storedPages(task.mangaId, task.chapterId)
                 ?: error("原始下载目录不可用")
             check(pages.size == task.totalPages) { "原始下载页数已改变" }
+            check(task.policy.cacheMiB > 0) { "整章预处理需要保存增强页。当前增强缓存为 0 MiB，可在阅读时即时增强。" }
+            center.awaitImageInventory()
             update(task) { it.copy(completedPages = 0, phase = EnhancementTaskPhase.QUEUED, reason = null) }
+            var completedPages = 0
+            var skippedPages = 0
+            var firstSkippedPage: String? = null
             for ((index, page) in pages.withIndex()) {
                 currentCoroutineContext().ensureActive()
                 check(isCurrent(task.id, task.generation)) { "任务已改变" }
@@ -206,14 +212,24 @@ class ReaderChapterEnhancementStore(context: PlatformContext, private val center
                         title = "${task.mangaTitle} · ${task.chapterTitle} · 第 ${index + 1} 页") { work ->
                         processPage(task, local, path, local.sourceRouteId.ifBlank { entry.chapter.sourceId }, index, work)
                     }.await()
+                    completedPages++
+                    cache.trimToBytes(task.policy.cacheMiB.toLong() * 1024 * 1024, task.content.directory)
+                } catch (incompatible: IncompatibleReaderModel) {
+                    if (!incompatible.pageSpecific) throw incompatible
+                    skippedPages++
+                    if (firstSkippedPage == null) firstSkippedPage = "第 ${index + 1} 页：${incompatible.message}"
                 } finally {
                     if (!currentCoroutineContext().isActive) center.scheduler.cancel(engineTask)
                 }
-                update(task) { it.copy(completedPages = index + 1, activeTaskId = null) }
+                update(task) { it.copy(completedPages = completedPages, activeTaskId = null) }
                 persist() // Only page boundaries are durable resume points.
             }
-            update(task) { it.copy(phase = EnhancementTaskPhase.COMPLETED, reason = "全部页面处理完成；原始下载保留", activeTaskId = null) }
-            cache.trimToBytes(task.policy.cacheMiB.toLong() * 1024 * 1024, task.content.directory)
+            update(task) {
+                if (skippedPages == 0) it.copy(phase = EnhancementTaskPhase.COMPLETED,
+                    reason = "本章各页已处理，增强结果按缓存预算保留", activeTaskId = null)
+                else it.copy(phase = EnhancementTaskPhase.FAILED, activeTaskId = null,
+                    reason = "已增强 ${completedPages}/${task.totalPages} 页，${skippedPages} 页与所选模型不兼容。$firstSkippedPage")
+            }
         } catch (cancelled: CancellationException) {
             if (currentCoroutineContext().isActive) update(task) { it.copy(phase = EnhancementTaskPhase.CANCELLED,
                 reason = "原始下载或处理任务已改变；原图与已完成结果保留", activeTaskId = null) }
@@ -250,32 +266,38 @@ class ReaderChapterEnhancementStore(context: PlatformContext, private val center
             model.model?.version ?: EnhancementEngineIds.LOCAL_DETAIL_VERSION,
             model.model?.sha256 ?: EnhancementEngineIds.LOCAL_DETAIL_DIGEST, task.policy.scale,
             parameters.cacheIdentity, "png")
+        fun checkRetainedSize(bytes: Long) {
+            check(bytes <= task.policy.cacheMiB.toLong() * 1024 * 1024) {
+                "第 ${index + 1} 页的增强结果超出 ${task.policy.cacheMiB} MiB 的缓存预算。可增加预算后重新准备，或在阅读时即时增强。"
+            }
+        }
         cache.acquire(identity)?.use { lease ->
             job.checkpoint()
+            val bytes = lease.file.length()
+            checkRetainedSize(bytes)
             center.telemetry.recordCacheLookup(task.id, task.content, true)
-            return EngineOutput(lease.file.path, lease.width, lease.height, lease.outputDigest, lease.file.length(),
+            return EngineOutput(lease.file.path, lease.width, lease.height, lease.outputDigest, bytes,
                 model.engine, parameters.engineVersion, identity.modelDigest, 0L)
         }
         center.telemetry.recordCacheLookup(task.id, task.content, false)
         val temporary = cache.prepare(identity)
         try {
             val input = StorageFile(temporary.directory, "original.${source.extension.takeIf { it.isNotBlank() } ?: "image"}")
-            source.copyTo(input)
-            check(sha256File(input.path) == digest) { "原图在复制时发生变化" }
+            copyReaderEnhancementInput(source, input, digest)
             job.checkpoint()
             val workingBytes = readerEnhancementWorkingBytes(center)
             job.checkpoint()
             val output = center.engine.processImage(EngineImageRequest(input.path, temporary.output.path,
                 model.engine, content, task.policy.scale, model.model,
                 tileSize = parameters.tileSize, overlap = parameters.overlap,
-                maximumOutputBytes = minOf(center.resources.state.value.runtime.maxImageBytes,
-                    task.policy.cacheMiB.toLong() * 1024 * 1024).coerceAtLeast(1),
-                maximumWorkingBytes = workingBytes), job.progress)
+                maximumOutputBytes = center.resources.state.value.runtime.maxImageBytes,
+                maximumWorkingBytes = workingBytes, expectedSourceSha256 = digest), job.progress)
             job.checkpoint()
             check(output.engineId == parameters.engineId &&
                 output.modelSha256 == identity.modelDigest && StorageFile(output.path) == temporary.output &&
                 output.width.toLong() == info.width.toLong() * task.policy.scale &&
                 output.height.toLong() == info.height.toLong() * task.policy.scale) { "增强输出身份或倍率不符" }
+            checkRetainedSize(output.bytes)
             cache.publish(temporary, output.width, output.height) { isCurrent(task.id, task.generation) }.close()
             center.telemetry.recordImage(task.id, task.content, output)
             return output
@@ -288,7 +310,7 @@ class ReaderChapterEnhancementStore(context: PlatformContext, private val center
             if (old.generation != task.generation) return
             records[task.id] = transform(old); publishLocked()
         }
-        writes.trySend(Unit)
+        // Processing persists at page boundaries and on exit. Active task IDs are transient.
     }
 
     private fun publishLocked() { mutableState.value = records.values.toList().sortedByDescending { it.createdAt } }
@@ -312,8 +334,12 @@ class ReaderChapterEnhancementStore(context: PlatformContext, private val center
                     .put("createdAt", item.createdAt).put("tier", item.policy.tier.name).put("scale", item.policy.scale)
                     .put("style", item.policy.style.name).put("modelId", item.policy.modelId).put("cacheMiB", item.policy.cacheMiB))
             }
-            check(preferences(app, "enhancement_chapters_${content.directory}").edit()
-                .putString("tasks_v1", values.toString()).commit()) { "增强任务未能保存，请检查存储空间" }
+            val encoded = values.toString()
+            if (persistedChapters[content] == encoded) continue
+            val preferences = preferences(app, "enhancement_chapters_${content.directory}")
+            if (persistedChapters.containsKey(content) || preferences.getString("tasks_v1") != encoded)
+                check(preferences.edit().putString("tasks_v1", encoded).commit()) { "增强任务未能保存，请检查存储空间" }
+            persistedChapters[content] = encoded
         }
     }
 

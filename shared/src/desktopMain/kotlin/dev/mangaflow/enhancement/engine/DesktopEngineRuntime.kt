@@ -8,8 +8,6 @@ import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
-import java.nio.file.attribute.BasicFileAttributes
-import java.nio.file.attribute.FileTime
 import java.util.Properties
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -33,26 +31,6 @@ internal data class DesktopEnginePackage(
     val id: String, val version: String, val executable: String, val url: String, val sha256: String,
     val bytes: Long,
 )
-
-/** Only used for settings inventory. Installing and opening a native component still re-hash its files. */
-internal class DesktopInventoryDigests {
-    private data class Stamp(val size: Long, val modified: FileTime, val key: Any?)
-    private val entries = object : LinkedHashMap<File, Pair<Stamp, String>>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<File, Pair<Stamp, String>>) = size > 512
-    }
-
-    @Synchronized
-    fun digest(file: File): String {
-        fun stamp() = Files.readAttributes(file.toPath(), BasicFileAttributes::class.java).let {
-            Stamp(it.size(), it.lastModifiedTime(), it.fileKey())
-        }
-        val before = stamp()
-        entries[file]?.takeIf { it.first == before }?.let { return it.second }
-        val digest = engineSha256(file)
-        if (before == stamp()) entries[file] = before to digest
-        return digest
-    }
-}
 
 /** Archive identities are pinned to the official release receipts, not mutable latest URLs. */
 internal object DesktopEnginePackages {

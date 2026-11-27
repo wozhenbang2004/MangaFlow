@@ -515,6 +515,7 @@ internal fun EnhancementSettingsContent(
                             else change(draft.copy(cacheMiB = size))
                         }) { Text("保存") }
                     }
+                    if (draft.cacheMiB == 0) EnhancementQuiet("当前页可即时增强。0 MiB 会关闭后续页和整章的增强缓存。")
                 }
                 if (showContentRecords) {
                     Spacer(Modifier.height(8.dp))

@@ -120,6 +120,8 @@ data class EngineImageRequest(
     val maximumOutputBytes: Long = 256L * 1024 * 1024,
     /** Explicit tile/row-buffer admission budget, not measured model RAM or VRAM. */
     val maximumWorkingBytes: Long = maximumOutputBytes,
+    /** Digest of the exact input already read by the caller. Engines check it again before publishing. */
+    val expectedSourceSha256: String? = null,
 )
 
 data class EngineVideoRequest(

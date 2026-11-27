@@ -72,7 +72,7 @@ import kotlin.math.roundToInt
 /** One spread camera; each source page retains its own file, cache lease and tile budget. */
 internal data class ReaderSpreadViewport(val zoom: ZoomableState, val viewport: IntSize, val slot: IntRect)
 
-private data class ReaderTile(val source: IntRect, val sample: Int)
+internal data class ReaderTile(val source: IntRect, val sample: Int)
 private data class DecodedReaderTile(val spec: ReaderTile, val bitmap: ImageBitmap, val notice: String? = null)
 private data class VerticalTileWindow(val requested: List<ReaderTile> = emptyList(), val visibleCount: Int = 0)
 private data class ReaderOriginalSource(val path: String, val diskCacheKey: String? = null)
@@ -82,22 +82,22 @@ private fun nativeDecodeChanges(policy: ExperiencePolicyStore) = policy.state.ma
     Triple(it.runtime.tileDecodeRequests, it.runtime.maxImageMiB, it.runtime.fallbackDecodeMiPixels)
 }.distinctUntilChanged()
 
-private suspend fun decodeReaderTiles(
+internal suspend fun decodeReaderTiles(
     policy: ExperiencePolicyStore, decoder: ReaderRegionDecoder, requested: List<ReaderTile>, retained: MutableMap<ReaderTile, ReaderRegion>,
-    onDecoded: () -> Unit, onFailure: (Exception) -> Unit,
+    onDecoded: (() -> Unit)? = null, onFailure: (Exception) -> Unit,
 ) = coroutineScope {
     val pending = requested.filterNot { it in retained }
     if (pending.isEmpty()) return@coroutineScope
     val iterator = pending.iterator()
     // Coalesce desktop arrivals into one immutable draw snapshot per requested frame.
     // This clock only batches publications; it neither measures Present nor runs while idle.
-    val publications = if (platformKind == PlatformKind.DESKTOP) Channel<Unit>(Channel.CONFLATED) else null
+    val publications = if (onDecoded != null && platformKind == PlatformKind.DESKTOP) Channel<Unit>(Channel.CONFLATED) else null
     val publisher = publications?.let { signals -> launch {
         for (signal in signals) {
             withFrameNanos { }
             currentCoroutineContext().ensureActive()
             while (signals.tryReceive().isSuccess) { /* The next snapshot includes these arrivals. */ }
-            onDecoded()
+            onDecoded?.invoke()
         }
     } }
     // Workers inherit the reader effect's UI context; only native decoding leaves it.
@@ -113,7 +113,7 @@ private suspend fun decodeReaderTiles(
                     }
                     currentCoroutineContext().ensureActive()
                     retained[tile] = region
-                    if (publications == null) onDecoded() else publications.trySend(Unit)
+                    if (publications == null) onDecoded?.invoke() else publications.trySend(Unit)
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (failure: Exception) {
                     currentCoroutineContext().ensureActive()

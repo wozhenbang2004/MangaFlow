@@ -13,9 +13,12 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.absoluteOffset
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.AbsoluteAlignment
@@ -41,24 +44,27 @@ import coil3.compose.AsyncImagePainter
 import coil3.compose.rememberAsyncImagePainter
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
+import coil3.request.crossfade
 import coil3.size.Scale
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.readerPriority
 import dev.mangaflow.platform.LocalMangaContext
-import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.imagePlatformContext
-import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.storage.StorageLock
-import dev.mangaflow.reader.ReaderDetailUnavailable
+import dev.mangaflow.reader.ReaderRegion
+import dev.mangaflow.reader.ReaderTile
+import dev.mangaflow.reader.createReaderRegionDecoder
+import dev.mangaflow.reader.decodeReaderTiles
 import dev.mangaflow.reader.ReaderSpreadViewport
 import dev.mangaflow.reader.VerticalPageWindow
-import dev.mangaflow.reader.decodeNativeReaderRegion
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlinx.coroutines.*
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import me.saket.telephoto.zoomable.ZoomableState
 import me.saket.telephoto.zoomable.Viewport
 import me.saket.telephoto.zoomable.ZoomableContent
@@ -70,7 +76,7 @@ import kotlin.math.roundToInt
 
 internal data class ReaderEnhancementPresentation(
     val controller: ReaderEnhancementController,
-    val state: ReaderEnhancementState,
+    val assets: State<Map<Int, ReaderEnhancedPage>>,
     /** Null displays the complete enhanced image; otherwise the left side remains original. */
     val comparisonFraction: FloatState? = null,
     val comparisonPageIndex: Int? = null,
@@ -78,8 +84,12 @@ internal data class ReaderEnhancementPresentation(
 )
 internal val LocalReaderEnhancementPresentation = staticCompositionLocalOf<ReaderEnhancementPresentation?> { null }
 
-private data class EnhancedTile(val bounds: IntRect, val sample: Int)
-private data class EnhancedTileBitmap(val tile: EnhancedTile, val bitmap: ImageBitmap)
+private data class EnhancedTileBitmap(val tile: ReaderTile, val bitmap: ImageBitmap)
+private data class EnhancedTileBatch(val tiles: List<EnhancedTileBitmap>, val coverage: IntRect) {
+    fun covers(source: Rect): Boolean = source.width > 0f && source.height > 0f &&
+        source.left >= coverage.left - .01f && source.top >= coverage.top - .01f &&
+        source.right <= coverage.right + .01f && source.bottom <= coverage.bottom + .01f
+}
 
 /**
  * Draws into the ORIGINAL page's viewport/camera. It never changes its request,
@@ -100,13 +110,14 @@ internal fun ReaderEnhancedLayer(
 ) {
     if (asset == null) return
     val context = LocalMangaContext.current
-    val cache = remember(context) { EnhancedAssetCache.get(context) }
+    val controller = LocalReaderEnhancementPresentation.current?.controller
     val policy = remember(context) { ExperiencePolicyStore.get(context) }
-    var lease by remember(asset.identity) { mutableStateOf<EnhancedAssetLease?>(null) }
-    LaunchedEffect(cache, asset.identity) {
+    var lease by remember(controller, asset.identity) { mutableStateOf<EnhancedAssetLease?>(null) }
+    LaunchedEffect(controller, context, asset.identity) {
         var held: EnhancedAssetLease? = null
         try {
-            held = cache.acquire(asset.identity)
+            held = if (controller != null) controller.retainForDisplay(asset)
+                else EnhancedAssetCache.get(context).acquire(asset.identity)
             lease = held
             if (held != null) awaitCancellation()
         } catch (cancelled: CancellationException) { throw cancelled }
@@ -114,37 +125,41 @@ internal fun ReaderEnhancedLayer(
         finally { held?.close(); lease = null }
     }
     val liveLease = lease ?: return
-    val desktop = platformKind == PlatformKind.DESKTOP
-    val previewSize = if (desktop) pagePreviewSize else IntSize(1600, 1600)
-    val request = remember(liveLease, previewSize) {
+    var displayAttempt by remember(liveLease) { mutableIntStateOf(0) }
+    var tileReadFailed by remember(liveLease, displayAttempt) { mutableStateOf(false) }
+    val previewSize = pagePreviewSize
+    val memoryKey = remember(liveLease) { "enhanced:${asset.identity.key}:${liveLease.outputDigest}" }
+    val request = remember(liveLease, previewSize, displayAttempt) {
         val reads = mutableListOf<AutoCloseable>()
         val readsLock = StorageLock()
         fun finishRead() = synchronized(readsLock) { if (reads.isNotEmpty()) reads.removeAt(0).close() }
         ImageRequest.Builder(imagePlatformContext(context)).data(liveLease.file.toURI())
-            .readerPriority(asset.identity.sourceId).memoryCacheKey("enhanced:${asset.identity.key}")
+            .readerPriority(asset.identity.sourceId).memoryCacheKey(memoryKey).crossfade(false)
             .diskCachePolicy(CachePolicy.DISABLED).networkCachePolicy(CachePolicy.DISABLED)
             .size(previewSize.width, previewSize.height).scale(Scale.FIT)
             .listener(onStart = { synchronized(readsLock) { reads += liveLease.retain() } },
                 onCancel = { finishRead() }, onSuccess = { _, _ -> finishRead() }, onError = { _, _ -> finishRead() })
             .build()
     }
-    val preview = key(liveLease) { rememberAsyncImagePainter(request) }
+    val preview = key(liveLease, displayAttempt) { rememberAsyncImagePainter(request) }
     val previewState by preview.state.collectAsState()
     val success = previewState as? AsyncImagePainter.State.Success
     var previousPreview by remember(liveLease) { mutableStateOf<AsyncImagePainter.State.Success?>(null) }
-    if (desktop && success != null) SideEffect { previousPreview = success }
+    if (success != null) SideEffect { previousPreview = success }
     val displayedPreview = success ?: previousPreview
-    val ready = displayedPreview != null
-    val canDecodeTiles by rememberUpdatedState(ready || (desktop && previewState is AsyncImagePainter.State.Error))
     val previewPixels by rememberUpdatedState(displayedPreview?.result?.image?.let { IntSize(it.width, it.height) })
+    val image = IntSize(asset.width, asset.height)
+    val expectedPreview by rememberUpdatedState(
+        if (previewState is AsyncImagePainter.State.Error || success != null) null else {
+            val fit = minOf(1f, previewSize.width.toFloat() / image.width, previewSize.height.toFloat() / image.height)
+            IntSize((image.width * fit).roundToInt(), (image.height * fit).roundToInt())
+        }
+    )
     val currentSpread by rememberUpdatedState(spread)
     var viewport by remember { mutableStateOf(IntSize.Zero) }
-    var tiles by remember(asset.identity, liveLease) { mutableStateOf<List<EnhancedTileBitmap>>(emptyList()) }
-    // Both renderers read the finished enhanced file. On desktop either can supply the first frame.
-    val displayReady = if (desktop) ready || tiles.isNotEmpty() else ready && tiles.isNotEmpty()
+    var batch by remember(liveLease) { mutableStateOf<EnhancedTileBatch?>(null) }
     val fraction by rememberUpdatedState(comparisonFraction)
     val liveWindow by rememberUpdatedState(visibleWindow)
-    val image = IntSize(asset.width, asset.height)
 
     fun drawingBounds(): Rect {
         if (viewport.width <= 0 || viewport.height <= 0) return Rect.Zero
@@ -171,9 +186,11 @@ internal fun ReaderEnhancedLayer(
                     (end.x - bounds.left) / bounds.width * spread.viewport.width - spread.slot.left,
                     (end.y - bounds.top) / bounds.height * spread.viewport.height - spread.slot.top)
             }
-        }.getOrDefault(Rect.Zero) else liveWindow?.invoke()?.let {
-            Rect(0f, it.top.toFloat(), viewport.width.toFloat(), it.bottom.toFloat())
-        } ?: Rect(0f, 0f, viewport.width.toFloat(), viewport.height.toFloat())
+        }.getOrDefault(Rect.Zero) else {
+            val window = liveWindow
+            if (window == null) Rect(0f, 0f, viewport.width.toFloat(), viewport.height.toFloat())
+            else window()?.let { Rect(0f, it.top.toFloat(), viewport.width.toFloat(), it.bottom.toFloat()) } ?: Rect.Zero
+        }
     }
 
     fun comparisonBounds(): Rect = visibleBounds().intersect(drawingBounds())
@@ -182,82 +199,95 @@ internal fun ReaderEnhancedLayer(
                 it.width > 0f && it.height > 0f
         } ?: Rect.Zero
 
-    fun previewCovers(drawn: Rect): Boolean {
-        val pixels = previewPixels ?: return false
-        val spread = currentSpread
-        val scale = if (spread == null) 1f else {
-            if (spread.viewport.width <= 0) return false
-            runCatching {
-                with(spread.zoom.coordinateSystem) {
-                    unscaledContentBounds.rectIn(CoordinateSpace.Viewport).width / spread.viewport.width
-                }
-            }.getOrNull() ?: return false
-        }
-        if (!scale.isFinite() || scale <= 0f) return false
-        return pixels.width + 0.5f >= minOf(drawn.width * scale, image.width.toFloat()) &&
-            pixels.height + 0.5f >= minOf(drawn.height * scale, image.height.toFloat())
+    fun sourceBounds(drawn: Rect): Rect {
+        if (drawn.width <= 0f || drawn.height <= 0f) return Rect.Zero
+        val overlap = visibleBounds().intersect(drawn)
+        if (overlap.width <= 0f || overlap.height <= 0f) return Rect.Zero
+        return Rect(((overlap.left - drawn.left) / drawn.width * image.width).coerceIn(0f, image.width.toFloat()),
+            ((overlap.top - drawn.top) / drawn.height * image.height).coerceIn(0f, image.height.toFloat()),
+            ((overlap.right - drawn.left) / drawn.width * image.width).coerceIn(0f, image.width.toFloat()),
+            ((overlap.bottom - drawn.top) / drawn.height * image.height).coerceIn(0f, image.height.toFloat()))
     }
 
-    LaunchedEffect(liveLease, zoom, spread?.zoom, alignment) {
-        val retained = mutableMapOf<EnhancedTile, ImageBitmap>()
-        snapshotFlow {
-            if (!canDecodeTiles || viewport.width <= 0 || viewport.height <= 0) return@snapshotFlow emptyList<EnhancedTile>()
-            val spread = currentSpread
-            val drawn = drawingBounds()
-            if (drawn.width <= 0 || drawn.height <= 0 || (desktop && previewCovers(drawn))) emptyList()
-            else {
-                val overlap = visibleBounds().intersect(drawn)
-                if (overlap.width <= 0 || overlap.height <= 0) emptyList() else {
-                    val source = Rect(((overlap.left - drawn.left) / drawn.width * image.width).coerceIn(0f, image.width.toFloat()),
-                        ((overlap.top - drawn.top) / drawn.height * image.height).coerceIn(0f, image.height.toFloat()),
-                        ((overlap.right - drawn.left) / drawn.width * image.width).coerceIn(0f, image.width.toFloat()),
-                        ((overlap.bottom - drawn.top) / drawn.height * image.height).coerceIn(0f, image.height.toFloat()))
-                    val ratio = if (spread == null) image.width / drawn.width else
-                        source.width / spread.viewport.width.coerceAtLeast(1)
-                    var sample = 1
-                    while (sample < 128 && sample * 2 <= ratio) sample *= 2
-                    enhancedTiles(image, source, sample)
-                }
+    fun spreadScale(): Float {
+        val view = currentSpread ?: return 1f
+        if (view.viewport.width <= 0) return 0f
+        return runCatching {
+            with(view.zoom.coordinateSystem) {
+                unscaledContentBounds.rectIn(CoordinateSpace.Viewport).width / view.viewport.width
             }
-        }.distinctUntilChanged().collectLatest { requested ->
-            if (requested.isEmpty()) {
-                if (desktop) {
-                    retained.clear()
-                    tiles = emptyList()
-                }
-                return@collectLatest
-            }
-            retained.keys.retainAll(requested.toSet())
-            for (tile in requested) {
-                if (tile in retained) continue
-                try {
-                    val decoderLease = liveLease.retain()
-                    try {
-                        val region = policy.withTileDecodeAdmission {
-                            withContext(Dispatchers.IO) {
-                                decodeNativeReaderRegion(liveLease.file.path, tile.bounds, tile.sample, policy.state.value.runtime)
-                            }
+        }.getOrDefault(0f)
+    }
+
+    fun previewCovers(pixels: IntSize, drawn: Rect, scale: Float): Boolean =
+        pixels.width + 0.5f >= minOf(drawn.width * scale, image.width.toFloat()) &&
+            pixels.height + 0.5f >= minOf(drawn.height * scale, image.height.toFloat())
+
+    LaunchedEffect(liveLease, zoom, spread?.zoom, alignment, policy, displayAttempt) {
+        // The native handle and the file share the same lifetime, including cancellation
+        // during a blocking region read. No decoder is opened until a tile is actually needed.
+        val retention = liveLease.retain()
+        try {
+            val decoder = createReaderRegionDecoder(liveLease.file.path)
+            try {
+                val retained = mutableMapOf<ReaderTile, ReaderRegion>()
+                val configuration = policy.state.map {
+                    Triple(it.runtime.tileDecodeRequests, it.runtime.maxImageMiB, it.runtime.fallbackDecodeMiPixels)
+                }.distinctUntilChanged()
+                var fallbackBudget = policy.state.value.runtime.fallbackDecodeMiPixels
+                snapshotFlow<List<ReaderTile>?> {
+                    val drawn = drawingBounds()
+                    val source = sourceBounds(drawn)
+                    val scale = spreadScale()
+                    when {
+                        source.width <= 0f || source.height <= 0f || !scale.isFinite() || scale <= 0f -> emptyList()
+                        previewPixels?.let { previewCovers(it, drawn, scale) } == true -> emptyList()
+                        expectedPreview?.let { previewCovers(it, drawn, scale) } == true -> null
+                        else -> {
+                            // Use this page's transformed pixel density even when only a sliver
+                            // of one side of a spread is visible.
+                            val ratio = minOf(image.width / (drawn.width * scale), image.height / (drawn.height * scale))
+                            var sample = 1
+                            while (sample < 128 && sample * 2 <= ratio) sample *= 2
+                            enhancedTiles(image, source, sample)
+                        }
+                    }
+                }.distinctUntilChanged().combine(configuration) { requested, limits -> requested to limits }
+                    .collectLatest { (requested, limits) ->
+                        if (fallbackBudget != limits.third) retained.clear()
+                        fallbackBudget = limits.third
+                        // The new preview request can cover the viewport. Keep the previous
+                        // complete frame until its replacement has actually decoded.
+                        if (requested == null) return@collectLatest
+                        retained.keys.retainAll(requested.toSet())
+                        if (requested.isEmpty()) {
+                            tileReadFailed = false
+                            batch = null
+                            return@collectLatest
+                        }
+                        tileReadFailed = false
+                        try {
+                            decodeReaderTiles(policy, decoder, requested, retained, onFailure = { throw it })
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) {
+                            tileReadFailed = true
+                            return@collectLatest
                         }
                         currentCoroutineContext().ensureActive()
-                        retained[tile] = region.bitmap
-                    } finally { decoderLease.close() }
-                } catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: ReaderDetailUnavailable) { break }
-                catch (_: Exception) { break }
-            }
-            currentCoroutineContext().ensureActive()
-            // Publish one immutable viewport batch. A failed or superseded batch
-            // leaves the original/previous complete layer intact, never a scan of tiles.
-            if (requested.all { it in retained }) {
-                tiles = requested.map { EnhancedTileBitmap(it, retained.getValue(it)) }
-            }
-        }
+                        val coverage = IntRect(requested.minOf { it.source.left }, requested.minOf { it.source.top },
+                            requested.maxOf { it.source.right }, requested.maxOf { it.source.bottom })
+                        batch = EnhancedTileBatch(requested.map { EnhancedTileBitmap(it, retained.getValue(it).bitmap) }, coverage)
+                    }
+            } finally { withContext(NonCancellable + Dispatchers.IO) { decoder.close() } }
+        } finally { retention.close() }
     }
+
     Box(modifier.onSizeChanged { viewport = it }, contentAlignment = AbsoluteAlignment.TopLeft) {
         Canvas(Modifier.matchParentSize()) {
-            if (!displayReady) return@Canvas
             val bounds = drawingBounds()
             if (bounds.width <= 0 || bounds.height <= 0) return@Canvas
+            val complete = batch
+            if (displayedPreview == null && complete?.covers(sourceBounds(bounds)) != true) return@Canvas
             val divider = fraction?.floatValue?.coerceIn(0f, 1f)?.let {
                 val comparison = comparisonBounds()
                 comparison.left + it * comparison.width
@@ -267,8 +297,8 @@ internal fun ReaderEnhancedLayer(
                     if (displayedPreview != null) with(displayedPreview.painter) {
                         draw(Size(bounds.width, bounds.height))
                     }
-                    tiles.forEach { decoded ->
-                        val rect = decoded.tile.bounds
+                    complete?.tiles?.forEach { decoded ->
+                        val rect = decoded.tile.source
                         val left = rect.left.toFloat() / image.width * bounds.width
                         val top = rect.top.toFloat() / image.height * bounds.height
                         val right = rect.right.toFloat() / image.width * bounds.width
@@ -280,9 +310,17 @@ internal fun ReaderEnhancedLayer(
                 }
             }
         }
-        if (displayReady && comparisonFraction != null && onComparisonFractionChange != null) {
+        if (comparisonFraction != null && onComparisonFractionChange != null &&
+            (displayedPreview != null || batch?.covers(sourceBounds(drawingBounds())) == true)) {
             ReaderComparisonDivider(comparisonFraction, onComparisonFractionChange,
                 bounds = ::comparisonBounds, viewportWidth = viewport.width)
+        }
+        if (tileReadFailed && previewState is AsyncImagePainter.State.Error && displayedPreview == null &&
+            comparisonBounds().height > 0f && batch?.covers(sourceBounds(drawingBounds())) != true) {
+            TextButton(onClick = { displayAttempt++ }, modifier = Modifier.align(Alignment.TopCenter).offset {
+                val visible = comparisonBounds()
+                IntOffset(0, (visible.bottom.roundToInt() - 48.dp.roundToPx()).coerceAtLeast(visible.top.roundToInt()))
+            }) { Text("增强图读取失败 · 重试显示") }
         }
     }
 }
@@ -357,7 +395,7 @@ private fun ReaderComparisonDivider(
     }
 }
 
-private fun enhancedTiles(size: IntSize, bounds: Rect, sample: Int): List<EnhancedTile> {
+private fun enhancedTiles(size: IntSize, bounds: Rect, sample: Int): List<ReaderTile> {
     if (size.width <= 0 || size.height <= 0 || bounds.width <= 0 || bounds.height <= 0 ||
         !bounds.left.isFinite() || !bounds.top.isFinite() || !bounds.right.isFinite() || !bounds.bottom.isFinite()) return emptyList()
     var actualSample = sample.coerceIn(1, 128)
@@ -370,7 +408,7 @@ private fun enhancedTiles(size: IntSize, bounds: Rect, sample: Int): List<Enhanc
         val count = (lastX - firstX + 1).coerceAtLeast(0).toLong() * (lastY - firstY + 1).coerceAtLeast(0)
         if (count <= 32L) return buildList {
             for (y in firstY..lastY) for (x in firstX..lastX) {
-                add(EnhancedTile(IntRect(x * step, y * step, minOf((x + 1) * step, size.width),
+                add(ReaderTile(IntRect(x * step, y * step, minOf((x + 1) * step, size.width),
                     minOf((y + 1) * step, size.height)), actualSample))
             }
         }

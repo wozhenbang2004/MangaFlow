@@ -7,9 +7,7 @@ import ai.onnxruntime.TensorInfo
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.BitmapRegionDecoder
 import android.graphics.ColorSpace
-import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
@@ -66,13 +64,14 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
         val cuganVideoModel = cugan.videoModel(cuganModel)
         val runtime = runtimes.states.value[PanelRuntimeId.ONNX]
         fun modelReadiness(models: List<EngineModel>) = when {
-            runtime?.installed != true -> EngineReadiness.NOT_INSTALLED
+            runtime?.installed != true || runtime.pendingRemoval || runtime.requiresUpdate -> EngineReadiness.NOT_INSTALLED
             models.isEmpty() -> EngineReadiness.NEEDS_MODELS
             else -> EngineReadiness.READY_FOR_TRIAL
         }
         val readiness = modelReadiness(installed)
         val videoReadiness = modelReadiness(installedVideo)
-        val canInstall = runtime?.installed != true && runtime?.downloading != true
+        val canInstall = runtime?.pendingRemoval != true && runtime?.downloading != true &&
+            (runtime?.installed != true || runtime.requiresUpdate)
         EngineInventory(listOf(
             EngineDescriptor(EnhancementEngineIds.LOCAL_DETAIL, "轻量线条处理", EnhancementEngineIds.LOCAL_DETAIL_VERSION,
                 "MangaFlow", "https://github.com/wozhenbang2004/MangaFlow", EngineReadiness.BUILT_IN,
@@ -81,7 +80,11 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
             EngineDescriptor(EnhancementEngineIds.ANDROID_ONNX, "ONNX 漫画分块增强", "1.31.1", "MIT；模型遵循各自许可",
                 "https://github.com/microsoft/onnxruntime", readiness,
                 when (readiness) {
-                    EngineReadiness.NOT_INSTALLED -> "先准备签名 ONNX 运行库，再导入适合此内容的 FP32 NCHW 图像模型"
+                    EngineReadiness.NOT_INSTALLED -> when {
+                        runtime?.pendingRemoval == true -> "ONNX 组件将在重启后移除"
+                        runtime?.requiresUpdate == true -> "请更新已安装的签名 ONNX 组件，原有模型可继续使用"
+                        else -> "先准备签名 ONNX 运行库，再导入适合此内容的 FP32 NCHW 图像模型"
+                    }
                     EngineReadiness.NEEDS_MODELS -> "运行库已准备；导入 1×/2×/4× 模型后在真实页面试用"
                     else -> "CPU 原生推理与重叠分块；未声明 Vulkan 或手机性能验证"
                 }, setOf(1, 2, 4), setOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON),
@@ -270,7 +273,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
             val destination = File(request.destinationPath)
             newEngineOutput(source, destination)
             val output = File(destination.parentFile, "render-${UUID.randomUUID()}.png")
-            val sourceHash = engineSha256(source)
+            val sourceHash = request.expectedSourceSha256 ?: engineSha256(source)
             val started = System.nanoTime()
             // A transformed result must use exactly the original display geometry. Unsupported metadata keeps the original.
             val orientation = runCatching { ExifInterface(source).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL) }
@@ -278,17 +281,17 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
             require(orientation in setOf(ExifInterface.ORIENTATION_UNDEFINED, ExifInterface.ORIENTATION_NORMAL)) {
                 "此页面带旋转或镜像信息，当前增强保留原图以避免阅读位置改变"
             }
-            @Suppress("DEPRECATION")
-            val decoder = BitmapRegionDecoder.newInstance(source.path, false) ?: error("此格式暂不支持安全分块；保留原图")
+            val owner = currentCoroutineContext()
+            val pixels = AndroidMangaPixels(source, owner::ensureActive)
             try {
                 val engineVersion = when (request.engineId) {
                     EnhancementEngineIds.LOCAL_DETAIL -> {
                         require(request.scale == 1) { "轻量处理只支持 1×" }
-                        renderLocal(decoder, output, request.maximumWorkingBytes, progress)
+                        renderLocal(pixels, output, request.maximumWorkingBytes, progress)
                         EnhancementEngineIds.LOCAL_DETAIL_VERSION
                     }
                     EnhancementEngineIds.ANDROID_CUGAN -> {
-                        cugan.render(decoder, output, request, progress)
+                        cugan.render(pixels, output, request, progress)
                         AndroidCuganVulkan.ENGINE_VERSION
                     }
                     EnhancementEngineIds.ANDROID_ONNX -> {
@@ -297,11 +300,13 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                         require(model.nativeScale == request.scale) { "所选倍率与模型原生倍率不一致" }
                         check(engineSha256(File(model.path)) == model.sha256) { "模型已改变，请重新选择" }
                         progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "准备真实 ONNX CPU 模型"))
+                        val runtime = runtimes.states.value.getValue(PanelRuntimeId.ONNX)
+                        check(!runtime.pendingRemoval && !runtime.requiresUpdate) { "ONNX 组件待移除或更新，请在组件管理中处理" }
                         runtimes.ensureLoaded(PanelRuntimeId.ONNX)
                         val readySession = modelSession(model)
                         currentCoroutineContext().ensureActive()
                         progress(EngineProgress(EngineStage.PROCESS, detail = "正在处理首个分块 · CPU ONNX"))
-                        renderOnnx(decoder, output, request, readySession, progress)
+                        renderOnnx(pixels, output, request, readySession, progress)
                         check(engineSha256(File(model.path)) == model.sha256) { "处理期间模型发生变化，结果已丢弃" }
                         "1.31.1"
                     }
@@ -313,15 +318,16 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                     "增强后的 PNG 超过单图文件大小上限，已保留原图；可降低输出倍率或调整单图压缩上限"
                 }
                 progress(EngineProgress(EngineStage.VALIDATE, detail = "校验完整 PNG 与页面尺寸"))
-                val size = verifyEnginePng(output)
-                check(size.first.toLong() == decoder.width.toLong() * request.scale && size.second.toLong() == decoder.height.toLong() * request.scale)
+                val png = inspectEnginePng(output)
+                check(png.width.toLong() == pixels.width.toLong() * request.scale &&
+                    png.height.toLong() == pixels.height.toLong() * request.scale)
                 val local = request.engineId == EnhancementEngineIds.LOCAL_DETAIL
-                val result = EngineOutput(destination.canonicalPath, size.first, size.second, engineSha256(output), output.length(),
+                val result = EngineOutput(destination.canonicalPath, png.width, png.height, png.sha256, output.length(),
                     request.engineId, engineVersion,
                     if (local) EnhancementEngineIds.LOCAL_DETAIL_DIGEST else checkNotNull(request.model).sha256,
                     (System.nanoTime() - started) / 1_000_000)
                 currentCoroutineContext().ensureActive()
-                moveNewEngineFile(output, destination)
+                moveNewEngineFile(output, destination, png.sha256)
                 progress(EngineProgress(EngineStage.COMPLETE, 1, 1))
                 result
             } catch (memory: OutOfMemoryError) {
@@ -330,7 +336,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
             } catch (link: LinkageError) {
                 output.delete(); throw IllegalStateException("当前设备的原生推理组件不可用，已保留原图", link)
             } catch (failure: Throwable) { output.delete(); throw failure }
-            finally { decoder.recycle() }
+            finally { pixels.close() }
         }
     }
 
@@ -401,29 +407,29 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
         }
     }
 
-    private suspend fun renderLocal(decoder: BitmapRegionDecoder, output: File, budget: Long, progress: (EngineProgress) -> Unit) {
-        val width = decoder.width; val height = decoder.height
-        require(width.toLong() * 16 <= budget) { "当前页面宽度超过处理内存预算" }
-        val step = minOf(64, maxOf(1, (budget / (width.toLong() * 16)).toInt()))
+    private suspend fun renderLocal(source: AndroidMangaPixels, output: File, budget: Long, progress: (EngineProgress) -> Unit) {
+        val width = source.width
+        val height = source.height
+        val rowBytes = width.toLong() * Int.SIZE_BYTES
+        val availableRows = ((budget - 2 * rowBytes - 1) / (2 * rowBytes)).coerceAtMost(66).toInt()
+        require(availableRows >= minOf(3, height)) { "当前页面宽度超过处理内存预算" }
+        val step = if (height <= availableRows) height else availableRows - 2
+        val readRows = minOf(height, step + 2)
+        source.reserve(budget - (readRows + 2) * rowBytes - 1)
+        val pixels = IntArray(Math.multiplyExact(width, readRows))
+        val row = IntArray(width)
         EnginePngWriter(output, width, height).use { writer ->
             var top = 0
             while (top < height) {
                 currentCoroutineContext().ensureActive()
-                val bottom = minOf(height, top + step); val from = maxOf(0, top - 1); val to = minOf(height, bottom + 1)
-                val bitmap = decoder.decodeRegion(Rect(0, from, width, to), BitmapFactory.Options().apply {
-                    inPreferredConfig = Bitmap.Config.ARGB_8888
-                    inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
-                })
-                    ?: error("无法解码页面分块")
-                try {
-                    val pixels = IntArray(width * bitmap.height)
-                    bitmap.getPixels(pixels, 0, width, 0, 0, width, bitmap.height)
-                    val row = IntArray(width)
-                    for (y in top until bottom) {
-                        for (x in 0 until width) row[x] = localDetailPixel(pixels, width, bitmap.height, x, y - from)
-                        writer.row(row)
-                    }
-                } finally { bitmap.recycle() }
+                val bottom = minOf(height, top + step)
+                val from = maxOf(0, top - 1)
+                val to = minOf(height, bottom + 1)
+                source.read(0, from, width, to - from, pixels)
+                for (y in top until bottom) {
+                    for (x in 0 until width) row[x] = localDetailPixel(pixels, width, to - from, x, y - from)
+                    writer.row(row)
+                }
                 top = bottom
                 progress(EngineProgress(EngineStage.PROCESS, top.toLong(), height.toLong(), detail = "1× 保守去噪"))
             }
@@ -431,7 +437,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
         }
     }
 
-    private suspend fun renderOnnx(decoder: BitmapRegionDecoder, output: File, request: EngineImageRequest,
+    private suspend fun renderOnnx(source: AndroidMangaPixels, output: File, request: EngineImageRequest,
         session: OrtSession, progress: (EngineProgress) -> Unit) {
         val coroutine = currentCoroutineContext()
         OrtSession.RunOptions().use { runOptions ->
@@ -444,20 +450,12 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                     finally { runCatching { runOptions.setTerminate(true) } }
                 }
                 try {
-                    val renderer = AndroidOnnxTiles(session, decoder.width, decoder.height,
+                    val renderer = AndroidOnnxTiles(session, source.width, source.height,
                         request.scale, request.tileSize, request.overlap, request.maximumWorkingBytes,
-                        runOptions = runOptions)
-                    val decoderOptions = BitmapFactory.Options().apply {
-                        inPreferredConfig = Bitmap.Config.ARGB_8888
-                        inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
-                    }
+                        runOptions = runOptions, opaqueBitmapSource = true)
+                    source.reserve(renderer.sourceCacheBytes, requireOpaque = true)
                     EnginePngWriter(output, renderer.outWidth, renderer.outHeight).use { writer ->
-                        renderer.render(coroutine::ensureActive, { left, top, width, height, pixels ->
-                            val bitmap = decoder.decodeRegion(Rect(left, top, left + width, top + height), decoderOptions)
-                                ?: error("无法解码模型分块")
-                            try { bitmap.getPixels(pixels, 0, width, 0, 0, width, height) }
-                            finally { bitmap.recycle() }
-                        }, { _, row -> writer.row(row) }, { completed, total ->
+                        renderer.render(coroutine::ensureActive, source::read, { _, row -> writer.row(row) }, { completed, total ->
                             progress(EngineProgress(EngineStage.PROCESS, completed, total,
                                 detail = if (completed == 0L) "正在处理首个 ${renderer.tileDescription} 分块 · CPU ONNX"
                                     else "${renderer.tileDescription} 重叠分块 · CPU ONNX"))

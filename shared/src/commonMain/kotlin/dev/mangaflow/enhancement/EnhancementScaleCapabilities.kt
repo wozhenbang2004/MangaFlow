@@ -180,14 +180,15 @@ internal fun enhancementPresetDescription(content: EnhancementContent, policy: E
             "$typeLabel：${title(choice)}"
         }
         val reason = choices.mapNotNull { it.second.exceptionOrNull()?.message }.distinct().joinToString("；")
-        val behavior = when (policy.tier) {
-            QualityTier.LIGHT -> "1× 本地修复，不使用 AI 放大模型。"
-            QualityTier.AUTO, QualityTier.BALANCED -> if (policy.scale == 1)
-                "当前 1× 使用本地修复；自动与均衡在此配置下效果相同。"
-                else "按图片类型和倍率匹配已就绪模型；自动与均衡当前共用这套选择规则。"
-            QualityTier.FINE, QualityTier.ULTRA ->
-                "精细与极致当前没有独立的漫画模型预设，共用兼容模型选择；档名不会改变同一模型的强度。可通过自选模型更换算法。"
-            QualityTier.ORIGINAL -> ""
+        val behavior = when {
+            policy.modelId != null -> "使用已选模型的原生倍率处理其支持的页面类型。"
+            policy.tier == QualityTier.LIGHT || policy.scale == 1 && policy.tier in setOf(QualityTier.AUTO, QualityTier.BALANCED) ->
+                "1× 本地修复，保留原尺寸。"
+            platformKind == PlatformKind.ANDROID && policy.tier == QualityTier.AUTO && policy.scale == 2 ->
+                "彩页和条漫优先使用已就绪的 Vulkan Real-CUGAN，其他页面按图片类型匹配已就绪的 2× 模型。"
+            policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA) ->
+                "精细与极致共用兼容模型选择。可通过自选模型更换算法。"
+            else -> "按图片类型和输出倍率匹配已就绪模型。"
         }
         return EnhancementPresetDescription(algorithm, listOf(behavior, reason).filter { it.isNotBlank() }.joinToString("\n"),
             choices.any { it.second.isFailure })

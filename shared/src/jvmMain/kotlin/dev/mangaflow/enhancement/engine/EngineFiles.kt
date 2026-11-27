@@ -7,9 +7,13 @@ import java.io.File
 import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
+import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.util.Properties
 import java.util.zip.CRC32
+import java.util.zip.Deflater
 import java.util.zip.DeflaterOutputStream
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -24,7 +28,39 @@ internal fun engineSha256(file: File): String {
             digest.update(bytes, 0, count)
         }
     }
-    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+    return digest.digest().engineHex()
+}
+
+private fun ByteArray.engineHex(): String = buildString(size * 2) {
+    val digits = "0123456789abcdef"
+    for (byte in this@engineHex) {
+        val value = byte.toInt() and 255
+        append(digits[value ushr 4]).append(digits[value and 15])
+    }
+}
+
+/** Inventory-only reuse. Opening a native executable or weight still verifies its actual bytes. */
+internal class EngineInventoryDigests {
+    private data class Stamp(val size: Long, val modified: FileTime, val key: Any?)
+    private val entries = object : LinkedHashMap<File, Pair<Stamp, String>>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<File, Pair<Stamp, String>>) = size > 512
+    }
+
+    private fun stamp(file: File): Stamp? = try {
+        Files.readAttributes(file.toPath(), BasicFileAttributes::class.java).let {
+            Stamp(it.size(), it.lastModifiedTime(), it.fileKey())
+        }
+    } catch (_: java.io.IOException) { null }
+      catch (_: UnsupportedOperationException) { null }
+
+    @Synchronized
+    fun digest(file: File): String {
+        val before = stamp(file) ?: return engineSha256(file)
+        entries[file]?.takeIf { it.first == before }?.let { return it.second }
+        val value = engineSha256(file)
+        if (before == stamp(file)) entries[file] = before to value
+        return value
+    }
 }
 
 internal fun newEngineOutput(source: File, destination: File) {
@@ -35,7 +71,7 @@ internal fun newEngineOutput(source: File, destination: File) {
 }
 
 /** Creates a new destination exclusively; the cache owner publishes it only after this returns. */
-internal fun moveNewEngineFile(source: File, destination: File) {
+internal fun moveNewEngineFile(source: File, destination: File, expectedSha256: String? = null) {
     val linked = try {
         Files.createLink(destination.toPath(), source.toPath())
         true
@@ -53,7 +89,7 @@ internal fun moveNewEngineFile(source: File, destination: File) {
             created = true
             source.inputStream().use { it.copyTo(output) }
         }
-        require(engineSha256(source) == engineSha256(destination)) { "增强资产复制校验失败" }
+        require((expectedSha256 ?: engineSha256(source)) == engineSha256(destination)) { "增强资产复制校验失败" }
         source.delete()
     } catch (failure: Throwable) {
         if (created) destination.delete()
@@ -112,18 +148,41 @@ internal fun classifyEngineImage(width: Int, height: Int, pixels: IntArray): Eng
     }
 }
 
-/** Structural and deflate/CRC verification, bounded independently of a long page's decoded size. */
-internal fun verifyEnginePng(file: File): Pair<Int, Int> {
+internal data class EnginePngInfo(val width: Int, val height: Int, val sha256: String)
+
+private fun pngRasterBytes(width: Int, height: Int, bitsPerPixel: Int, interlace: Int): Long {
+    fun passBytes(w: Int, h: Int): Long {
+        if (w == 0 || h == 0) return 0L
+        val rowBytes = (w.toLong() * bitsPerPixel + 7) / 8 + 1
+        return Math.multiplyExact(rowBytes, h.toLong())
+    }
+    if (interlace == 0) return passBytes(width, height)
+    require(interlace == 1) { "PNG 交错方式无效" }
+    fun span(size: Int, start: Int, step: Int) = if (size <= start) 0 else (size - 1 - start) / step + 1
+    val adam7 = arrayOf(
+        intArrayOf(0, 0, 8, 8), intArrayOf(4, 0, 8, 8), intArrayOf(0, 4, 4, 8),
+        intArrayOf(2, 0, 4, 4), intArrayOf(0, 2, 2, 4), intArrayOf(1, 0, 2, 2),
+        intArrayOf(0, 1, 1, 2),
+    )
+    return adam7.fold(0L) { sum, (x, y, dx, dy) ->
+        Math.addExact(sum, passBytes(span(width, x, dx), span(height, y, dy)))
+    }
+}
+
+/** Verify chunks, deflated raster length and encoded-byte identity in one bounded streaming pass. */
+internal fun inspectEnginePng(file: File): EnginePngInfo {
     val inflater = java.util.zip.Inflater()
+    val digest = MessageDigest.getInstance("SHA-256")
     try {
-        java.io.DataInputStream(file.inputStream().buffered()).use { input ->
+        java.io.DataInputStream(DigestInputStream(file.inputStream(), digest).buffered(64 * 1024)).use { input ->
             val magic = ByteArray(8).also { input.readFully(it) }
             require(magic.contentEquals(byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10))) { "增强结果不是 PNG" }
             var width = 0; var height = 0; var expected = 0L; var decoded = 0L; var dataSeen = false
             val scratch = ByteArray(64 * 1024)
+            val uncompressed = ByteArray(64 * 1024)
             while (true) {
                 val length = input.readInt()
-                require(length in 0..(64 * 1024 * 1024)) { "PNG 数据块无效" }
+                require(length >= 0) { "PNG 数据块无效" }
                 val type = ByteArray(4).also { input.readFully(it) }
                 val label = String(type, Charsets.US_ASCII)
                 val crc = CRC32().apply { update(type) }
@@ -134,10 +193,17 @@ internal fun verifyEnginePng(file: File): Pair<Int, Int> {
                     val buffer = java.nio.ByteBuffer.wrap(header)
                     width = buffer.int; height = buffer.int
                     val bits = header[8].toInt() and 255
-                    val channels = when (header[9].toInt() and 255) { 0, 3 -> 1; 2 -> 3; 4 -> 2; 6 -> 4; else -> error("PNG 色彩格式不受支持") }
-                    require(width > 0 && height > 0 && bits in setOf(1, 2, 4, 8, 16) && header[12].toInt() == 0) { "PNG 尺寸或交错格式不受支持" }
-                    expected = ((width.toLong() * bits * channels + 7) / 8 + 1) * height
-                    require(expected > 0)
+                    val color = header[9].toInt() and 255
+                    val channels = when (color) { 0, 3 -> 1; 2 -> 3; 4 -> 2; 6 -> 4; else -> error("PNG 色彩格式不受支持") }
+                    val validDepth = when (color) {
+                        0 -> bits in setOf(1, 2, 4, 8, 16)
+                        3 -> bits in setOf(1, 2, 4, 8)
+                        else -> bits == 8 || bits == 16
+                    }
+                    require(width > 0 && height > 0 && validDepth && header[10].toInt() == 0 && header[11].toInt() == 0) {
+                        "PNG 尺寸或像素格式无效"
+                    }
+                    expected = pngRasterBytes(width, height, bits * channels, header[12].toInt())
                 }
                 while (remaining > 0) {
                     val n = minOf(scratch.size, remaining)
@@ -145,7 +211,6 @@ internal fun verifyEnginePng(file: File): Pair<Int, Int> {
                     if (label == "IDAT") {
                         require(width > 0); dataSeen = true
                         inflater.setInput(scratch, 0, n)
-                        val uncompressed = ByteArray(64 * 1024)
                         while (!inflater.needsInput() && !inflater.finished()) {
                             val got = inflater.inflate(uncompressed)
                             require(got > 0 || inflater.needsInput() || inflater.finished()) { "PNG 压缩数据无效" }
@@ -157,7 +222,7 @@ internal fun verifyEnginePng(file: File): Pair<Int, Int> {
                 require((input.readInt().toLong() and 0xffff_ffffL) == crc.value) { "PNG 数据校验失败" }
                 if (label == "IEND") {
                     require(length == 0 && dataSeen && inflater.finished() && decoded == expected && input.read() == -1) { "PNG 输出不完整" }
-                    return width to height
+                    return EnginePngInfo(width, height, digest.digest().engineHex())
                 }
             }
         }
@@ -165,7 +230,12 @@ internal fun verifyEnginePng(file: File): Pair<Int, Int> {
     } finally { inflater.end() }
 }
 
+internal fun verifyEnginePng(file: File): Pair<Int, Int> =
+    inspectEnginePng(file).let { it.width to it.height }
+
 internal class ImportedEngineModels(private val root: File, private val engineId: String) {
+    private val inventoryDigests = EngineInventoryDigests()
+
     fun import(source: File, scale: Int, content: EngineContent, title: String = source.nameWithoutExtension,
         license: String = "用户导入；请按模型原许可使用",
         contents: Set<EngineContent> = setOf(content)): EngineModel {
@@ -209,7 +279,7 @@ internal class ImportedEngineModels(private val root: File, private val engineId
             val hash = properties.getProperty("sha256").orEmpty()
             require(hash.matches(Regex("[a-f0-9]{64}")))
             val weights = File(root, "$hash.onnx")
-            require(weights.isFile && weights.length() > 0 && engineSha256(weights) == hash)
+            require(weights.isFile && weights.length() > 0 && inventoryDigests.digest(weights) == hash)
             describe(weights, properties)
         }.getOrNull()
     }
@@ -231,6 +301,8 @@ internal class ImportedEngineModels(private val root: File, private val engineId
 
 /** Writes rows directly to PNG. A long strip never needs a full enhanced bitmap in RAM. */
 internal class EnginePngWriter(destination: File, private val width: Int, private val height: Int) : Closeable {
+    // One row for the whole page. Every byte is consumed synchronously by the deflater.
+    private val rowBytes = ByteArray(Math.addExact(Math.multiplyExact(width, 4), 1))
     private val output = DataOutputStream(BufferedOutputStream(
         Files.newOutputStream(destination.toPath(), StandardOpenOption.CREATE_NEW)))
     private var rows = 0
@@ -252,6 +324,7 @@ internal class EnginePngWriter(destination: File, private val width: Int, privat
         override fun flush() { if (count > 0) { chunk("IDAT", bytes, count); count = 0 } }
         override fun close() { flush() }
     }
+    private val deflater: Deflater
     private val compressed: DeflaterOutputStream
 
     init {
@@ -264,14 +337,14 @@ internal class EnginePngWriter(destination: File, private val width: Int, privat
             }
         }.toByteArray()
         chunk("IHDR", header, header.size)
-        compressed = DeflaterOutputStream(chunks)
+        deflater = Deflater()
+        compressed = DeflaterOutputStream(chunks, deflater, 64 * 1024)
     }
 
     fun row(pixels: IntArray, offset: Int = 0) {
         check(!finished && rows < height)
         require(offset >= 0 && pixels.size - offset >= width)
-        val bytes = ByteArray(Math.multiplyExact(width, 4) + 1)
-        bytes[0] = 0 // PNG filter None: exact lossless channel values.
+        val bytes = rowBytes // The leading filter byte stays zero (PNG None).
         for (x in 0 until width) {
             val pixel = pixels[offset + x]
             val p = 1 + x * 4
@@ -296,13 +369,21 @@ internal class EnginePngWriter(destination: File, private val width: Int, privat
         output.writeInt(crc.value.toInt())
     }
 
-    override fun close() { try { compressed.close() } finally { output.close() } }
+    override fun close() {
+        try { compressed.close() } finally { try { deflater.end() } finally { output.close() } }
+    }
 }
 
 /** Conservative 1× edge-preserving denoise. This is explicitly not a neural upscaler. */
 internal fun localDetailPixel(pixels: IntArray, width: Int, height: Int, x: Int, y: Int): Int {
-    val center = pixels[y * width + x]
+    val at = y * width + x
+    val center = pixels[at]
     if (center ushr 24 != 255) return center
+    if (x > 0 && x < width - 1 && y > 0 && y < height - 1 &&
+        pixels[at - 1] == center && pixels[at + 1] == center &&
+        pixels[at - width] == center && pixels[at + width] == center &&
+        pixels[at - width - 1] == center && pixels[at - width + 1] == center &&
+        pixels[at + width - 1] == center && pixels[at + width + 1] == center) return center
     fun luma(pixel: Int) = ((pixel ushr 16 and 255) * 77 + (pixel ushr 8 and 255) * 150 + (pixel and 255) * 29) ushr 8
     val light = luma(center)
     var red = 0.0; var green = 0.0; var blue = 0.0; var total = 0.0

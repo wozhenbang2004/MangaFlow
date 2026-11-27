@@ -28,6 +28,11 @@ class EnhancementCenter private constructor(context: PlatformContext) {
     internal fun attachVideoPreparation(store: VideoPreparationStore) { mutableVideoPreparation.value = store }
     val chapters by lazy { ReaderChapterEnhancementStore(app, this) }
     private val inventoryWriter = Mutex()
+    private val inventoryRequests = StorageLock()
+    private var inventoryRead: Deferred<EngineInventory>? = null
+    private var runtimeRevision = 0L
+    // Protected by inventoryWriter, including writes from component installation.
+    private var publishedInventoryRevision = 0L
     private val installLock = StorageLock()
     private val installations = mutableMapOf<String, Job>()
     private val modelDownloads = mutableMapOf<String, Deferred<EngineModel>>()
@@ -50,8 +55,8 @@ class EnhancementCenter private constructor(context: PlatformContext) {
                 val readiness = listOf(runtime.installed, runtime.downloading, cugan?.installed == true,
                     cugan?.pendingRemoval == true)
                 if (lastReadiness != readiness) {
+                    if (lastReadiness != null) readInventory(runtimeChanged = true)
                     lastReadiness = readiness
-                    refreshInventory()
                 }
                 if (mutableInventory.value.engines.any { it.id == EnhancementEngineIds.ANDROID_ONNX }) {
                     val status = when {
@@ -75,25 +80,68 @@ class EnhancementCenter private constructor(context: PlatformContext) {
         }
     }
 
-    fun refreshInventory(): Job = scope.launch {
-        inventoryWriter.withLock {
-            try {
-                mutableInventory.value = engine.inspect()
-                mutableEngineProgress.update { it - "inventory" }
-            }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (error: Exception) { mutableEngineProgress.update { it + ("inventory" to
-                EngineProgress(EngineStage.VERIFY, detail = error.message ?: "无法读取增强引擎", failed = true)) } }
-        }
+    fun refreshInventory(): Job = readInventory()
+
+    /** A cold reader joins the app's discovery before it interprets a missing engine or model. */
+    internal suspend fun awaitImageInventory(): EngineInventory =
+        mutableInventory.value.takeIf { it.engines.isNotEmpty() } ?: readInventory(usePublished = true).await()
+
+    private fun publishInventory(inventory: EngineInventory): EngineInventory {
+        publishedInventoryRevision++
+        mutableInventory.value = inventory
+        mutableEngineProgress.update { it - "inventory" }
+        return inventory
     }
+
+    private fun readInventory(runtimeChanged: Boolean = false, usePublished: Boolean = false): Deferred<EngineInventory> =
+        synchronized(inventoryRequests) {
+            if (usePublished && mutableInventory.value.engines.isNotEmpty())
+                return@synchronized CompletableDeferred(mutableInventory.value)
+            if (runtimeChanged) runtimeRevision++
+            inventoryRead?.takeUnless { it.isCompleted }?.let { return@synchronized it }
+            scope.async(start = CoroutineStart.LAZY) {
+                val owner = currentCoroutineContext()[Job]
+                try {
+                    var outcome: Result<EngineInventory>
+                    var repeatRead: Boolean
+                    do {
+                        val revision = synchronized(inventoryRequests) { runtimeRevision }
+                        outcome = try {
+                            Result.success(inventoryWriter.withLock { publishInventory(engine.inspect()) })
+                        } catch (cancel: CancellationException) {
+                            throw cancel
+                        } catch (error: Exception) {
+                            Result.failure(error)
+                        }
+                        repeatRead = synchronized(inventoryRequests) {
+                            (runtimeRevision != revision).also { again ->
+                                if (!again && inventoryRead === owner) inventoryRead = null
+                            }
+                        }
+                    } while (repeatRead)
+                    outcome.getOrElse { error ->
+                        mutableEngineProgress.update { it + ("inventory" to EngineProgress(EngineStage.VERIFY,
+                            detail = error.message ?: "无法读取增强引擎", failed = true)) }
+                        throw error
+                    }
+                } finally {
+                    synchronized(inventoryRequests) { if (inventoryRead === owner) inventoryRead = null }
+                }
+            }.also { inventoryRead = it; it.start() }
+        }
 
     fun installEngine(id: String): Job = synchronized(installLock) {
         installations[id]?.takeIf { it.isActive } ?: scope.launch(start = CoroutineStart.LAZY) {
             mutableEngineProgress.update { it + (id to EngineProgress(EngineStage.INSTALL)) }
             try {
-                engine.install(id) { progress -> mutableEngineProgress.update { it + (id to progress) } }
+                val before = inventoryWriter.withLock { publishedInventoryRevision }
+                val installedInventory = engine.install(id) { progress ->
+                    mutableEngineProgress.update { it + (id to progress) }
+                }
                 val inventory = inventoryWriter.withLock {
-                    engine.inspect().also { mutableInventory.value = it }
+                    // install already inspected all installed weights. Re-read only if another
+                    // inventory writer published a different snapshot during that operation.
+                    publishInventory(if (publishedInventoryRevision == before) installedInventory else engine.inspect())
                 }
                 val readiness = inventory.engines.firstOrNull { it.id == id }?.readiness
                 mutableEngineProgress.update { current ->
@@ -121,7 +169,7 @@ class EnhancementCenter private constructor(context: PlatformContext) {
 
     fun importModel(sourcePath: String, nativeScale: Int, content: EngineContent): Deferred<EngineModel> = scope.async {
         val model = engine.importModel(sourcePath, nativeScale, content)
-        inventoryWriter.withLock { mutableInventory.value = engine.inspect() }
+        inventoryWriter.withLock { publishInventory(engine.inspect()) }
         model
     }
 
@@ -135,7 +183,7 @@ class EnhancementCenter private constructor(context: PlatformContext) {
                 val model = engine.downloadModel(offer) { value ->
                     mutableEngineProgress.update { it + (key to value) }
                 }
-                inventoryWriter.withLock { mutableInventory.value = engine.inspect() }
+                inventoryWriter.withLock { publishInventory(engine.inspect()) }
                 mutableEngineProgress.update { it + (key to EngineProgress(EngineStage.COMPLETE,
                     detail = "模型已校验安装；还需在本机试用。")) }
                 model

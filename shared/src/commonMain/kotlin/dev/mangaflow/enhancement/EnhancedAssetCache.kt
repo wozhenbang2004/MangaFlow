@@ -16,7 +16,11 @@ import dev.mangaflow.storage.AuxiliaryCacheRemovalException
 import dev.mangaflow.storage.AuxiliaryDiskCacheOwner
 import dev.mangaflow.storage.StorageCacheStore
 import kotlinx.atomicfu.locks.synchronized
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -51,10 +55,10 @@ data class EnhancedAssetIdentity(
     }
 
     /** Length prefixes prevent a provider identifier from changing field boundaries. */
-    val encoded: String get() = listOf("enhanced-asset-v1", namespace, sourceId, sourceVersion,
+    val encoded: String = listOf("enhanced-asset-v1", namespace, sourceId, sourceVersion,
         workId, chapterId, pageId, originalDigest, modelId, modelVersion, modelDigest,
         scale.toString(), parameters, outputFormat).joinToString("") { "${it.length}:$it" }
-    val key: String get() = digest(encoded)
+    val key: String = digest(encoded)
 
     companion object {
         internal val NAMESPACES = setOf("manga", "adult_manga", "anime")
@@ -89,6 +93,12 @@ class EnhancedAssetLease internal constructor(
         check(!closed) { "增强文件租约已释放" }
         acquireRetention()
     }
+    internal fun fork(): EnhancedAssetLease = synchronized(lock) {
+        check(!closed) { "增强文件租约已释放" }
+        val retained = acquireRetention()
+        EnhancedAssetLease(identity, file, width, height, outputDigest, retained::close, acquireRetention)
+    }
+
     override fun close() = synchronized(lock) { if (!closed) { closed = true; release() } }
 }
 
@@ -107,32 +117,77 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
     private val app = applicationContext(context)
     private val root = StorageFile(cacheDirectory(app), "enhancement-v1")
     private val mutation = Mutex()
+    private val cleanup = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private data class DisplayFile(val work: EnhancedAssetWork, val width: Int, val height: Int, val digest: String,
+        val bytes: Long, val modified: Long)
+    private val displayFiles = mutableMapOf<String, DisplayFile>()
     private val leaseLock = StorageLock()
     private val leases = mutableMapOf<String, Int>()
     private val lastAccess = mutableMapOf<String, Long>()
     private val activeWork = mutableMapOf<String, EnhancedAssetIdentity>()
     private val verified = mutableMapOf<String, String>()
+    // Only this owner publishes files. Removals may lower a known upper bound.
+    private val measuredUpperBytes = mutableMapOf<String, Long>()
     private val mutableRevision = MutableStateFlow<Map<String, Long>>(emptyMap())
     private val storage = StorageCacheStore.get(app)
     /** A completed background chapter can wake a cache-only reader without starting inference. */
     val revision: StateFlow<Map<String, Long>> = mutableRevision.asStateFlow()
     override val ownerId: String = "enhancement-v1"
 
-    init { storage.registerAuxiliaryOwner(this) }
-
-    suspend fun acquire(identity: EnhancedAssetIdentity): EnhancedAssetLease? = withContext(Dispatchers.IO) {
-        mutation.withLock { acquireLocked(identity) }
+    init {
+        storage.registerAuxiliaryOwner(this)
+        // A process killed with a visible result cannot run its final lease callback.
+        cleanup.launch {
+            mutation.withLock {
+                namespaces(null).forEach { namespace ->
+                    StorageFile(root, namespace).listFiles().orEmpty().filter { directory ->
+                        directory.name.startsWith(DISPLAY_PREFIX) && directory.name.matches(WORK_DIRECTORY) &&
+                            directory.name.removePrefix(".work-") !in activeWork
+                    }.forEach { it.deleteRecursively() }
+                }
+            }
+        }
     }
 
-    suspend fun prepare(identity: EnhancedAssetIdentity): EnhancedAssetWork = withContext(Dispatchers.IO) {
-        mutation.withLock {
-            val parent = StorageFile(root, identity.namespace)
-            check(parent.isDirectory || parent.mkdirs()) { "无法建立增强缓存目录" }
-            val token = randomUuid()
-            val directory = StorageFile(parent, ".work-$token")
-            check(directory.mkdir()) { "无法建立增强工作目录" }
-            activeWork[token] = identity
-            EnhancedAssetWork(identity, directory, StorageFile(directory, "asset.${identity.outputFormat}"), token)
+    /** A cancelled dispatcher handoff must release the lease it never delivered. */
+    private suspend fun acquireOnIo(action: suspend () -> EnhancedAssetLease?): EnhancedAssetLease? {
+        var acquired: EnhancedAssetLease? = null
+        try {
+            val result = withContext(Dispatchers.IO) {
+                mutation.withLock { action().also { acquired = it } }
+            }
+            acquired = null
+            return result
+        } finally {
+            acquired?.close()
+        }
+    }
+
+    suspend fun acquire(identity: EnhancedAssetIdentity): EnhancedAssetLease? = acquireOnIo { acquireLocked(identity) }
+
+    internal suspend fun acquireForReader(identity: EnhancedAssetIdentity): EnhancedAssetLease? = acquireOnIo {
+        acquireLocked(identity) ?: existingDisplay(identity)?.let(::leaseDisplay)
+    }
+
+    suspend fun prepare(identity: EnhancedAssetIdentity): EnhancedAssetWork {
+        var allocated: EnhancedAssetWork? = null
+        try {
+            val result = withContext(Dispatchers.IO) {
+                mutation.withLock {
+                    val parent = StorageFile(root, identity.namespace)
+                    check(parent.isDirectory || parent.mkdirs()) { "无法建立增强缓存目录" }
+                    val token = randomUuid()
+                    val directory = StorageFile(parent, ".work-$token")
+                    check(directory.mkdir()) { "无法建立增强工作目录" }
+                    activeWork[token] = identity
+                    EnhancedAssetWork(identity, directory, StorageFile(directory, "asset.${identity.outputFormat}"), token)
+                        .also { allocated = it }
+                }
+            }
+            allocated = null
+            return result
+        } finally {
+            allocated?.let { withContext(NonCancellable) { abandon(it) } }
         }
     }
 
@@ -141,50 +196,77 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
         work: EnhancedAssetWork,
         width: Int,
         height: Int,
+        maximumRetainedBytes: Long = Long.MAX_VALUE,
         isCurrent: () -> Boolean,
-    ): EnhancedAssetLease = withContext(Dispatchers.IO) {
-        mutation.withLock {
-            require(work.token in activeWork && ownedWork(work)) { "增强工作身份已失效" }
-            currentCoroutineContext().ensureActive()
-            check(isCurrent()) { "阅读位置或处理配置已改变" }
-            require(width > 0 && height > 0) { "增强图片尺寸无效" }
-            check(work.output.isFile && work.output.length() > 0L) { "增强结果不完整" }
-            val bytes = work.output.length()
-            val modified = work.output.lastModified()
-            val outputDigest = sha256File(work.output.path)
-            check(work.output.length() == bytes && work.output.lastModified() == modified) { "增强结果仍在写入" }
-            syncStorageFile(work.output)
-            val metadata = JSONObject().put("schema", 1).put("identity", work.identity.encoded)
-                .put("key", work.identity.key).put("format", work.identity.outputFormat)
-                .put("width", width).put("height", height).put("bytes", bytes)
-                .put("outputDigest", outputDigest).put("createdAt", wallTimeMillis())
-            val manifest = StorageFile(work.directory, "manifest.json")
-            manifest.writeText(metadata.toString())
-            syncStorageFile(manifest)
-            // Original input copies are transient and are never part of the published asset.
-            work.directory.listFiles().orEmpty().filter { it != work.output && it != manifest }.forEach {
+    ): EnhancedAssetLease = checkNotNull(acquireOnIo {
+        require(work.token in activeWork && ownedWork(work)) { "增强工作身份已失效" }
+        currentCoroutineContext().ensureActive()
+        check(isCurrent()) { "阅读位置或处理配置已改变" }
+        require(width > 0 && height > 0) { "增强图片尺寸无效" }
+        check(work.output.isFile && work.output.length() > 0L) { "增强结果不完整" }
+        val bytes = work.output.length()
+        val modified = work.output.lastModified()
+        val outputDigest = sha256File(work.output.path)
+        check(work.output.length() == bytes && work.output.lastModified() == modified) { "增强结果仍在写入" }
+        currentCoroutineContext().ensureActive()
+        check(isCurrent()) { "阅读位置或处理配置已改变" }
+        acquireLocked(work.identity)?.let { existing ->
+            abandonLocked(work)
+            return@acquireOnIo existing
+        }
+        if (bytes > maximumRetainedBytes) {
+            // Keep this actual output readable through every decoder's last lease,
+            // without adding a disposable visible page to the chapter/durable cache.
+            val key = cacheToken(work.identity.namespace, work.identity.key)
+            existingDisplay(work.identity)?.let { existing ->
+                abandonLocked(work)
+                return@acquireOnIo leaseDisplay(existing)
+            }
+            work.directory.listFiles().orEmpty().filter { it != work.output }.forEach {
                 check(it.deleteRecursively()) { "增强临时输入无法清理" }
             }
-            currentCoroutineContext().ensureActive()
-            check(isCurrent()) { "阅读位置或处理配置已改变" }
-            acquireLocked(work.identity)?.let { existing ->
-                abandonLocked(work)
-                return@withLock existing
-            }
-            val destination = assetDirectory(work.identity.namespace, work.identity.key)
-            if (destination.exists()) {
-                check(!isLeased(work.identity.namespace, work.identity.key)) { "旧增强结果仍在使用" }
-                check(destination.deleteRecursively()) { "旧增强结果无法替换" }
-            }
-            // Same-volume atomic directory publication. No partially written file becomes readable.
-            check(work.directory.renameTo(destination)) { "增强结果无法发布" }
+            val token = "view-${work.token}"
+            val directory = StorageFile(work.directory.parentFile, ".work-$token")
+            check(work.directory.renameTo(directory)) { "增强结果无法交给阅读器" }
             activeWork.remove(work.token)
-            verified.remove(cacheToken(work.identity.namespace, work.identity.key))
-            requireNotNull(acquireLocked(work.identity)) { "增强结果校验失败" }.also {
-                changed(work.identity.namespace)
-            }
+            activeWork[token] = work.identity
+            val pinned = EnhancedAssetWork(work.identity, directory, StorageFile(directory, work.output.name), token)
+            val page = DisplayFile(pinned, width, height, outputDigest, bytes, pinned.output.lastModified())
+            displayFiles[key] = page
+            return@acquireOnIo leaseDisplay(page)
         }
-    }
+        syncStorageFile(work.output)
+        val metadata = JSONObject().put("schema", 1).put("identity", work.identity.encoded)
+            .put("key", work.identity.key).put("format", work.identity.outputFormat)
+            .put("width", width).put("height", height).put("bytes", bytes)
+            .put("outputDigest", outputDigest).put("createdAt", wallTimeMillis())
+        val manifest = StorageFile(work.directory, "manifest.json")
+        manifest.writeText(metadata.toString())
+        syncStorageFile(manifest)
+        val publishedBytes = bytes + manifest.length()
+        // Original input copies are transient and are never part of the published asset.
+        work.directory.listFiles().orEmpty().filter { it != work.output && it != manifest }.forEach {
+            check(it.deleteRecursively()) { "增强临时输入无法清理" }
+        }
+        currentCoroutineContext().ensureActive()
+        check(isCurrent()) { "阅读位置或处理配置已改变" }
+        val destination = assetDirectory(work.identity.namespace, work.identity.key)
+        if (destination.exists()) {
+            check(!isLeased(work.identity.namespace, work.identity.key)) { "旧增强结果仍在使用" }
+            check(destination.deleteRecursively()) { "旧增强结果无法替换" }
+        }
+        // Same-volume atomic directory publication. No partially written file becomes readable.
+        check(work.directory.renameTo(destination)) { "增强结果无法发布" }
+        activeWork.remove(work.token)
+        val namespace = work.identity.namespace
+        measuredUpperBytes[namespace]?.let { measuredUpperBytes[namespace] = it + publishedBytes }
+        // Rename transfers the same privately owned, already hashed file. The ordinary
+        // acquire path rechecks manifest, size and mtime, and rehashes if the stamp differs.
+        verified[cacheToken(namespace, work.identity.key)] = "$bytes:$modified:$outputDigest"
+        requireNotNull(acquireLocked(work.identity)) { "增强结果校验失败" }.also {
+            changed(work.identity.namespace)
+        }
+    })
 
     suspend fun abandon(work: EnhancedAssetWork) = withContext(Dispatchers.IO) {
         mutation.withLock { abandonLocked(work) }
@@ -235,15 +317,22 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
     suspend fun trimToBytes(maximum: Long, namespace: String? = null): Long = withContext(Dispatchers.IO) {
         mutation.withLock {
             require(namespace == null || namespace in EnhancedAssetIdentity.NAMESPACES)
-            val entries = readEntriesLocked().filter { namespace == null || it.key.substringBefore(':') == namespace }
-                .sortedBy { entry -> lastAccess[entry.key] ?: entry.modifiedAt }
+            val limit = maximum.coerceAtLeast(0L)
+            val settled = namespace != null && activeWork.values.none { it.namespace == namespace }
+            if (settled && namespace != null && measuredUpperBytes[namespace]?.let { it <= limit } == true)
+                return@withLock 0L
+            val entries = readEntriesLocked(namespace)
             var remaining = entries.sumOf { it.bytes }
             var freed = 0L
-            for (entry in entries) {
-                if (remaining <= maximum.coerceAtLeast(0L)) break
-                val removed = removeLocked(entry) { true } ?: continue
-                remaining -= removed; freed += removed
+            if (remaining > limit) {
+                for (entry in entries.sortedBy { lastAccess[it.key] ?: it.modifiedAt }) {
+                    if (remaining <= limit) break
+                    val removed = removeLocked(entry) { true } ?: continue
+                    remaining -= removed
+                    freed += removed
+                }
             }
+            if (settled && namespace != null) measuredUpperBytes[namespace] = remaining
             freed
         }
     }
@@ -273,14 +362,43 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
             if (sha256File(file.path) != hash || file.length() != bytes || file.lastModified() != modified) return null
             verified[token] = stamp
         }
-        synchronized(leaseLock) { leases[token] = (leases[token] ?: 0) + 1 }
         lastAccess[token] = wallTimeMillis()
+        return lease(identity, file, width, height, hash, token, storage::cacheWorkFinished)
+    }
+
+    private fun existingDisplay(identity: EnhancedAssetIdentity): DisplayFile? =
+        displayFiles[cacheToken(identity.namespace, identity.key)]?.takeIf { entry ->
+            entry.work.identity == identity && entry.work.output.isFile &&
+                entry.work.output.length() == entry.bytes && entry.work.output.lastModified() == entry.modified
+        }
+
+    private fun leaseDisplay(page: DisplayFile): EnhancedAssetLease {
+        val work = page.work
+        val identity = work.identity
+        val token = cacheToken(identity.namespace, work.directory.name)
+        return lease(identity, work.output, page.width, page.height, page.digest, token) {
+            cleanup.launch {
+                mutation.withLock {
+                    val key = cacheToken(identity.namespace, identity.key)
+                    if (!isLeased(identity.namespace, work.directory.name)) {
+                        if (displayFiles[key] === page) displayFiles.remove(key)
+                        abandonLocked(work)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun lease(identity: EnhancedAssetIdentity, file: StorageFile, width: Int, height: Int,
+        hash: String, token: String, onUnused: () -> Unit): EnhancedAssetLease {
+        synchronized(leaseLock) { leases[token] = (leases[token] ?: 0) + 1 }
         fun releaseLease() {
-            synchronized(leaseLock) {
+            val last = synchronized(leaseLock) {
                 val count = (leases[token] ?: 0) - 1
                 if (count <= 0) leases.remove(token) else leases[token] = count
+                count <= 0
             }
-            storage.cacheWorkFinished()
+            if (last) onUnused()
         }
         return EnhancedAssetLease(identity, file, width, height, hash, release = ::releaseLease,
             acquireRetention = {
@@ -295,8 +413,8 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
             })
     }
 
-    private fun readEntriesLocked(): List<AuxiliaryCacheEntry> = buildList {
-        EnhancedAssetIdentity.NAMESPACES.forEach { namespace ->
+    private fun readEntriesLocked(onlyNamespace: String? = null): List<AuxiliaryCacheEntry> = buildList {
+        namespaces(onlyNamespace).forEach { namespace ->
             StorageFile(root, namespace).listFiles().orEmpty().forEach { directory ->
                 if (directory.isDirectory && directory.name.matches(EnhancedAssetIdentity.DIGEST)) {
                     entry(namespace, directory.name)?.let(::add)
@@ -392,7 +510,7 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
 
     private fun abandonLocked(work: EnhancedAssetWork) {
         if (work.token in activeWork && ownedWork(work)) {
-            work.directory.deleteRecursively()
+            if (!work.directory.deleteRecursively()) measuredUpperBytes.remove(work.identity.namespace)
             activeWork.remove(work.token)
             storage.cacheWorkFinished()
         }
@@ -417,6 +535,7 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
     }
 
     companion object {
+        private const val DISPLAY_PREFIX = ".work-view-"
         private val WORK_DIRECTORY = Regex("\\.work-[A-Za-z0-9-]{1,64}")
         private val lock = StorageLock()
         private val instances = mutableMapOf<String, EnhancedAssetCache>()

@@ -17,6 +17,8 @@ import androidx.exifinterface.media.ExifInterface
 import dev.mangaflow.experience.ExperienceRuntimePreferences
 import java.io.File
 import java.net.URI
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
 import me.saket.telephoto.zoomable.rememberZoomableImageState
 
@@ -48,23 +50,62 @@ internal actual suspend fun readNativeReaderSize(path: String, runtime: Experien
 internal actual fun readerFilePath(uri: String): String? =
     if (uri.startsWith("file:")) runCatching { File(URI(uri)).absolutePath }.getOrNull() else null
 
-internal actual fun createReaderRegionDecoder(path: String): ReaderRegionDecoder = StatelessReaderRegionDecoder(path)
+internal actual fun createReaderRegionDecoder(path: String): ReaderRegionDecoder = AndroidReaderRegionDecoder(path)
 
-@Suppress("DEPRECATION")
 internal actual suspend fun decodeNativeReaderRegion(
     path: String, bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences,
 ): ReaderRegion {
-    val file = checkedReaderFile(path, runtime)
-    // Bounds use display orientation, while BitmapRegionDecoder crops raw coordinates.
-    // Keep Coil's correctly oriented preview rather than overlaying misplaced detail tiles.
-    val orientation = ExifInterface(file).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-    if (orientation != ExifInterface.ORIENTATION_NORMAL && orientation != ExifInterface.ORIENTATION_UNDEFINED)
-        throw ReaderDetailUnavailable("此图带旋转或镜像标记，当前显示预览")
-    val decoder = requireNotNull(BitmapRegionDecoder.newInstance(path, false)) { "原图区域暂时无法读取" }
-    return try {
-        ReaderRegion(requireNotNull(decoder.decodeRegion(android.graphics.Rect(bounds.left, bounds.top, bounds.right, bounds.bottom),
-            BitmapFactory.Options().apply { inSampleSize = sampleSize.coerceAtLeast(1) })).asImageBitmap())
-    } finally { decoder.recycle() }
+    val decoder = createReaderRegionDecoder(path)
+    return try { decoder.decode(bounds, sampleSize, runtime) } finally { decoder.close() }
+}
+
+@Suppress("DEPRECATION")
+private class AndroidReaderRegionDecoder(private val path: String) : ReaderRegionDecoder {
+    private var stamp: Pair<Long, Long>? = null
+    private var idle: BitmapRegionDecoder? = null
+    private var closed = false
+
+    override suspend fun decode(bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences): ReaderRegion {
+        val context = currentCoroutineContext()
+        context.ensureActive()
+        val file = checkedReaderFile(path, runtime)
+        val decoder = synchronized(this) {
+            check(!closed) { "图片区域读取已结束" }
+            val actual = file.length() to file.lastModified()
+            if (stamp == null) {
+                val orientation = ExifInterface(file).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                if (orientation != ExifInterface.ORIENTATION_NORMAL && orientation != ExifInterface.ORIENTATION_UNDEFINED)
+                    throw ReaderDetailUnavailable("此图带旋转或镜像标记，当前显示预览")
+                stamp = actual
+            } else check(stamp == actual) { "图片文件已变化，请重新打开此页" }
+            idle.also { idle = null }
+        } ?: requireNotNull(BitmapRegionDecoder.newInstance(path, false)) { "图片区域暂时无法读取" }
+        var reusable = false
+        return try {
+            context.ensureActive()
+            val bitmap = requireNotNull(decoder.decodeRegion(
+                android.graphics.Rect(bounds.left, bounds.top, bounds.right, bounds.bottom),
+                BitmapFactory.Options().apply { inSampleSize = sampleSize.coerceAtLeast(1) },
+            )) { "图片区域暂时无法读取" }
+            reusable = true
+            ReaderRegion(bitmap.asImageBitmap())
+        } finally {
+            // Keep one idle handle per displayed image. Concurrency still belongs to
+            // the existing decode admission; surplus handles are released immediately.
+            val kept = synchronized(this) {
+                if (reusable && !closed && idle == null) { idle = decoder; true } else false
+            }
+            if (!kept) decoder.recycle()
+        }
+    }
+
+    override fun close() {
+        val decoder = synchronized(this) {
+            closed = true
+            idle.also { idle = null }
+        }
+        decoder?.recycle()
+    }
 }
 
 private fun checkedReaderFile(path: String, runtime: ExperienceRuntimePreferences): File = File(path).also { file ->
