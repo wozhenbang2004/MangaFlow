@@ -833,7 +833,7 @@ private fun AnimeWorkspaceContent(
                                     } },
                                     modifier = Modifier.motionInputGate(rootActive),
                                     treatment = MotionTabTreatment.Capsule,
-                                    inGlassGroup = true,
+                                    selectionBackdrop = backdrop,
                                     selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
                                     controlHeight = 44.dp)
                             }

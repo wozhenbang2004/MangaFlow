@@ -45,7 +45,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.onSizeChanged
@@ -60,6 +59,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
 import dev.mangaflow.ui.DesktopIconTooltip
 import kotlinx.coroutines.launch
@@ -158,17 +158,15 @@ internal fun MotionTabs(
     role: Role = Role.Tab,
     selectionVisible: Boolean = true,
     tooltips: List<String>? = null,
-    inGlassGroup: Boolean = false,
+    selectionBackdrop: HazeState? = null,
     scrubPosition: State<Float?>? = null,
     itemContent: (@Composable (index: Int, selected: Boolean, color: Color) -> Unit)? = null,
 ) {
     if (labels.isEmpty()) return
     val index = selected.coerceIn(labels.indices)
-    val latest = rememberUpdatedState(index)
-    val left = remember { Animatable(index.toFloat()) }
-    val right = remember { Animatable(index + 1f) }
+    val inGlassGroup = selectionBackdrop != null
     val motion = LocalMotionEnabled.current
-    val selectionAlpha by animateFloatAsState(if (selectionVisible) 1f else 0f,
+    val selectionAlpha = animateFloatAsState(if (selectionVisible) 1f else 0f,
         if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-selection-presence")
     val feedback = rememberFeelFeedback()
     val accessibility = if (inGlassGroup) LocalGlassAccessibilitySettings.current else null
@@ -207,40 +205,36 @@ internal fun MotionTabs(
             }
         }
     }
-    // A scrub rail owns its one settling animation; the default tabs keep the two-edge motion.
-    if (scrubPosition == null) LaunchedEffect(motion, labels.size) {
-        snapshotFlow { latest.value }.collect { target ->
-            val toRight = target > left.value
-            // Capture velocity before animateTo cancels its predecessor. A reverse tap continues here.
-            val leftVelocity = left.velocity
-            val rightVelocity = right.velocity
-            launch {
-                if (!motion) left.snapTo(target.toFloat())
-                else left.animateTo(target.toFloat(), spring(
-                    dampingRatio = if (toRight) MangaMotion.TabTrailingDamping else MangaMotion.TabLeadingDamping,
-                    stiffness = if (toRight) MangaMotion.TabTrailingStiffness else MangaMotion.TabLeadingStiffness,
-                ), initialVelocity = leftVelocity)
-            }
-            launch {
-                if (!motion) right.snapTo(target + 1f)
-                else right.animateTo(target + 1f, spring(
-                    dampingRatio = if (toRight) MangaMotion.TabLeadingDamping else MangaMotion.TabTrailingDamping,
-                    stiffness = if (toRight) MangaMotion.TabLeadingStiffness else MangaMotion.TabTrailingStiffness,
-                ), initialVelocity = rightVelocity)
-            }
-        }
-    }
     val frame = modifier.fillMaxWidth().height(height)
         .clip(if (compact) RectangleShape else RoundedCornerShape(14.dp)).background(track)
-    val selectionInk = if (movingGroupFill) {
-        val pressure = animateFloatAsState(if (motion && groupPresses.any { it.value }) 1f else 0f,
-            if (motion) spring(dampingRatio = MangaMotion.PressDamping, stiffness = MangaMotion.PressStiffness)
-            else snap(), label = "navigation-tab-pressure")
-        Modifier.drawBehind {
-            drawGlassTabFill(labels.size, left.value, right.value, pressure.value, groupTint, selectionAlpha)
+    val selectionInk = if (movingGroupFill) Modifier else {
+        val latest = rememberUpdatedState(index)
+        val left = remember { Animatable(index.toFloat()) }
+        val right = remember { Animatable(index + 1f) }
+        // A scrub rail owns its one settling animation; the default tabs keep the two-edge motion.
+        if (scrubPosition == null) LaunchedEffect(motion, labels.size) {
+            snapshotFlow { latest.value }.collect { target ->
+                val toRight = target > left.value
+                // Capture velocity before animateTo cancels its predecessor. A reverse tap continues here.
+                val leftVelocity = left.velocity
+                val rightVelocity = right.velocity
+                launch {
+                    if (!motion) left.snapTo(target.toFloat())
+                    else left.animateTo(target.toFloat(), spring(
+                        dampingRatio = if (toRight) MangaMotion.TabTrailingDamping else MangaMotion.TabLeadingDamping,
+                        stiffness = if (toRight) MangaMotion.TabTrailingStiffness else MangaMotion.TabLeadingStiffness,
+                    ), initialVelocity = leftVelocity)
+                }
+                launch {
+                    if (!motion) right.snapTo(target + 1f)
+                    else right.animateTo(target + 1f, spring(
+                        dampingRatio = if (toRight) MangaMotion.TabLeadingDamping else MangaMotion.TabTrailingDamping,
+                        stiffness = if (toRight) MangaMotion.TabLeadingStiffness else MangaMotion.TabTrailingStiffness,
+                    ), initialVelocity = rightVelocity)
+                }
+            }
         }
-    } else Modifier
-        .drawWithCache {
+        Modifier.drawWithCache {
             val slot = size.width / labels.size
             if (compact && tabWidths.size != labels.size) return@drawWithCache onDrawBehind { }
             var x = if (compact) 10.dp.toPx() else 0f
@@ -268,7 +262,7 @@ internal fun MotionTabs(
                 val scrub = scrubPosition?.value
                 val leading = scrub ?: if (scrubPosition != null) index.toFloat() else left.value
                 val trailing = scrub?.plus(1f) ?: if (scrubPosition != null) index + 1f else right.value
-                val alpha = if (scrubPosition == null) selectionAlpha
+                val alpha = if (scrubPosition == null) selectionAlpha.value
                     else if (scrub != null || selectionVisible) 1f else 0f
                 val start = if (fillSegment) leading.coerceIn(0f, labels.size.toFloat()) * slot + inset
                     else interpolate(leading, centers) - interpolate(leading, widths) / 2f
@@ -295,66 +289,50 @@ internal fun MotionTabs(
                     topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = alpha)
             }
         }
-    Row(frame.then(selectionInk).padding(horizontal = if (compact) 10.dp else 0.dp).selectableGroup(),
-        horizontalArrangement = if (compact) Arrangement.spacedBy(22.dp) else Arrangement.Start,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        labels.forEachIndexed { i, label ->
-            val isSelected = selectionVisible && i == index
-            val interaction = selectionInteractions[i]
-            val pressed = if (movingGroupFill) groupPresses[i].value else interaction.collectIsPressedAsState().value
-            val focused = inGlassGroup && interaction.collectIsFocusedAsState().value
-            val hovered = inGlassGroup && interaction.collectIsHoveredAsState().value
-            val pressAlpha = animateFloatAsState(if (pressed) .06f else if (hovered) .035f else 0f,
-                if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-press")
-            val labelColor by animateColorAsState(if (isSelected) foreground else inactiveInk,
-                if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-label")
-            // Reserve both weights so selecting a compact tab cannot shift its neighbours.
-            val labelWidth = if (compact && itemContent == null) with(density) {
-                labelWidths[i].toDp()
-            } else 0.dp
-            val tab = if (compact) Modifier.onSizeChanged { tabWidths[i] = it.width }
-                else Modifier.weight(1f)
-            Box(tab.height(height).selectable(
-                selected = isSelected, role = role, interactionSource = interaction, indication = null,
-                onClick = { if (!isSelected) feedback.perform(FeelEvent.Selection); onSelect(i) },
-            ).then(if (movingGroupFill) Modifier else Modifier.motionPress(interaction)).drawBehind {
-                if (!movingGroupFill || !isSelected) drawRoundRect(foreground.copy(alpha = pressAlpha.value),
-                    cornerRadius = CornerRadius(10.dp.toPx()))
-                if (focused) drawRoundRect(foreground.copy(alpha = .72f),
-                    cornerRadius = CornerRadius(size.height / 2f), style = Stroke(1.dp.toPx()))
-            }.then(if (compact) Modifier.widthIn(min = labelWidth + 6.dp).padding(horizontal = 3.dp) else Modifier),
-                contentAlignment = Alignment.Center) {
-                if (itemContent != null) itemContent(i, isSelected, labelColor)
-                else Text(label, color = labelColor, fontSize = fontSize,
-                        modifier = if (controlHeight != null) Modifier.padding(
-                            horizontal = if (treatment == MotionTabTreatment.Capsule) 8.dp else 2.dp) else Modifier,
-                        textAlign = TextAlign.Center,
-                        fontWeight = if (isSelected) selectedFontWeight else unselectedFontWeight,
-                        maxLines = if (wrapLabels) 2 else 1, overflow = TextOverflow.Ellipsis)
-                DesktopIconTooltip(tooltips?.getOrNull(i), interaction, tooltips != null)
+    }
+    GlassTabRail(frame, if (movingGroupFill) selectionBackdrop else null, labels, index, selectionVisible,
+        groupTint, selectionAlpha, pressed = groupPresses.any { it.value },
+        onSelect = { target -> feedback.perform(FeelEvent.Selection); onSelect(target) }) { rowFrame ->
+        Row(rowFrame.then(selectionInk).padding(horizontal = if (compact) 10.dp else 0.dp).selectableGroup(),
+            horizontalArrangement = if (compact) Arrangement.spacedBy(22.dp) else Arrangement.Start,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            labels.forEachIndexed { i, label ->
+                val isSelected = selectionVisible && i == index
+                val interaction = selectionInteractions[i]
+                val pressed = if (movingGroupFill) groupPresses[i].value else interaction.collectIsPressedAsState().value
+                val focused = inGlassGroup && interaction.collectIsFocusedAsState().value
+                val hovered = inGlassGroup && interaction.collectIsHoveredAsState().value
+                val pressAlpha = animateFloatAsState(if (pressed) .06f else if (hovered) .035f else 0f,
+                    if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-press")
+                val labelColor by animateColorAsState(if (isSelected) foreground else inactiveInk,
+                    if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-label")
+                // Reserve both weights so selecting a compact tab cannot shift its neighbours.
+                val labelWidth = if (compact && itemContent == null) with(density) {
+                    labelWidths[i].toDp()
+                } else 0.dp
+                val tab = if (compact) Modifier.onSizeChanged { tabWidths[i] = it.width }
+                    else Modifier.weight(1f)
+                Box(tab.height(height).selectable(
+                    selected = isSelected, role = role, interactionSource = interaction, indication = null,
+                    onClick = { if (!isSelected) feedback.perform(FeelEvent.Selection); onSelect(i) },
+                ).then(if (movingGroupFill) Modifier else Modifier.motionPress(interaction)).drawBehind {
+                    if (!movingGroupFill || !isSelected) drawRoundRect(foreground.copy(alpha = pressAlpha.value),
+                        cornerRadius = CornerRadius(10.dp.toPx()))
+                    if (focused) drawRoundRect(foreground.copy(alpha = .72f),
+                        cornerRadius = CornerRadius(size.height / 2f), style = Stroke(1.dp.toPx()))
+                }.then(if (compact) Modifier.widthIn(min = labelWidth + 6.dp).padding(horizontal = 3.dp) else Modifier),
+                    contentAlignment = Alignment.Center) {
+                    if (itemContent != null) itemContent(i, isSelected, labelColor)
+                    else Text(label, color = labelColor, fontSize = fontSize,
+                            modifier = if (controlHeight != null) Modifier.padding(
+                                horizontal = if (treatment == MotionTabTreatment.Capsule) 8.dp else 2.dp) else Modifier,
+                            textAlign = TextAlign.Center,
+                            fontWeight = if (isSelected) selectedFontWeight else unselectedFontWeight,
+                            maxLines = if (wrapLabels) 2 else 1, overflow = TextOverflow.Ellipsis)
+                    DesktopIconTooltip(tooltips?.getOrNull(i), interaction, tooltips != null)
+                }
             }
         }
     }
-}
-
-/** The group owns the glass and shadow. Only this fill moves beneath the stationary labels. */
-private fun DrawScope.drawGlassTabFill(count: Int, leadingEdge: Float, trailingEdge: Float,
-    pressure: Float, color: Color, alpha: Float) {
-    if (alpha <= 0f) return
-    val slot = size.width / count
-    val inset = 3.dp.toPx().coerceAtMost(slot / 2f)
-    val rest = (slot - 2f * inset).coerceAtLeast(1f)
-    val leading = leadingEdge * slot + inset
-    val trailing = trailingEdge * slot - inset
-    val stretch = (trailing - leading).coerceIn(rest * .91f, rest * 1.28f)
-    val push = pressure.coerceIn(0f, 1f)
-    val width = (stretch + 3.dp.toPx() * push).coerceAtMost(size.width)
-    val squeeze = (stretch / rest - 1f).coerceAtLeast(0f)
-    val height = ((size.height - 8.dp.toPx()) * (1f - .24f * squeeze) - push * 1.5.dp.toPx())
-        .coerceIn(0f, size.height)
-    val start = ((leading + trailing - width) / 2f).coerceIn(0f, size.width - width)
-    val left = if (layoutDirection == LayoutDirection.Rtl) size.width - start - width else start
-    drawRoundRect(color, topLeft = Offset(left, (size.height - height) / 2f), size = Size(width, height),
-        cornerRadius = CornerRadius(height / 2f), alpha = alpha)
 }

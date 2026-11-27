@@ -42,13 +42,14 @@ import dev.chrisbanes.haze.glass.OpticalSizePoint
 import dev.chrisbanes.haze.glass.OpticalSizeValue
 import dev.chrisbanes.haze.glass.RefractionProfile
 import dev.chrisbanes.haze.glass.hazeGlass
+import dev.chrisbanes.haze.glass.hazeGlassContainer
 import dev.chrisbanes.haze.glass.material3.material3
 import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 
 internal enum class GlassSurfaceRole {
-    CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO,
+    CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, TAB_LENS, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO,
     VIDEO_DOCK,
 }
 
@@ -64,6 +65,8 @@ private val toolbarDepth = OpticalSizeValue.Responsive(
 )
 private val glassPressIn = spring<Float>(dampingRatio = 1f, stiffness = MangaMotion.PressAttackStiffness)
 private val glassPressOut = spring<Float>(dampingRatio = MangaMotion.PressDamping, stiffness = MangaMotion.PressStiffness)
+private val glassSettle = spring<Float>(dampingRatio = MangaMotion.SwitchDamping, stiffness = MangaMotion.NavigationStiffness)
+private const val MaxTabLensOpacity = .76f
 
 /** Application role/layout glue; the complete Haze 2.1 runtime owns every material stage. */
 @Composable
@@ -87,12 +90,14 @@ internal fun LiquidGlassSurface(
     val colors = MaterialTheme.colorScheme
     val surface = surfaceColor ?: colors.surface
     val light = surface.luminance() > .5f
+    val navigationTint = if (light) .40f else .56f
     val foreground = contentColor ?: if (surfaceColor == null) colors.onSurface
         else if (light) Color(0xFF242426) else Color.White
     val toolbar = role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.READING_DOCK
+    val tabLens = role == GlassSurfaceRole.TAB_LENS
     val tintColor = when {
         surfaceColor != null -> surfaceColor
-        toolbar -> colors.surfaceContainerHigh
+        toolbar || tabLens -> colors.surfaceContainerHigh
         softCard -> lerp(colors.background, surface, .70f)
         else -> surface
     }
@@ -100,12 +105,16 @@ internal fun LiquidGlassSurface(
     val shape = remember(cornerRadius, surfaceShape) { surfaceShape ?: RoundedCornerShape(cornerRadius) }
     val liquid = role != GlassSurfaceRole.PANEL && role != GlassSurfaceRole.POPOVER && role != GlassSurfaceRole.DRAWER
     val clear = role == GlassSurfaceRole.CONTROL || role == GlassSurfaceRole.ARTWORK ||
-        role == GlassSurfaceRole.THUMB || role == GlassSurfaceRole.VIDEO_DOCK
+        role == GlassSurfaceRole.THUMB || tabLens || role == GlassSurfaceRole.VIDEO_DOCK
     val motion = LocalMotionEnabled.current
     val accessibility = LocalGlassAccessibilitySettings.current
+    if (tabLens && (!motion || accessibility.reduceTransparency || accessibility.increaseContrast)) {
+        Box(modifier, content = content)
+        return
+    }
     // Declaring hover/press installs Haze's non-consuming, node-local pointer observer.
     // External sources add focus/keyboard/ancestor presses; raw touch needs no second detector.
-    val interactive = liquid && motion && (trackPointer || interactionSource != null)
+    val interactive = liquid && motion && !tabLens && (trackPointer || interactionSource != null)
     val expansion = rememberUpdatedState(materialExpansion)
     // Popups/dialogs, artwork-specific samples and nested glass controls need the
     // explicitly selected source. A window backdrop cannot cross a window boundary.
@@ -150,13 +159,29 @@ internal fun LiquidGlassSurface(
                             refractionDisplacement = 9.dp + 2.dp * progress,
                             refractionProfile = RefractionProfile.Edge(4.dp + 1.dp * progress),
                             blurRadius = navigationBlur, depth = toolbarDepth) }
-                        val bodyTint = if (light) .40f + .20f * progress else .56f + .16f * progress
+                        val bodyTint = navigationTint + (if (light) .20f else .16f) * progress
                         tint(tintColor.copy(alpha = bodyTint))
                         whitePoint(if (light) .015f else -.03f)
                         contrast(0f)
                         specularIntensity(if (light) .28f else .22f)
                         specularExponent(32f)
                         ambientResponse(.055f)
+                        chromaticAberrationStrength(0f)
+                        contentNormalBlend(.045f)
+                    }
+                    GlassSurfaceRole.TAB_LENS -> {
+                        // Only the travelling thumb samples this thin lens. Its resting selection is ink.
+                        alpha(MaxTabLensOpacity * progress)
+                        optics { copy(refractionStrength = .82f, refractionHeightFraction = .30f,
+                            refractionDisplacement = 10.dp, refractionProfile = RefractionProfile.Edge(4.dp),
+                            depth = OpticalSizeValue.Fixed(.50f), blurRadius = OpticalSizeValue.Fixed(1.5.dp),
+                            refractionDetailIntensity = 0f) }
+                        tint(tintColor.copy(alpha = navigationTint))
+                        whitePoint(if (light) .015f else -.03f)
+                        contrast(0f)
+                        specularIntensity(if (light) .40f else .32f)
+                        specularExponent(28f)
+                        ambientResponse(.065f)
                         chromaticAberrationStrength(0f)
                         contentNormalBlend(.045f)
                     }
@@ -236,11 +261,24 @@ internal fun LiquidGlassSurface(
                     chromaMultiplier(1.025f)
                 }
                 if (interactive) {
-                    interactionLightRadiusFraction(if (clear) .76f else .66f)
+                    val touchLens = (role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.CONTROL) &&
+                        !accessibility.reduceTransparency && !accessibility.increaseContrast
+                    interactionLightRadiusFraction(if (touchLens) .98f else if (clear) .76f else .66f)
                     hovered { animate(tween(MangaMotion.Quick), tween(MangaMotion.Quick)) { lightingIntensity(.28f) } }
                     focused { animate(tween(MangaMotion.Quick), tween(MangaMotion.Content)) { lightingIntensity(.36f) } }
                     pressed {
-                        animate(glassPressIn, glassPressOut) {
+                        if (touchLens) {
+                            // The contact light fades first; the refracted edge and material then settle.
+                            animate(glassPressIn, tween(MangaMotion.Quick)) {
+                                lightingIntensity(if (light) .82f else .70f)
+                                whitePointDelta(if (light) .025f else .015f)
+                            }
+                            animate(glassPressIn, glassSettle) {
+                                refractionMultiplier(if (clear) 1.65f else 1.72f - .24f * progress)
+                                scale(scaleX = if (clear) .95f else .985f + .01f * progress,
+                                    scaleY = if (clear) .91f else .935f + .04f * progress)
+                            }
+                        } else animate(glassPressIn, glassPressOut) {
                             lightingIntensity(if (clear) .72f else .54f)
                             refractionMultiplier(if (clear) 1.16f else 1.10f)
                             whitePointDelta(if (light) .025f else .015f)
@@ -259,7 +297,7 @@ internal fun LiquidGlassSurface(
             interactionSource = interactionSource,
             interactionTransformTarget = GlassTransformTarget.MaterialOnly,
             interactionReducedMotionPolicy = if (motion) GlassReducedMotionPolicy.System else GlassReducedMotionPolicy.Reduced,
-            memberTransition = if (motion) GlassMemberTransition.MatchedGeometry else GlassMemberTransition.None,
+            memberTransition = if (motion && !tabLens) GlassMemberTransition.MatchedGeometry else GlassMemberTransition.None,
             groupKey = groupKey,
         )
     } else {
@@ -286,7 +324,7 @@ internal fun LiquidGlassSurface(
         ambientColor = Color.Black.copy(alpha = .04f), spotColor = Color.Black.copy(alpha = .065f))
     // Blend with the material pixels before drawing the labels. The soft floor/ceiling responds
     // to passing artwork in the same frame, without reading a bitmap or switching glyph colours.
-    val inkContrast = if (role == GlassSurfaceRole.NAVIGATION &&
+    val inkContrast = if ((role == GlassSurfaceRole.NAVIGATION || tabLens) &&
         !accessibility.reduceTransparency && !accessibility.increaseContrast) {
         val darkInk = foreground.luminance() < .5f
         val tone = if (darkInk) Color(0xFFA0A0A0) else Color(0xFF56565A)
@@ -296,11 +334,17 @@ internal fun LiquidGlassSurface(
             val edge = tone.copy(alpha = 0f)
             val center = tone.copy(alpha = .85f)
             val guard = Brush.verticalGradient(0f to edge, feather to center, 1f - feather to center, 1f to edge)
-            onDrawBehind { drawRect(guard, blendMode = blend) }
+            onDrawBehind {
+                val amount = if (tabLens) MaxTabLensOpacity * expansion.value().coerceIn(0f, 1f) else 1f
+                drawRect(guard, alpha = amount, blendMode = blend)
+            }
         }
     } else Modifier
+    // An outer header container draws its members below all its children. Keep this moving lens
+    // in its own paint order, above the rail and below the stationary tab labels.
+    val lensContainer = if (tabLens) Modifier.hazeGlassContainer(mergeDistance = 0.dp) else Modifier
     CompositionLocalProvider(LocalContentColor provides foreground) {
         // Haze draws the material below its content and transforms only that material.
-        Box(modifier.then(shadow).clip(shape).then(material).then(inkContrast), content = content)
+        Box(modifier.then(shadow).clip(shape).then(lensContainer).then(material).then(inkContrast), content = content)
     }
 }

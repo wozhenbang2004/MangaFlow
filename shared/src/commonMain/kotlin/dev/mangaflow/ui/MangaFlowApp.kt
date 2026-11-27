@@ -2007,7 +2007,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     searching = desktopSearchContent, backdrop = searchBackdrop,
                                     onLeaveSearch = closeSearch, navigation = navigation,
                                     tabs = { tabModifier ->
-                                        BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryLabels,
+                                        BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryLabels, searchBackdrop,
                                             tabModifier) { index ->
                                             closeSearch()
                                             browseActions.selectDiscovery(discoveryModes[index], clearQuery = true)
@@ -2094,7 +2094,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 active = rootActive && chromeReady && rankingExpanded)
                                         }
                                     }) {
-                                    BrowseTabs(discoveryModes.indexOf(browse.mode).coerceAtLeast(0), discoveryLabels,
+                                    BrowseTabs(discoveryModes.indexOf(browse.mode).coerceAtLeast(0), discoveryLabels, searchBackdrop,
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp)
                                             .graphicsLayer { alpha = 1f - .24f * (rankingEmphasis?.value ?: 0f) }
                                             .onGloballyPositioned { coordinates ->
