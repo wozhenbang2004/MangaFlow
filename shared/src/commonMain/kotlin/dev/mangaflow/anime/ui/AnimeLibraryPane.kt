@@ -233,6 +233,7 @@ internal fun AnimeLibrary(
         val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
         val split = platformKind == PlatformKind.DESKTOP && !state.libraryReadUnavailable &&
             maxWidth >= 825.dp * scale && maxHeight >= 385.dp * scale
+        val previewWidth = (minOf(maxWidth, 1400.dp) * .43f).coerceIn(330.dp, 516.dp * scale)
         val preview = if (split) entries.firstOrNull { it.subject.id == viewState.previewId } ?: continuation ?: entries.firstOrNull() else null
         val historyByWork = if (preview == null) emptyMap() else remember(state.episodeProgress) {
             state.episodeProgress.values.groupBy { it.subjectId }
@@ -406,7 +407,7 @@ internal fun AnimeLibrary(
                     }
                 }, onOpen = { onOpen(preview.subject) },
                 onEpisode = { playHistoryEpisode(preview, it) },
-                modifier = Modifier.width((minOf(maxWidth, 1400.dp) * .43f).coerceIn(330.dp, 516.dp * scale))
+                modifier = Modifier.width(previewWidth)
                     .fillMaxHeight().padding(end = 18.dp))
         }
         }

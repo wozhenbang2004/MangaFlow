@@ -616,9 +616,10 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
         refreshing = feed?.loading == true && feed.items.isNotEmpty(), onRefresh = onRefresh,
         indicatorTop = contentTopPadding + 4.dp, actionLabel = "刷新番剧") {
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val columns = animeDiscoveryColumns(maxWidth, preference)
-        val inset = animeDiscoveryInset(maxWidth, preference, columns)
-        val readableWidth = maxWidth - inset * 2
+        val gridWidth = maxWidth
+        val columns = animeDiscoveryColumns(gridWidth, preference)
+        val inset = animeDiscoveryInset(gridWidth, preference, columns)
+        val readableWidth = gridWidth - inset * 2
         val besideGallery = desktop && featured.isNotEmpty() && watchShelf != null &&
             readableWidth >= 820.dp * LocalDensity.current.fontScale.coerceAtLeast(1f) &&
             maxHeight - contentTopPadding >= 390.dp
@@ -664,7 +665,7 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
             if (catalogueHeader != null || homeShortcuts != null && !besideGallery) item(key = "discovery-heading", span = { GridItemSpan(maxLineSpan) }) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (!besideGallery) homeShortcuts?.invoke()
-                    catalogueHeader?.invoke(maxWidth)
+                    catalogueHeader?.invoke(gridWidth)
                 }
             }
             if (feed?.error != null && !hasScopedErrors) item(key = "error", span = { GridItemSpan(maxLineSpan) }) {
