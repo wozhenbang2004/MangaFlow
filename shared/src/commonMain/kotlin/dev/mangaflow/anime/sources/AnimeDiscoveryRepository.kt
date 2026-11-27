@@ -12,6 +12,7 @@ import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.combineAnimeDiscoveryItems
 import dev.mangaflow.anime.selectedTags
 import dev.mangaflow.experience.ContentCacheKind
+import dev.mangaflow.experience.contentCachePreferences
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadCategory
@@ -34,8 +35,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 internal data class AnimeAniListMatch(val id: Int, val malId: Int?, val rating: Double?, val ratingCount: Int? = null)
 
+internal data class AnimeCachedDiscoveryPage(val value: AnimeDiscoveryPage, val savedAt: Long, val route: DownloadRouteSnapshot?)
+
 /** Public catalogue queries; playback availability and canonical identity remain separate. */
-class AnimeDiscoveryRepository(context: PlatformContext) {
+class AnimeDiscoveryRepository(private val context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
     private val cache = AnimeMetadataCache.get(context)
     private val douban = DoubanAnimeRepository(context)
@@ -48,7 +51,12 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     internal val cacheEpoch: Long get() = cache.generation
 
     internal fun isFresh(query: AnimeDiscoveryQuery, fetchedAt: Long): Boolean =
-        cache.isFresh(fetchedAt, cacheKind(query))
+        cache.isFresh(fetchedAt, cacheKind(query)) &&
+            wallTimeMillis() - fetchedAt in 0L..contentCachePreferences(context).retentionMillis
+
+    internal fun canReuse(snapshot: AnimeCachedDiscoveryPage, query: AnimeDiscoveryQuery, page: Int,
+        route: DownloadRouteSnapshot?): Boolean = route != null && snapshot.route == route && snapshot.value.page == page &&
+        isFresh(query, snapshot.savedAt) && (!query.calendar || !calendarMutex.isLocked)
 
     internal suspend fun lookupAniListScore(subject: AnimeSubject): AnimeSourceScore? =
         lookupAniListMatch(subject)?.let { match -> match.rating?.let {
@@ -147,12 +155,16 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     suspend fun cached(
         query: AnimeDiscoveryQuery, page: Int = 1,
         route: DownloadRouteSnapshot? = runCatching { route(query) }.getOrNull(),
-    ): AnimeDiscoveryPage? {
+    ): AnimeDiscoveryPage? = cachedPage(query, page, route)?.value
+
+    internal suspend fun cachedPage(query: AnimeDiscoveryQuery, page: Int, route: DownloadRouteSnapshot?,
+        freshOnly: Boolean = false): AnimeCachedDiscoveryPage? {
         validate(query, page)
-        if (query.provider == AnimeDiscoveryProvider.DOUBAN) return douban.cachedBrowse(query, page, route)
-        // Route-aware and route-less snapshots must use the current query schema.
-        return route?.let { readCache(query, page, cacheKey(query, page, it), freshOnly = false) }
-            ?: readCache(query, page, cacheKey(query, page, null), freshOnly = false)
+        if (freshOnly && contentCachePreferences(context).freshMillis(cacheKind(query)) == 0L) return null
+        if (query.provider == AnimeDiscoveryProvider.DOUBAN) return douban.cachedBrowse(query, page, route, freshOnly)
+        if (route != null) readCache(query, page, route, freshOnly)?.let { return it }
+        // Legacy route-less pages may paint a first frame but cannot satisfy a routed request.
+        return if (freshOnly) null else readCache(query, page, null, freshOnly = false)
     }
 
     suspend fun browse(
@@ -172,11 +184,10 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
         query: AnimeDiscoveryQuery, page: Int, forceRefresh: Boolean, route: DownloadRouteSnapshot,
     ): AnimeDiscoveryPage {
         checkRoute(query, route)
-        val key = cacheKey(query, page, route)
         if (!forceRefresh) {
-            readCache(query, page, key, freshOnly = true)?.let {
+            readCache(query, page, route, freshOnly = true)?.let {
                 checkRoute(query, route)
-                return it
+                return it.value
             }
         }
         val generation = cache.generation
@@ -213,7 +224,7 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             val result = withContext(Dispatchers.Default) { decode(response, query, page) }
             val encoded = withContext(Dispatchers.Default) { response.toString() }
             checkRoute(query, route)
-            cache.write(key, encoded, generation)
+            cache.write(cacheKey(query, page, route), encoded, generation)
             result
         } catch (cancel: CancellationException) {
             throw cancel
@@ -228,12 +239,13 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     }
 
     private suspend fun readCache(
-        query: AnimeDiscoveryQuery, page: Int, key: String, freshOnly: Boolean,
-    ): AnimeDiscoveryPage? {
-        val document = cache.read(key) ?: return null
+        query: AnimeDiscoveryQuery, page: Int, route: DownloadRouteSnapshot?, freshOnly: Boolean,
+    ): AnimeCachedDiscoveryPage? {
+        val document = cache.read(cacheKey(query, page, route)) ?: return null
         if (freshOnly && !cache.isFresh(document, cacheKind(query))) return null
         return try {
-            withContext(Dispatchers.Default) { decode(JSONObject(document.text), query, page) }
+            val value = withContext(Dispatchers.Default) { decode(JSONObject(document.text), query, page) }
+            AnimeCachedDiscoveryPage(value, document.savedAt, route)
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { null }
     }

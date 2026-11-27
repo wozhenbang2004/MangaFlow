@@ -39,6 +39,8 @@ class SiteRankingsController(
     private val snapshots = LinkedHashMap<String, SiteRankingsState>()
     private val selections = mutableMapOf<RankingSite, SiteRankingSelection>()
     private val readingLinks = mutableMapOf<String, Manga>()
+    private var checkedEntries: List<SiteRankingEntry>? = null
+    private var editsDuringLinkRead: MutableSet<String>? = null
     fun cachedLink(work: SiteRankedWork): Manga? = readingLinks[work.key]?.takeIf { repository.acceptsSource(work, it) }
     private var request = 0L
     private var job: Job? = null
@@ -192,7 +194,7 @@ class SiteRankingsController(
                     current.page + 1, result.hasMore, current.fetchedAt)
                 mutable.update { it.copy(entries = snapshot.entries, page = snapshot.page,
                     hasMore = result.hasMore, loadingMore = false, error = null, failedPage = null) }
-                publishLinks(token, snapshot.entries)
+                publishLinks(token, snapshot.entries, previous = current.entries)
                 save(snapshot, epoch)
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
@@ -204,6 +206,7 @@ class SiteRankingsController(
 
     fun recordLink(work: SiteRankedWork, manga: Manga) {
         if (!repository.acceptsSource(work, manga)) return
+        editsDuringLinkRead?.add(work.key)
         readingLinks[work.key] = manga
         mutable.update { it.copy(linkedIds = it.linkedIds + work.key) }
         snapshots.toMap().forEach { (key, snapshot) ->
@@ -212,6 +215,7 @@ class SiteRankingsController(
     }
 
     fun forgetLink(work: SiteRankedWork) {
+        editsDuringLinkRead?.add(work.key)
         readingLinks.remove(work.key)
         mutable.update { it.copy(linkedIds = it.linkedIds - work.key) }
         snapshots.toMap().forEach { (key, snapshot) ->
@@ -219,12 +223,28 @@ class SiteRankingsController(
         }
     }
 
-    private suspend fun publishLinks(token: Long, rows: List<SiteRankingEntry>) {
-        val links = rows.mapNotNull { row -> repository.linked(row.work)?.let { row.work.key to it } }.toMap()
-        if (token == request) {
-            rows.forEach { readingLinks.remove(it.work.key) }
-            readingLinks.putAll(links)
-            mutable.update { it.copy(linkedIds = links.keys) }
+    private suspend fun publishLinks(token: Long, rows: List<SiteRankingEntry>, previous: List<SiteRankingEntry>? = null) {
+        // An append keeps its exact preceding rows. If their read was cancelled, hydrate the full range.
+        val prefix = previous?.takeIf { it === checkedEntries }?.size
+        val changed = if (prefix == null) rows else rows.subList(prefix, rows.size)
+        val edits = mutableSetOf<String>()
+        editsDuringLinkRead = edits
+        try {
+            val links = repository.linkedEntries(changed)
+            if (token != request) return
+            val visible = if (prefix == null) mutableSetOf<String>() else mutable.value.linkedIds.toMutableSet()
+            for (row in changed) {
+                val key = row.work.key
+                if (key !in edits) {
+                    val manga = links[key]
+                    if (manga == null) readingLinks.remove(key) else readingLinks[key] = manga
+                }
+                if (key in readingLinks) visible.add(key) else visible.remove(key)
+            }
+            checkedEntries = rows
+            mutable.update { it.copy(linkedIds = visible) }
+        } finally {
+            if (editsDuringLinkRead === edits) editsDuringLinkRead = null
         }
     }
 
@@ -237,6 +257,7 @@ class SiteRankingsController(
     suspend fun clearCache() {
         request++
         job?.cancel()
+        checkedEntries = null
         repository.clearCache()
         snapshots.clear()
         mutable.value = SiteRankingsState(mutable.value.selection)

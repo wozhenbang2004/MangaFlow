@@ -68,7 +68,7 @@ private val termBreak = Regex("\\s+")
 internal fun RecentReadingSheet(
     history: List<ReadingProgress>, repository: MangaRepository, library: LibraryStore,
     onDismiss: () -> Unit, onContinue: (ReadingProgress) -> Unit, onRemoveHistory: (String) -> Unit,
-    backdrop: HazeState? = null,
+    backdrop: HazeState? = null, ordinaryCovers: Boolean,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val snackbar = remember { SnackbarHostState() }
@@ -147,19 +147,22 @@ internal fun RecentReadingSheet(
                     focusHeader, onFocusHandled = { focusHeader = false },
                     onQuery = { query = it }, onSearch = ::openSearch, onBack = ::closeSearch, onClose = dismiss)
                 val select: (String) -> Unit = { selection = it; showChapters = true; keyboard?.hide() }
-                if (split && matches.isNotEmpty()) {
-                    DesktopReadingHistory(matches, repository, library, position, true, resume,
-                        onRemove = { removals.request(it, onRemoveHistory) },
-                        modifier = Modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
-                        selection = selection, onSelect = select)
-                } else MotionTabContent(selected = chapter, modifier = Modifier.fillMaxWidth(),
-                    contentKey = { it?.let { work -> work.sourceId + ":" + work.id } ?: "recent-books" },
-                    order = { if (it == null) 0 else 1 },
-                    fillContent = false, soft = true) { work ->
-                    if (work != null) ChapterHistoryContent(work, library, onContinue = resume,
-                        onBack = { showChapters = false }, onClose = if (desktop) dismiss else null)
-                    else RecentReadingList(matches, terms.isNotEmpty(), position, repository, resume, select,
-                        onRemove = { removals.request(it, onRemoveHistory) })
+                val warmCovers = ordinaryCovers && resumeAfterClose == null && !searching && chapter == null
+                CompositionLocalProvider(LocalMangaCoverFade provides !ordinaryCovers) {
+                    if (split && matches.isNotEmpty()) {
+                        DesktopReadingHistory(matches, repository, library, position, true, resume,
+                            onRemove = { removals.request(it, onRemoveHistory) },
+                            modifier = Modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                            selection = selection, onSelect = select, warmCovers = warmCovers)
+                    } else MotionTabContent(selected = chapter, modifier = Modifier.fillMaxWidth(),
+                        contentKey = { it?.let { work -> work.sourceId + ":" + work.id } ?: "recent-books" },
+                        order = { if (it == null) 0 else 1 },
+                        fillContent = false, soft = true) { work ->
+                        if (work != null) ChapterHistoryContent(work, library, onContinue = resume,
+                            onBack = { showChapters = false }, onClose = if (desktop) dismiss else null)
+                        else RecentReadingList(matches, terms.isNotEmpty(), position, repository, warmCovers, resume, select,
+                            onRemove = { removals.request(it, onRemoveHistory) })
+                    }
                 }
             }
         }
@@ -224,10 +227,11 @@ private fun RecentReadingHeader(
 @Composable
 private fun RecentReadingList(
     history: List<ReadingProgress>, filtered: Boolean, position: LazyListState, repository: MangaRepository,
-    onContinue: (ReadingProgress) -> Unit, onSelect: (String) -> Unit, onRemove: (String) -> Unit,
+    warmCovers: Boolean, onContinue: (ReadingProgress) -> Unit, onSelect: (String) -> Unit, onRemove: (String) -> Unit,
 ) {
     val today = localToday()
     val groups = remember(history) { readingHistoryByDay(history) }
+    HistoryCoverWarmup(groups, repository, warmCovers, position) { "work:" + it.sourceId + ":" + it.id }
     val motion = LocalMotionEnabled.current
     val feedback = rememberFeelFeedback()
     LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp), state = position,

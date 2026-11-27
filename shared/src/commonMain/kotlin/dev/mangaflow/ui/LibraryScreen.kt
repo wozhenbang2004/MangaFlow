@@ -93,6 +93,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -212,6 +213,7 @@ fun LibraryScreen(
     val historyTitle = "最近阅读"
     val desktop = platformKind == PlatformKind.DESKTOP
     val androidManga = platformKind == PlatformKind.ANDROID && !adultProfile
+    val ordinaryCovers = !adultProfile && (platformKind == PlatformKind.ANDROID || desktop)
     val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
     val haptics = rememberFeelFeedback()
@@ -434,24 +436,29 @@ fun LibraryScreen(
     val historyInset = 16.dp + ((maxWidth - if (desktop) 1040.dp else MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp)
     val splitHistory = desktop && maxWidth >= 720.dp * density.fontScale.coerceAtLeast(1f) &&
         maxHeight - headerPadding > 300.dp && visibleHistory.isNotEmpty()
+    val warmCovers = active && libraryReady && ordinaryCovers &&
+        !showCollections && !showStats && !libraryActionsOpen && chapterHistoryManga == null &&
+        managedId == null && draggedFavorite == null && opening?.loading != true
     Box(Modifier.fillMaxSize().mangaHazeSource(backdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
         wallpaper()
         Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (!libraryReady) LibraryRestoreStatus(libraryStore, Modifier.padding(top = headerPadding))
-            else MotionTabContent(if (showHistory) 1 else 0, Modifier.fillMaxSize()) { tab ->
+            else CompositionLocalProvider(LocalMangaCoverFade provides !ordinaryCovers) {
+            MotionTabContent(if (showHistory) 1 else 0, Modifier.fillMaxSize()) { tab ->
                 if (tab == 1 && splitHistory) {
                     DesktopReadingHistory(visibleHistory, repository, libraryStore, historyPosition, active && showHistory,
                         onContinue, ::removeHistoryWithUndo, Modifier.fillMaxSize().padding(start = 20.dp, end = 20.dp,
                             top = headerPadding + 8.dp, bottom = 16.dp + bottomInset), desktopHistoryBook,
-                        { desktopHistoryBook = it }, onDetails,
+                        { desktopHistoryBook = it }, onDetails, warmCovers = warmCovers && showHistory,
                         header = if (copyNotice != null && importCopy != null) ({
                             CopyShelfImportHint(copyNotice, active && showHistory, importCopy)
                         }) else null)
                 } else if (tab == 1) {
                     val today = localToday()
                     val dates = remember(visibleHistory) { readingHistoryByDay(visibleHistory) }
+                    HistoryCoverWarmup(dates, repository, warmCovers && showHistory, historyPosition) { "history-${it.id}" }
                     LazyColumn(
                         state = historyPosition,
                         modifier = Modifier.fillMaxSize(),
@@ -518,6 +525,8 @@ fun LibraryScreen(
                             else MangaLayout.columns(maxWidth, maximum, minimumWidth, gap, 16.dp)
                         val decodeSize = if (desktop) density.coverDecodeSize(
                             (maxWidth - shelfInset * 2 - gap * (perShelf - 1)) / perShelf, .7f) else null
+                        BrowseCoverWarmup(visibleFavorites, repository, warmCovers && !showHistory,
+                            favoritesPosition, perShelf) { it.sourceId + ":" + it.id }
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(perShelf),
                             state = favoritesPosition,
@@ -814,6 +823,7 @@ fun LibraryScreen(
                         }
                     }
                 }
+            }
             }
             if (desktop && libraryReady && (!showHistory || !splitHistory)) {
                 val track = Modifier.align(Alignment.CenterEnd).padding(top = headerPadding, bottom = bottomInset)

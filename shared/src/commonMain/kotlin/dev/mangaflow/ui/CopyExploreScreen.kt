@@ -251,6 +251,17 @@ internal fun CopyExploreScreen(
                         else MangaLayout.columns(maxWidth, if (maxWidth >= 600.dp) 4 else 3, 83.dp * scale, 10.dp, 16.dp)
                     val listColumns = if (index) 1 else if (topicList) MangaLayout.columns(maxWidth, 3, 280.dp * scale, gap, 16.dp)
                         else columns
+                    if (desktop && query.isEmpty()) {
+                        val tail = remember(pane.items, topics, topicList) {
+                            if (topicList) browsePageTail(topics) { "topic:" + it.path }
+                            else browsePageTail(pane.items) { "comic:" + it.id }
+                        }
+                        BrowseGridPagination(grid, positionKey, pane.updatedAt, if (topicList) topics.size else pane.items.size,
+                            tail, if (topicList) "copy-topic" else "copy-comic",
+                            enabled = paneActive && actionsId == null && pane.hasMore && !pane.loading &&
+                                !pane.refreshing && !pane.loadingMore && pane.error == null && pane.failedPage == null,
+                            fillViewport = false, onMore = controller::loadMore)
+                    }
                     LazyVerticalGrid(columns = GridCells.Fixed(listColumns), state = grid,
                         modifier = Modifier.fillMaxSize().motionInputGate(paneActive),
                         contentPadding = PaddingValues(start = 16.dp, end = if (wide) 22.dp else 16.dp, top = if (index) 0.dp else 10.dp,

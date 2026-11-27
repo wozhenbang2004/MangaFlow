@@ -60,7 +60,8 @@ class DoubanAnimeRepository(context: PlatformContext) {
         record?.value
     }
 
-    suspend fun search(query: String, page: Int = 1, forceRefresh: Boolean = false): AnimeMetadataPage =
+    suspend fun search(query: String, page: Int = 1, forceRefresh: Boolean = false,
+        onVerified: (suspend (position: Int, subject: AnimeSubject) -> Unit)? = null): AnimeMetadataPage =
         withContext(Dispatchers.Default) {
             val startedAt = wallTimeMillis()
             val keyword = validateSearch(query, page)
@@ -81,21 +82,27 @@ class DoubanAnimeRepository(context: PlatformContext) {
             val document = DoubanAnimeParser.search(response.text, response.url, keyword)
             val permits = Semaphore(2)
             val resultMutex = Mutex()
-            val completed = MutableList<Result<DoubanSubjectDocument>?>(document.candidates.size) { null }
+            val completed = MutableList<Result<AnimeSubject?>?>(document.candidates.size) { null }
             // Return verified rows even if another detail stalls; unknown genres never become non-animation.
             withTimeoutOrNull((18_000L - (wallTimeMillis() - startedAt)).coerceAtLeast(1L)) {
                 coroutineScope {
                     document.candidates.mapIndexed { index, candidate -> async {
-                        permits.withPermit {
-                            val result = try {
+                        val result = permits.withPermit {
+                            try {
                                 // Retrying an incomplete page must progress past already verified subjects.
                                 // Explicit subject refresh remains available through detail(forceRefresh = true).
-                                Result.success(readSubject(candidate.canonicalDoubanId()!!.toString(), requestedRoute,
-                                    generation, forceRefresh = false))
+                                val detail = readSubject(candidate.canonicalDoubanId()!!.toString(), requestedRoute,
+                                    generation, forceRefresh = false)
+                                Result.success(if (detail.animation) detail.subject.retainObservedMetadata(candidate) else null)
                             } catch (cancel: CancellationException) { throw cancel }
                             catch (failure: DownloadRouteException) { throw failure }
                             catch (failure: Exception) { Result.failure(failure) }
-                            resultMutex.withLock { completed[index] = result }
+                        }
+                        resultMutex.withLock { completed[index] = result }
+                        val subject = result.getOrNull()
+                        if (subject != null && onVerified != null) {
+                            checkScope(requestedRoute, generation)
+                            onVerified(index, subject)
                         }
                     } }.awaitAll()
                 }
@@ -103,11 +110,7 @@ class DoubanAnimeRepository(context: PlatformContext) {
             checkScope(requestedRoute, generation)
             val details = completed.map { it ?: Result.failure(AnimeSourceException(DOUBAN_PROVIDER,
                 AnimeSourceStage.METADATA, "确认动画资料超时，请重试本页。")) }
-            val items = details.mapIndexedNotNull { index, result ->
-                result.getOrNull()?.takeIf { row -> row.animation }?.subject
-                    ?.retainObservedMetadata(document.candidates[index])
-            }
-                .distinctBy { it.id }
+            val items = details.mapNotNull { it.getOrNull() }.distinctBy { it.id }
             val failures = details.mapNotNull { it.exceptionOrNull() }
             val errors = listOfNotNull(document.error, failures.firstOrNull()?.let {
                 "${failures.size} 部作品的动画类型或资料读取失败：${it.message ?: "请稍后重试。"}"
@@ -146,15 +149,17 @@ class DoubanAnimeRepository(context: PlatformContext) {
         result.subject.retainObservedMetadata(subject)
     }
 
-    internal suspend fun cachedBrowse(query: AnimeDiscoveryQuery, page: Int, requestedRoute: DownloadRouteSnapshot?): AnimeDiscoveryPage? =
+    internal suspend fun cachedBrowse(query: AnimeDiscoveryQuery, page: Int, requestedRoute: DownloadRouteSnapshot?,
+        freshOnly: Boolean): AnimeCachedDiscoveryPage? =
         withContext(Dispatchers.Default) {
             validateBrowse(query, page)
             val selectedRoute = requestedRoute ?: return@withContext null
             val generation = cache.generation
             val document = cache.read(browseKey(query, page, selectedRoute)) ?: return@withContext null
-            val result = decodeBrowse(document.text, page)
+            if (freshOnly && !cache.isFresh(document, browseKind(query))) return@withContext null
+            val result = decodeBrowse(document.text, page) ?: return@withContext null
             checkScope(selectedRoute, generation, catalogue = true)
-            result
+            AnimeCachedDiscoveryPage(result, document.savedAt, selectedRoute)
         }
 
     internal suspend fun browse(query: AnimeDiscoveryQuery, page: Int, forceRefresh: Boolean,

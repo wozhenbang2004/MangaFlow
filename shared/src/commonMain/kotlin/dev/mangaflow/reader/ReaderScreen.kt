@@ -654,14 +654,14 @@ fun ReaderScreen(
     }
     val activeDownload by chapterDownload.collectAsStateWithLifecycle(initialValue = initialDownload)
     val storageCache = remember(adultImageContext) { dev.mangaflow.storage.StorageCacheStore.get(adultImageContext) }
-    val cacheRangeOwner = remember(storageCache, manga.id, chapterId, pages, headers) { Any() }
+    val cacheRangeOwner = remember(storageCache, manga.id, sourceIdentity, pages, headers) { Any() }
     // The retained reader owns this chapter even while settings are overlaid or the app is paused.
     DisposableEffect(storageCache, manga.id, chapterId, active, cacheRangeOwner) {
         val release = if (active) storageCache.protectReading(manga.id, chapterId, chapterSourceMangaId(manga.id, chapter), cacheRangeOwner) else ({})
         onDispose { release() }
     }
-    LaunchedEffect(storageCache, manga.id, chapterId, pages, headers, active) {
-        storageCache.registerPages(manga.id, chapterId,
+    LaunchedEffect(cacheRangeOwner, active) {
+        if (active && pages.isNotEmpty()) storageCache.registerPages(manga.id, chapterId,
             dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(manga.id, chapter), chapterId).sourceId,
             pages, headers, rangeOwner = cacheRangeOwner)
     }
@@ -1111,7 +1111,7 @@ fun ReaderScreen(
                 throw IllegalStateException("本地章节不存在，请重新导入")
             } else dev.mangaflow.data.foregroundRequest("章节图片") {
                 chapterLoadStage = "获取图片目录"
-                repository.pages(chapterSourceMangaId(requestedManga.id, requestedChapter), requestedChapterId, forceRefresh = retry > 0)
+                repository.readerPages(chapterSourceMangaId(requestedManga.id, requestedChapter), requestedChapterId, forceRefresh = retry > 0)
             }
             currentCoroutineContext().ensureActive()
             if (chapterId != requestedChapterId || latestChapterLoadAttempt !== requestedAttempt ||

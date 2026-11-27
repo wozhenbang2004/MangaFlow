@@ -1136,7 +1136,8 @@ private fun MangaFlowContent(
         RecentReadingSheet(ordinaryHistory, model.repository, model.library,
             onDismiss = { recentReadingOpen = false },
             onContinue = { model.continueReading(it) },
-            onRemoveHistory = model::removeHistory, backdrop = drawerBackdrop)
+            onRemoveHistory = model::removeHistory, backdrop = drawerBackdrop,
+            ordinaryCovers = !restrictedMode && (desktop || platformKind == PlatformKind.ANDROID))
     }
     authorWorks?.let { author ->
         androidx.compose.runtime.key(author.manga.id, author.name) {
@@ -1933,6 +1934,7 @@ private fun MangaFlowContent(
                                                 canAutoAdvance = rootActive && !searchVisible,
                                                 onRefresh = browseActions::refresh,
                                                 onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
+                                                prepareNextPage = if (restrictedMode) null else model::prepareDiscoveryPage,
                                                 onManageSources = if (restrictedMode) manageProfileSources else null,
                                                 onExplore = if (restrictedMode) null else {
                                                     {

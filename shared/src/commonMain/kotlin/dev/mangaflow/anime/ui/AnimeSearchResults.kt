@@ -326,7 +326,7 @@ internal fun AnimeSearchProgressSheet(
                         item(key = "catalogue-heading") { AnimeQuietLabel("番剧资料", Modifier.padding(top = 5.dp)) }
                         item(key = "catalogue-progress") {
                             AnimeSearchSourceProgress(animeDiscoverySourceId(search.catalogProvider), animeDiscoveryProviderLabel(search.catalogProvider),
-                                index.items.size, index.page, index.loading, queued = false, error = index.error,
+                                index.displayedItems.size, index.page, index.loading, queued = false, error = index.error,
                                 retry = {
                                     if (currentSearch()?.index == index && index.error != null && !index.loading)
                                         controller.retrySearchIndex()

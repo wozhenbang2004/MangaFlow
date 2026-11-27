@@ -17,6 +17,8 @@ internal class FilePreferences private constructor(private val file: StorageFile
     private val diskLock = StorageLock()
     private var loaded = false
     private var values = emptyMap<String, Any?>()
+    private var revision = 0L
+    private var savedRevision = 0L
     private val listeners = mutableSetOf<PreferenceChangeListener>()
     private val writes = Channel<Unit>(Channel.CONFLATED)
     private val writer = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -24,8 +26,7 @@ internal class FilePreferences private constructor(private val file: StorageFile
     init {
         writer.launch {
             for (ignored in writes) {
-                // A newer complete snapshot includes all earlier applies; older writes never win.
-                synchronized(diskLock) { persist(synchronized(lock) { load(); values.toMap() }) }
+                flush()
             }
         }
     }
@@ -90,8 +91,13 @@ internal class FilePreferences private constructor(private val file: StorageFile
         } catch (_: Exception) { output?.let(atomic::failWrite); false }
     }
     private fun flush(): Boolean = synchronized(diskLock) {
-        val snapshot = synchronized(lock) { if (loaded) values.toMap() else null }
-        snapshot == null || persist(snapshot)
+        // Each edit replaces the map. A concurrent edit stays dirty until its own snapshot reaches disk.
+        val pending = synchronized(lock) { if (revision == savedRevision) null else revision to values }
+        when {
+            pending == null -> true
+            persist(pending.second) -> { savedRevision = pending.first; true }
+            else -> false
+        }
     }
     private inner class Editor : PreferencesEditor {
         private var clearAll = false
@@ -106,10 +112,14 @@ internal class FilePreferences private constructor(private val file: StorageFile
         override fun clear(): PreferencesEditor = apply { clearAll = true }
         private fun updateMemory(): Pair<List<String>, List<PreferenceChangeListener>> = synchronized(lock) {
             load()
-            val next = (if (clearAll) emptyMap() else values).toMutableMap()
-            changes.forEach { (key, value) -> if (value == null) next.remove(key) else next[key] = value }
-            val changed = (values.keys + next.keys).filter { values[it] != next[it] }
-            values = next
+            val keys = if (clearAll) values.keys + changes.keys else changes.keys
+            val changed = keys.filter { values[it] != changes[it] }
+            if (changed.isNotEmpty()) {
+                val next = (if (clearAll) emptyMap() else values).toMutableMap()
+                changes.forEach { (key, value) -> if (value == null) next.remove(key) else next[key] = value }
+                values = next
+                revision++
+            }
             changed to listeners.toList()
         }
         private fun notifyListeners(changes: Pair<List<String>, List<PreferenceChangeListener>>) {
@@ -117,7 +127,7 @@ internal class FilePreferences private constructor(private val file: StorageFile
         }
         override fun commit(): Boolean {
             val changes = updateMemory()
-            val saved = synchronized(diskLock) { persist(synchronized(lock) { values.toMap() }) }
+            val saved = flush()
             notifyListeners(changes)
             return saved
         }

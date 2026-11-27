@@ -41,7 +41,10 @@ internal data class AnimeSearchIndex(
     val error: String? = null,
     /** Stable completed prefix; a retried partial page replaces its own rows in remote order. */
     val completedItems: List<AnimeSubject> = emptyList(),
+    /** Confirmed rows from a page still being checked cannot establish a unique alias for source searches. */
+    val previewItems: List<AnimeSubject>? = null,
 ) {
+    val displayedItems: List<AnimeSubject> get() = previewItems ?: items
     val canLoadMore: Boolean get() = hasMore && !loading && error == null
 }
 
@@ -121,6 +124,7 @@ internal class AnimeUnifiedSearch(
     private var indexJob: Job? = null
     private var groupingJob: Job? = null
     private var groupingRevision = 0L
+    private var groupingReplacement = 0L
     private var firstPageIndexTerms = emptyList<String>()
     private var firstPageIndexSubject: AnimeSubject? = null
     private var generation = 0L
@@ -131,7 +135,7 @@ internal class AnimeUnifiedSearch(
         if (query != current.query || provider != current.catalogProvider) {
             generation++
             indexJob?.cancel()
-            groupingRevision++
+            groupingReplacement = ++groupingRevision
             groupingJob?.cancel()
             sourceJobs.values.forEach { it.cancel() }
             sourceJobs.clear()
@@ -142,7 +146,7 @@ internal class AnimeUnifiedSearch(
             sourceKeys = emptyMap()
             indexRoute = null
             mutableState.value = AnimeUnifiedSearchState(query = query, indexOnly = indexOnly, catalogProvider = provider)
-        } else if (indexOnly != current.indexOnly) publish(current.copy(indexOnly = indexOnly), regroup = true)
+        } else if (indexOnly != current.indexOnly) publish(current.copy(indexOnly = indexOnly), regroup = true, replacesItems = true)
         sourcesPaused = false
         reconcile()
         resumeSourceRequests()
@@ -189,7 +193,7 @@ internal class AnimeUnifiedSearch(
             sources = providers.map { (provider, _) ->
                 retained[provider.id]?.takeIf { provider.id !in refreshed }
                     ?: AnimeSourceResult(provider.id, provider.name)
-            }), regroup = true)
+            }), regroup = true, replacesItems = true)
         if (refreshIndex) requestIndex(forceRefresh = changedIndexRoute)
         providers.filter { (provider, _) -> provider.id in refreshed }.forEach { (provider, _) -> requestSource(provider) }
     }
@@ -236,21 +240,35 @@ internal class AnimeUnifiedSearch(
         val owner = generation
         val previous = state.index
         val page = nextPage(previous.page) ?: return
+        val prefix = previous.completedItems
         publish(state.copy(index = previous.copy(loading = true, error = null)))
-        indexJob = scope.launch {
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            val requestOwner = coroutineContext[Job]
+            val cacheGeneration = metadata.cacheGeneration
             fun current(): Boolean {
-                if (owner != generation || route != indexRoute) return false
+                if (indexJob !== requestOwner || owner != generation || route != indexRoute) return false
                 if (route == routeFor(indexId(state.catalogProvider))) return true
                 reconcile()
                 return false
             }
+            val confirmed = mutableMapOf<Int, AnimeSubject>()
+            suspend fun showVerified(position: Int, subject: AnimeSubject) = withContext(Dispatchers.Main.immediate) {
+                if (!current() || cacheGeneration != metadata.cacheGeneration) return@withContext
+                val live = mutableState.value
+                confirmed[position] = subject
+                val ordered = confirmed.entries.sortedBy { it.key }.map { it.value }
+                val shown = (prefix + ordered + live.index.displayedItems).distinctBy(AnimeSubject::id)
+                if (shown == live.index.displayedItems) return@withContext
+                publish(live.copy(index = live.index.copy(previewItems = shown)), regroup = true,
+                    replacesItems = live.index.displayedItems.any { it.id == subject.id && it != subject })
+            }
             try {
-                if (page == 1) {
+                if (page == 1 && previous.displayedItems.isEmpty()) {
                     val cached = if (state.catalogProvider == AnimeDiscoveryProvider.DOUBAN)
                         douban.cachedSearch(state.query, page)
                     else metadata.cachedBrowse(AnimeBrowseMode.POPULAR, state.query, page, null, "", null)
                     if (!current()) return@launch
-                    if (cached != null && cached.page == page) {
+                    if (cached != null && cached.page == page && cached.items.isNotEmpty()) {
                         val live = mutableState.value
                         publish(live.copy(index = live.index.copy(items = cached.items)), regroup = true)
                     }
@@ -259,26 +277,27 @@ internal class AnimeUnifiedSearch(
                 val result = withTimeoutOrNull(if (state.catalogProvider == AnimeDiscoveryProvider.DOUBAN)
                     CATALOG_TIMEOUT_MILLIS else SEARCH_TIMEOUT_MILLIS) {
                     if (state.catalogProvider == AnimeDiscoveryProvider.DOUBAN)
-                        douban.search(state.query, page, forceRefresh)
+                        douban.search(state.query, page, forceRefresh, onVerified = if (state.indexOnly) null else ::showVerified)
                     else metadata.browse(AnimeBrowseMode.POPULAR, state.query, page, null, "", null, forceRefresh = forceRefresh)
                 } ?: error("番剧资料搜索超时，请重试。")
                 check(result.page == page) { "番剧资料返回了不同页码。" }
-                val subject = if (page == 1) withContext(Dispatchers.Default) {
-                    exactIndexSubject(state.query, result.items)
+                val aliases = if (page == 1) withContext(Dispatchers.Default) {
+                    val subject = exactIndexSubject(state.query, result.items)
+                    subject to bodySourceSearchTerms(state.query, subject?.let { listOf(it.title, it.originalTitle) }.orEmpty())
                 } else null
                 if (!current()) return@launch
-                if (page == 1) {
-                    firstPageIndexSubject = subject
-                    firstPageIndexTerms = bodySourceSearchTerms(state.query,
-                        subject?.let { listOf(it.title, it.originalTitle) }.orEmpty())
+                if (aliases != null) {
+                    firstPageIndexSubject = aliases.first
+                    firstPageIndexTerms = aliases.second
                 }
-                val prefix = if (page == 1) emptyList() else previous.completedItems
                 val shown = (prefix + result.items).distinctBy(AnimeSubject::id)
-                publish(mutableState.value.copy(index = AnimeSearchIndex(
+                val live = mutableState.value
+                publish(live.copy(index = AnimeSearchIndex(
                     items = shown,
                     page = if (result.error == null) page else previous.page,
                     hasMore = result.hasMore, error = result.error,
-                    completedItems = if (result.error == null) shown else prefix)), regroup = true)
+                    completedItems = if (result.error == null) shown else prefix)),
+                    regroup = shown != live.index.displayedItems, replacesItems = live.index.displayedItems.isNotEmpty())
                 if (page == 1) firstPageAttempts.keys.toList().forEach { sourceId ->
                     repository.provider(sourceId)?.let(::retryWithIndexTerms)
                 }
@@ -292,6 +311,8 @@ internal class AnimeUnifiedSearch(
                 }
             }
         }
+        indexJob = job
+        job.start()
     }
 
     private fun requestSource(provider: AnimeProvider) = requestSource(provider, emptyList())
@@ -401,7 +422,7 @@ internal class AnimeUnifiedSearch(
                 val hasMore = provider.supportsSearchPagination && found.isNotEmpty() && page < Int.MAX_VALUE &&
                     (added || overlappingPages.add(provider.id))
                 publishSource(previous.copy(items = items, page = page,
-                    hasMore = hasMore, error = null), regroup = items != previous.items)
+                    hasMore = hasMore, error = null), regroup = items != previous.items, replacesItems = previous.items.isNotEmpty())
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
@@ -466,32 +487,47 @@ internal class AnimeUnifiedSearch(
         return bodySourceSearchTerms(term, aliases)
     }
 
-    private fun publishSource(row: AnimeSourceResult, regroup: Boolean = false) {
+    private fun publishSource(row: AnimeSourceResult, regroup: Boolean = false, replacesItems: Boolean = false) {
         val state = mutableState.value
-        publish(state.copy(sources = state.sources.map { if (it.providerId == row.providerId) row else it }), regroup)
+        publish(state.copy(sources = state.sources.map { if (it.providerId == row.providerId) row else it }), regroup, replacesItems)
     }
 
-    private fun publish(state: AnimeUnifiedSearchState, regroup: Boolean = false) {
+    private fun publish(state: AnimeUnifiedSearchState, regroup: Boolean = false, replacesItems: Boolean = false) {
         if (!regroup) {
             mutableState.value = state
             return
         }
-        val revision = ++groupingRevision
-        groupingJob?.cancel()
-        if (state.indexOnly) {
-            mutableState.value = state.copy(groups = state.index.items.map { AnimeSearchGroup("subject:${it.id}", it) },
-                grouping = false)
+        groupingRevision++
+        if (replacesItems) groupingReplacement = groupingRevision
+        val subjects = state.index.displayedItems
+        if (state.indexOnly || subjects.size <= 1 && state.groups.isEmpty() && state.sources.all { it.items.isEmpty() }) {
+            groupingJob?.cancel()
+            mutableState.value = state.copy(groups = subjects.map { AnimeSearchGroup("subject:${it.id}", it) }, grouping = false)
             return
         }
         mutableState.value = state.copy(grouping = true)
-        groupingJob = scope.launch {
-            val groups = withContext(Dispatchers.Default) {
-                groupAnimeSearch(state.index.items, state.sources, state.groups, state.query)
-            }
-            if (revision == groupingRevision) {
-                mutableState.value = mutableState.value.copy(groups = groups, grouping = false)
+        if (groupingJob?.isActive == true) return
+        // Source and catalogue responses may arrive during a full title match. Keep one worker and
+        // pick up the newest snapshot without starting overlapping CPU work for every verified row.
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            while (true) {
+                val revision = groupingRevision
+                val input = mutableState.value
+                val groups = withContext(Dispatchers.Default) {
+                    groupAnimeSearch(input.index.displayedItems, input.sources, input.groups, input.query)
+                }
+                // A newer addition can enrich these cards next pass. A replacement may have
+                // withdrawn a card or its identity, so never publish a match predating it.
+                if (revision >= groupingReplacement) {
+                    val complete = revision == groupingRevision
+                    if (complete) groupingJob = null
+                    mutableState.value = mutableState.value.copy(groups = groups, grouping = !complete)
+                    if (complete) return@launch
+                }
             }
         }
+        groupingJob = job
+        job.start()
     }
 
     private fun sourceKey(provider: AnimeProvider): Source? = runCatching {

@@ -38,7 +38,7 @@ internal class SourceHttp(
         synchronized(transportLock) { routedClients.toList() }.forEach { it.cancelAll() }
     }
     companion object {
-        private const val MAX_TEXT_BYTES = 8L * 1024 * 1024
+        const val MAX_TEXT_BYTES = 8L * 1024 * 1024
         private val sharedPauses = ConcurrentMap<String, Long>()
         private val ACCOUNT_ERROR_CODES = setOf(209, 210, 400, 401, 403, 422, 429)
     }

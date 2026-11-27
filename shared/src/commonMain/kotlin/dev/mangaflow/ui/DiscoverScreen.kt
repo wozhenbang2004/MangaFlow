@@ -106,6 +106,7 @@ import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.snapshotFlow
@@ -227,6 +228,7 @@ fun DiscoverScreen(
     onRetrySourceFilters: (() -> Unit)? = null,
     adultProfile: Boolean = false,
     active: Boolean = true,
+    prepareNextPage: (suspend (BrowseState) -> Unit)? = null,
 ) {
     val browse = if (!state.isSearch) state else backgroundState
     val browseKey = browseContentKey(browse)
@@ -291,6 +293,7 @@ fun DiscoverScreen(
                 active = unobscured && selectedPane,
                 canAutoAdvance = canAutoAdvance,
                 onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
+                prepareNextPage = prepareNextPage,
                 onManageSources = onManageSources, onExplore = onExplore,
                 sourceHeader = sourceHeader, onRetrySourceFilters = onRetrySourceFilters.takeIf { selectedPane },
                 adultProfile = adultProfile,
@@ -471,12 +474,19 @@ internal fun DiscoverySearchResults(
     BrowseCoverWarmup(search.items, repository,
         contentActive && showResults, retainedResults)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val searchTail = if (desktopMainContent && !adultProfile) remember(search.items) { browsePageTail(search.items, Manga::id) }
+        else emptyMap()
     if (desktopMainContent) DesktopBrowsePagination(search,
         enabled = contentActive && showResults,
         nearEnd = { count ->
             val info = retainedResults.layoutInfo
-            info.totalItemsCount == count + 1 &&
+            if (adultProfile) info.totalItemsCount == count + 1 &&
                 (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 5
+            else !retainedResults.lastScrolledBackward && (retainedResults.lastScrolledForward || !retainedResults.canScrollForward) &&
+                nearBrowsePage(info.visibleItemsInfo, searchTail, {
+                    it.contentType == "search-result" && it.size > 0 && it.offset < info.viewportEndOffset &&
+                        it.offset + it.size > info.viewportStartOffset
+                }, { it.key })
         }, onMore = onMore)
     CompositionLocalProvider(LocalBrowseWarmupEnabled provides contentActive) {
     BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
@@ -910,6 +920,7 @@ private fun DiscoveryPane(
     onRetry: () -> Unit,
     onMore: () -> Unit,
     onManageSources: (() -> Unit)?,
+    prepareNextPage: (suspend (BrowseState) -> Unit)?,
     onExplore: (() -> Unit)?,
     sourceHeader: (@Composable () -> Unit)?,
     onRetrySourceFilters: (() -> Unit)?,
@@ -1022,13 +1033,19 @@ private fun DiscoveryPane(
         else -> maxWidth
     }
     val inset = sidePadding + ((maxWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
-    if (desktop) DesktopBrowsePagination(state, enabled = active,
+    if (!desktop && !adultProfile && prepareNextPage != null)
+        PrepareDiscoveryPage(state, grid, active && !layoutPresent, prepareNextPage)
+    val bookTail = if (desktop && !adultProfile) remember(state.items) { browsePageTail(state.items, Manga::id) }
+        else emptyMap()
+    if (desktop) DesktopBrowsePagination(state, enabled = active && !layoutPresent,
         nearEnd = { count ->
             val info = grid.layoutInfo
             val chromeItems = 1 + (if (ranking && !indexed) 0 else 1) + (if (showFeatured && !adultProfile) 1 else 0) +
                 (if (sourceHeader == null) 0 else 1) +
                 (if (ranking && aggregateAdult) booksBySource.size else 0)
-            info.totalItemsCount == count + chromeItems &&
+            if (!adultProfile) !grid.lastScrolledBackward && (grid.lastScrolledForward || !grid.canScrollForward) &&
+                info.nearBrowsePage(bookTail) { it == "browse-book" || it == "ranking-book" }
+            else info.totalItemsCount == count + chromeItems &&
                 (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >=
                     info.totalItemsCount - visibleColumns * 2 - 1
         }, onMore = onMore)
@@ -1515,16 +1532,26 @@ private fun DesktopBrowsePagination(
     val latestMore by rememberUpdatedState(onMore)
     val contentKey = remember(state) { browseContentKey(state) }
     val latestContentKey by rememberUpdatedState(contentKey)
-    LaunchedEffect(contentKey, state.updatedAt) {
+    // Federated search timestamps every completed source round, even if it added no work.
+    val updatedPerRound = state.isFederatedSearch && !state.sourceScope.startsWith("scoped:")
+    LaunchedEffect(contentKey, if (updatedPerRound) 0L else state.updatedAt) {
         var requestedCount = 0
+        var firstPageAt = 0L
         snapshotFlow {
             val current = latestState
             val count = current.items.size
             val eligible = latestEnabled && latestContentKey == contentKey && count > 0 &&
                 current.hasMore && !current.loading && !current.loadingMore && !current.refreshing &&
                 current.error == null && current.failedPage == null && latestNearEnd(count)
-            if (eligible) count else 0
-        }.collect { count ->
+            val first = if (updatedPerRound && current.page == 0) current.updatedAt else 0L
+            first to when {
+                updatedPerRound && (current.loading || current.refreshing) -> -1
+                eligible -> count
+                else -> 0
+            }
+        }.collect { (first, count) ->
+            if (count < 0 || first != 0L && first != firstPageAt) requestedCount = 0
+            if (first != 0L) firstPageAt = first
             if (count > requestedCount) {
                 requestedCount = count
                 latestMore()
@@ -2263,6 +2290,8 @@ internal fun MangaBrowseSource(manga: Manga, modifier: Modifier = Modifier,
     }
 }
 
+internal val LocalMangaCoverFade = staticCompositionLocalOf { true }
+
 @Composable
 internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Modifier,
     scale: ContentScale = ContentScale.Crop, onReady: (() -> Unit)? = null) =
@@ -2273,7 +2302,7 @@ internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Mod
     decodeSize: IntSize?, scale: ContentScale = ContentScale.Crop, onReady: (() -> Unit)? = null) {
     val context = LocalContext.current
     val desktop = platformKind == PlatformKind.DESKTOP
-    val fade = !desktop && LocalMotionEnabled.current
+    val fade = !desktop && LocalMangaCoverFade.current && LocalMotionEnabled.current
     val identity = mangaCoverIdentity(manga, repository)
     val source = remember(manga.id) { dev.mangaflow.data.SourceKeys.decodeManga(manga.id).sourceId }
     val target = if (decodeSize != null) {
@@ -2282,14 +2311,14 @@ internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Mod
         if (next != largest) SideEffect { largest = next }
         next
     } else null
-    val request = remember(context, source, identity, desktop, fade, target) {
+    val request = remember(context, source, identity, fade, target) {
         identity.url.takeIf(String::isNotBlank)?.let { url ->
             val memoryKey = "manga-cover:" + identity.cacheKey
             ImageRequest.Builder(imagePlatformContext(context)).data(url)
                 .sourceNetwork(source)
                 .memoryCacheKey(memoryKey)
+                .placeholderMemoryCacheKey(memoryKey)
                 .apply {
-                    if (desktop) placeholderMemoryCacheKey(memoryKey)
                     if (target != null) size(target.width, target.height)
                 }
                 .diskCacheKey(identity.cacheKey)
@@ -2299,9 +2328,11 @@ internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Mod
         }
     }
     Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-        Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f), modifier = Modifier.size(25.dp))
+        var needsPlaceholder by remember(context, manga.id, source, identity) { mutableStateOf(true) }
+        if (needsPlaceholder) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .35f), modifier = Modifier.size(25.dp))
         if (request == null) return@Box
-        if (desktop) key(manga.id, source, identity) {
+        key(manga.id, source, identity) {
             var displayed by remember { mutableStateOf<Painter?>(null) }
             AsyncImage(model = request, contentDescription = null, contentScale = scale, modifier = Modifier.fillMaxSize(),
                 transform = { state ->
@@ -2311,13 +2342,13 @@ internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Mod
                         else -> state
                     }
                 }, onState = { state ->
+                    needsPlaceholder = state.painter == null
                     if (state is AsyncImagePainter.State.Success) {
-                        displayed = state.painter
+                        if (desktop) displayed = state.painter
                         onReady?.invoke()
                     }
                 })
-        } else AsyncImage(model = request, contentDescription = null, contentScale = scale,
-            modifier = Modifier.fillMaxSize(), onSuccess = { onReady?.invoke() })
+        }
     }
 }
 

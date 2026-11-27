@@ -62,28 +62,38 @@ internal fun AnimeEpisodeDiscussionContent(visible: Boolean, episode: AnimeEpiso
         reference != null && discussion.workContext?.let { it.subjectId == episode.subjectId && it.referenceId == reference } == true
     }
     // Playback retains its opening snapshot. Display-only catalogue updates must not erase the same exact episode.
-    val currentEpisode = catalogue.singleOrNull { it.id == episode.id && it.subjectId == episode.subjectId && it.kind == episode.kind }
+    val currentEpisode = remember(catalogue, episode.id, episode.subjectId, episode.kind) {
+        catalogue.singleOrNull { it.id == episode.id && it.subjectId == episode.subjectId && it.kind == episode.kind }
+    }
     val exactReference = currentEpisode?.metadataEpisodeId?.let { id ->
         id.removePrefix("bangumi:").toIntOrNull()?.takeIf { it > 0 && id == "bangumi:$it" }
     } != null && currentEpisode?.metadataSubjectId == referenceId
     val target = currentEpisode?.takeIf { referenceId != null && contextKey != null &&
         (!it.subjectId.startsWith("douban:") || exactReference) }
     val canRead = target != null
-    val requestKey = listOf(episode.subjectId, episode.id, referenceId, contextKey,
+    val requestKey = listOf(episode.subjectId, episode.id, referenceId, contextKey, target?.kind?.name,
         target?.metadataEpisodeId, target?.metadataSubjectId)
-    var result by remember(requestKey, catalogue) { mutableStateOf<AnimeEpisodeDiscussion?>(null) }
-    var loading by remember(requestKey, catalogue) { mutableStateOf(canRead) }
-    var error by remember(requestKey, catalogue) { mutableStateOf<String?>(null) }
+    // Only source-native numbering needs the other episodes to prove a unique match.
+    val matchingCatalogue = if (target != null && target.subjectId != referenceId &&
+        !target.subjectId.startsWith("douban:")) catalogue else null
+    var result by remember(requestKey, matchingCatalogue) { mutableStateOf<AnimeEpisodeDiscussion?>(null) }
+    var loading by remember(requestKey, matchingCatalogue) { mutableStateOf(canRead) }
+    var error by remember(requestKey, matchingCatalogue) { mutableStateOf<String?>(null) }
     var revision by remember(requestKey) { mutableIntStateOf(0) }
+    var consumedRefresh by remember(requestKey) { mutableIntStateOf(0) }
     var filterOpen by rememberSaveable(requestKey) { mutableStateOf(false) }
     var filterChanged by rememberSaveable(requestKey) { mutableStateOf(false) }
 
-    LaunchedEffect(visible, requestKey, catalogue, revision) {
+    LaunchedEffect(visible, requestKey, matchingCatalogue, revision) {
         if (!visible || target == null) return@LaunchedEffect
+        val force = revision != consumedRefresh
+        consumedRefresh = revision
         loading = true
         error = null
         try {
-            val incoming = controller.discussion.readEpisode(target, catalogue, force = revision > 0)
+            val incoming = controller.discussion.readEpisode(target, catalogue, force) { saved ->
+                if (result == null) result = saved
+            }
             currentCoroutineContext().ensureActive()
             result = incoming
         } catch (cancel: CancellationException) {

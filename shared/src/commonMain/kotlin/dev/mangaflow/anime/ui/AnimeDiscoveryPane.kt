@@ -181,6 +181,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                             }
                         },
                         onMore = { if (ownsCurrentFeed()) controller.loadMoreDiscovery(key) },
+                        onPreparePage = { if (ownsCurrentFeed()) controller.prepareCachedDiscoveryPage(key) },
                         onClearTag = { feed?.let { configure(it.query.withTags(emptyList())) } },
                         onShowFullWeek = { feed?.let { configure(it.query.copy(weekday = null)) } },
                         catalogueHeader = if (pinnedControls || catalogueHeader == null) null else ({ width -> catalogueHeader(width, false) }),
@@ -270,6 +271,7 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
         onOpen = onOpen, onScores = onScores, onManage = onManage,
         onRefresh = controller::refreshDiscovery, onRetry = { controller.retryDiscovery(key) },
         onMore = { controller.loadMoreDiscovery(key) },
+        onPreparePage = { controller.prepareCachedDiscoveryPage(key) },
         onClearTag = { controller.configureDiscovery(AnimeDiscoveryTab.HOME, query.withTags(emptyList())) },
         featured = featured, contentTopPadding = contentTopPadding,
         watchShelf = if (recent.isEmpty()) null else {
@@ -424,6 +426,7 @@ internal fun AnimeTagSearch(state: AnimeScreenState, controller: AnimeController
                 onRefresh = { if (currentFeed() != null) controller.refreshDiscoveryTags() },
                 onRetry = { if (currentFeed() != null) controller.retryDiscovery(key) },
                 onMore = { if (currentFeed() != null) controller.loadMoreDiscovery(key) },
+                onPreparePage = { if (currentFeed() != null) controller.prepareCachedDiscoveryPage(key) },
                 onClearTag = { apply(query.withTags(emptyList())) })
         }
     }
@@ -506,7 +509,7 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
     scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, modifier: Modifier, active: Boolean,
     onOpen: (AnimeDiscoveryItem) -> Unit, onScores: (AnimeDiscoveryItem) -> Unit,
     onManage: (AnimeSubject) -> Unit, onRefresh: () -> Unit,
-    onRetry: () -> Unit, onMore: () -> Unit, onClearTag: () -> Unit, onShowFullWeek: (() -> Unit)? = null,
+    onRetry: () -> Unit, onMore: () -> Unit, onPreparePage: () -> Unit, onClearTag: () -> Unit, onShowFullWeek: (() -> Unit)? = null,
     featured: List<AnimeFeaturedEntry> = emptyList(),
     watchShelf: (@Composable () -> Unit)? = null, homeShortcuts: (@Composable () -> Unit)? = null,
     catalogueHeader: (@Composable (Dp) -> Unit)? = null,
@@ -556,17 +559,15 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
         val viewportHeight = maxHeight
         val wideFeature = featured.isNotEmpty() && readableWidth >= 600.dp * fontScale &&
             viewportHeight - contentTopPadding >= 190.dp * fontScale
-        if (desktop) {
-            val trailingKeys = remember(works, columns) { works.takeLast(columns * 2).map { it.key }.toSet() }
-            AnimeBrowsePagination(key = key to feed?.query, refreshKey = feed?.fetchedAt,
-                itemCount = feed?.items?.size ?: 0, enabled = active && pagingAvailable,
-                nearEnd = {
-                    val info = scroll.layoutInfo
-                    val last = info.visibleItemsInfo.lastOrNull()
-                    last != null && last.index >= info.totalItemsCount - columns * 2 - 1 &&
-                        (trailingKeys.isEmpty() || info.visibleItemsInfo.any { it.key in trailingKeys })
-                }, onMore = onMore)
-        }
+        val trailingKeys = remember(works, columns) { works.takeLast(columns * 2).map { it.key }.toSet() }
+        AnimeBrowsePagination(key = key to feed?.query, refreshKey = feed?.fetchedAt,
+            itemCount = feed?.items?.size ?: 0, enabled = active && pagingAvailable,
+            nearEnd = {
+                val info = scroll.layoutInfo
+                val last = info.visibleItemsInfo.lastOrNull()
+                last != null && last.index >= info.totalItemsCount - columns * 2 - 1 &&
+                    (trailingKeys.isEmpty() || info.visibleItemsInfo.any { it.key in trailingKeys })
+            }, onMore = if (desktop) onMore else onPreparePage)
         LazyVerticalGrid(GridCells.Fixed(columns), state = scroll, modifier = Modifier.fillMaxSize()
             .then(if (desktop) Modifier else Modifier.bottomPullLoad(pull)),
             userScrollEnabled = active,

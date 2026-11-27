@@ -1418,9 +1418,11 @@ class UnifiedMangaRepository(
         rawCatalogs[mangaId]?.takeIf { mangaId in nativeCatalogIds }
     }
 
-    /** Retain known work metadata so additional sources remain usable after a primary-source failure. */
+    /** A retained directory can fill a missing base, including while a source request is in flight. */
     fun retainWork(detail: MangaDetail) {
-        rememberRaw(detail)
+        synchronized(unifiedMangaRepositoryStateLock) {
+            if (detail.manga.id !in nativeCatalogIds) rememberRaw(detail)
+        }
     }
 
     /** Explicit retry after linking a source; failures are kept per linked entry. */
@@ -1442,13 +1444,13 @@ class UnifiedMangaRepository(
     }
 
     override suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> {
-        val loaded = loadPages(mangaId, chapterId, forceRefresh)
+        val loaded = readerPages(mangaId, chapterId, forceRefresh)
         storageCache?.registerPages(mangaId, chapterId, SourceKeys.decodeChapter(mangaId, chapterId).sourceId,
             loaded, imageHeaders(mangaId, chapterId))
         return loaded
     }
 
-    private suspend fun loadPages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> {
+    override suspend fun readerPages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> {
         currentCoroutineContext().ensureActive()
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         if (ref.sourceId == "copy") return copy.pages(ref.mangaId, ref.chapterId, forceRefresh)

@@ -1,5 +1,6 @@
 package dev.mangaflow.anime
 
+import dev.mangaflow.anime.sources.AnimeCachedDiscoveryPage
 import dev.mangaflow.anime.sources.AnimeDiscoveryRepository
 import dev.mangaflow.anime.sources.discoveryRetryDelay
 import dev.mangaflow.net.DownloadRouteSnapshot
@@ -7,7 +8,9 @@ import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -30,6 +33,7 @@ internal class AnimeDiscoveryLoads(
         var revalidatePages = 1
         var job: Job? = null
         var recovery: Job? = null
+        var nextCachedPage: Deferred<AnimeCachedDiscoveryPage?>? = null
     }
 
     private data class RetryRequest(val page: Long, val append: Boolean, val lastPage: Long, val error: String)
@@ -53,6 +57,8 @@ internal class AnimeDiscoveryLoads(
         leaving.forEach { key ->
             slots[key]?.let { slot ->
                 slot.sources.forEach { source ->
+                    source.nextCachedPage?.cancel()
+                    source.nextCachedPage = null
                     source.recovery?.cancel()
                     source.recovery = null
                     source.feed = source.feed.copy(retryScheduled = false,
@@ -76,10 +82,13 @@ internal class AnimeDiscoveryLoads(
             ++source.generation
             source.job?.cancel()
             source.recovery?.cancel()
+            source.nextCachedPage?.cancel()
             source.job = null
             source.recovery = null
+            source.nextCachedPage = null
             source.feed = source.feed.copy(loading = false, loadingMore = false, retryScheduled = false, retryAttempt = 0)
         }
+        if (previous.cacheEpoch != repository.cacheEpoch) return
         val identity = RetainedKey(key, previous.query)
         retained.remove(identity)
         retained[identity] = previous
@@ -109,7 +118,7 @@ internal class AnimeDiscoveryLoads(
     }
 
     fun retry(key: String) {
-        val slot = slot(key) ?: return
+        val slot = loadedSlot(key) ?: return
         val failed = slot.sources.filter { it.feed.error != null || it.feed.moreError != null }
         failed.filter { it.job?.isActive != true }.forEach { source ->
             load(key, slot, source, append = source.feed.moreError != null, force = true,
@@ -118,7 +127,7 @@ internal class AnimeDiscoveryLoads(
     }
 
     fun more(key: String) {
-        val slot = slot(key) ?: return
+        val slot = loadedSlot(key) ?: return
         val eligible = slot.sources.filter { it.feed.hasMore && it.job?.isActive != true && it.feed.error == null }
         val ready = if (slot.sources.size == 1) eligible else eligible.filter { it.feed.moreError == null }
         ready.forEach { source ->
@@ -126,9 +135,36 @@ internal class AnimeDiscoveryLoads(
         }
     }
 
+    private fun loadedSlot(key: String): Slot? {
+        val slot = slot(key) ?: return null
+        if (slot.sources.any { it.requested }) return slot
+        // The displayed retry or pagination action may predate a cache clear. Restart at page one.
+        if (visibleFeeds[key]?.query == slot.query) ensure(key)
+        return null
+    }
+
+    /** Approaching the end of a touch grid may decode one existing page per source. Only more() advances it. */
+    fun prepareCachedPage(key: String) {
+        val slot = slots[key] ?: return
+        if (visibleFeeds[key]?.query != slot.query || currentFeed(key)?.query != slot.query ||
+            slot.cacheEpoch != repository.cacheEpoch) return
+        slot.sources.forEach { source ->
+            val feed = source.feed
+            val route = source.route ?: return@forEach
+            if (source.nextCachedPage != null || source.job?.isActive == true || !feed.hasMore ||
+                feed.page !in 1 until Int.MAX_VALUE || feed.error != null || feed.moreError != null ||
+                routeFor(source.query) != route) return@forEach
+            source.nextCachedPage = scope.async {
+                try { repository.cachedPage(source.query, feed.page + 1, route, freshOnly = true) }
+                catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) { null }
+            }
+        }
+    }
+
     private fun slot(key: String): Slot? {
         val query = currentFeed(key)?.query ?: return null
-        slots[key]?.takeIf { it.query == query }?.let { return it }
+        slots[key]?.takeIf { it.query == query && it.cacheEpoch == repository.cacheEpoch }?.let { return it }
         reset(key)
         val queries = listOf(query.copy(combined = false)) + listOfNotNull(animeDiscoveryPeerQuery(query))
         val saved = retained.remove(RetainedKey(key, query))?.takeIf { candidate ->
@@ -164,6 +200,9 @@ internal class AnimeDiscoveryLoads(
             source.retryAfterVisit = null
         } else if (!reopening) source.recoveryAttempts++
         val request = ++source.generation
+        val prepared = source.nextCachedPage?.takeIf { paging && !force }
+        if (prepared == null) source.nextCachedPage?.cancel()
+        source.nextCachedPage = null
         source.requested = true
         source.route = route
         source.retryAt = null
@@ -175,7 +214,7 @@ internal class AnimeDiscoveryLoads(
             error = if (paging) before.error else null, moreError = null,
             retryScheduled = false, retryAttempt = if (reopening) 1 else source.recoveryAttempts)
         publish(key, slot)
-        fun ownsRequest() = slots[key] === slot && currentFeed(key)?.query == slot.query &&
+        fun ownsRequest() = slots[key] === slot && slot.cacheEpoch == repository.cacheEpoch && currentFeed(key)?.query == slot.query &&
             source.generation == request && routeFor(query) == route
         fun update(transform: (AnimeDiscoveryFeed) -> AnimeDiscoveryFeed) {
             if (!ownsRequest()) return
@@ -186,11 +225,19 @@ internal class AnimeDiscoveryLoads(
             var cancelled = false
             try {
                 require(page in 1..Int.MAX_VALUE.toLong()) { "分页位置已超出来源支持范围。" }
-                if (!paging && before.items.isEmpty()) repository.cached(query, route = route)?.let { cached ->
-                    update { it.copy(items = cached.items, page = cached.page, hasMore = cached.hasMore,
-                        fetchedAt = cached.fetchedAt) }
+                val cached = when {
+                    prepared != null -> prepared.await()
+                    !paging && before.items.isEmpty() -> repository.cachedPage(query, page.toInt(), route)
+                    else -> null
                 }
-                var result = repository.browse(query, page.toInt(), forceRefresh = force, route = routeResult.getOrThrow())
+                if (!ownsRequest()) return@launch
+                val fresh = cached?.takeIf { !force && repository.canReuse(it, query, page.toInt(), route) }?.value
+                if (!paging && fresh == null && cached != null) {
+                    val preview = cached.value
+                    update { it.copy(items = preview.items, page = preview.page, hasMore = preview.hasMore,
+                        fetchedAt = preview.fetchedAt) }
+                }
+                var result = fresh ?: repository.browse(query, page.toInt(), forceRefresh = force, route = routeResult.getOrThrow())
                 check(result.page == page.toInt()) { "来源返回了不同的页码。" }
                 val replacement = result.items.toMutableList()
                 var fetchedAt = result.fetchedAt
@@ -234,9 +281,12 @@ internal class AnimeDiscoveryLoads(
                     error = if (paging) it.error else message, moreError = message.takeIf { paging },
                     retryScheduled = false, retryAttempt = 0) }
             } finally {
+                prepared?.cancel()
                 if (source.generation == request) {
                     source.job = null
-                    if (!cancelled && ownsRequest()) scheduleRecovery(key, slot, source)
+                    if (!cancelled && slots[key] === slot && slot.cacheEpoch != repository.cacheEpoch &&
+                        currentFeed(key)?.query == slot.query && visibleFeeds[key]?.query == slot.query) ensure(key)
+                    else if (!cancelled && ownsRequest()) scheduleRecovery(key, slot, source)
                 }
             }
         }

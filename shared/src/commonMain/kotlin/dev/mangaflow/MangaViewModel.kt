@@ -44,6 +44,8 @@ import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.RankAudience
 import dev.mangaflow.data.Manga
+import dev.mangaflow.data.MangaPage
+import dev.mangaflow.data.SourceHttp
 import dev.mangaflow.data.MangaTag
 import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.data.CopySearchTags
@@ -424,6 +426,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private val messages = Channel<String>(Channel.BUFFERED)
     val events = messages.receiveAsFlow()
     private var browseJob: Job? = null
+    private class PreparedDiscoveryPage(val result: Deferred<MangaPage>, val matches: () -> Boolean,
+        val sameSource: () -> Boolean)
+    private var preparedDiscoveryPage: PreparedDiscoveryPage? = null
+    private var lastDiscoveryPreparation = -1L
     private val metricJobs = mutableMapOf<String, Job>()
     private data class MetricReference(val manga: Manga, val count: Int)
     private val metricReferences = mutableMapOf<String, MetricReference>()
@@ -1010,13 +1016,69 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         browseJob = viewModelScope.launch { loadBrowse(state, 0, requestId, generation, forceRefresh = true) }
     }
 
+    /** A visible mobile feed may stage one page. Only the normal release/footer action publishes it. */
+    internal suspend fun prepareDiscoveryPage(expected: BrowseState) {
+        if (expected.isSearch || expected.items.isEmpty() || !expected.hasMore) return
+        val request = browseRequestId
+        val generation = browseCache.generation
+        val route = DownloadRoutingStore.sourceRevision("copy")
+        val configuration = services.sourceConfiguration.value
+        val sameSource = { configuration == services.sourceConfiguration.value &&
+            route == DownloadRoutingStore.sourceRevision("copy") }
+        val matches = {
+            val current = _browse.value
+            request == browseRequestId && generation == browseCache.generation && sameSource() &&
+                !current.isSearch && current.cacheKey == expected.cacheKey && current.page == expected.page &&
+                current.hasMore && !current.loading && !current.refreshing && !current.loadingMore &&
+                current.error == null && current.failedPage == null
+        }
+        if (!matches() || lastDiscoveryPreparation == request) return
+        var owned: PreparedDiscoveryPage? = null
+        try {
+            val ready = withTimeoutOrNull(12_000L) {
+                ExperiencePolicyStore.get(application).withBrowseWarmupAdmission("copy", estimatedBytes = SourceHttp.MAX_TEXT_BYTES) {
+                    if (!matches() || lastDiscoveryPreparation == request) return@withBrowseWarmupAdmission false
+                    preparedDiscoveryPage?.result?.cancel()
+                    lastDiscoveryPreparation = request
+                    val result = viewModelScope.async(start = CoroutineStart.LAZY) {
+                        foregroundRequest("漫画列表") {
+                            community.browse(expected.mode, expected.period, expected.audience, expected.page + 1)
+                        }
+                    }
+                    val slot = PreparedDiscoveryPage(result, matches, sameSource)
+                    owned = slot
+                    preparedDiscoveryPage = slot
+                    result.await()
+                    true
+                }
+            }
+            if (ready == true) delay(30_000L)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            // A speculative failure leaves the current list and the normal demand path intact.
+        } finally {
+            if (owned != null && preparedDiscoveryPage === owned) {
+                preparedDiscoveryPage = null
+                owned?.result?.cancel()
+            }
+        }
+    }
+
     fun loadMore() {
         val state = _browse.value
         if (state.loading || state.refreshing || state.loadingMore || !state.hasMore || state.error != null) return
+        val staged = preparedDiscoveryPage
+        preparedDiscoveryPage = null
+        val prepared = staged?.takeIf { it.matches() && !it.result.isCancelled }
+        if (prepared == null) staged?.result?.cancel()
         _browse.update { it.copy(loadingMore = true, error = null, failedPage = null) }
         val requestId = ++browseRequestId
         val generation = browseCache.generation
-        browseJob = viewModelScope.launch { loadBrowse(state, state.page + 1, requestId, generation) }
+        browseJob = viewModelScope.launch {
+            try { loadBrowse(state, state.page + 1, requestId, generation, prepared = prepared) }
+            finally { prepared?.result?.cancel() }
+        }
     }
 
     fun retryBrowse() {
@@ -1052,7 +1114,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long,
-        forceRefresh: Boolean = false) {
+        forceRefresh: Boolean = false, prepared: PreparedDiscoveryPage? = null) {
         if (state.isFederatedSearch) {
             if (page == 0 && state.page > 0 && state.items.isNotEmpty()) {
                 refreshFederatedRange(state, requestId, generation, forceRefresh)
@@ -1064,8 +1126,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         try {
             val (result, replacement, loadedPage) = foregroundRequest("漫画列表") {
                 val query = state.query.trim()
-                var result = if (!state.isSearch) community.browse(state.mode, state.period, state.audience, page)
-                    else repository.search(query, state.searchTarget, state.selectedTags, page)
+                var result = when {
+                    prepared != null -> prepared.result.await().also {
+                        if (!prepared.sameSource()) throw SourceException("来源或线路已变更，请重新加载。")
+                    }
+                    !state.isSearch -> community.browse(state.mode, state.period, state.audience, page)
+                    else -> repository.search(query, state.searchTarget, state.selectedTags, page)
+                }
                 val replacement = result.items.toMutableList()
                 var loadedPage = result.nextPage?.minus(1) ?: page
                 if (page == 0 && state.items.isNotEmpty()) {
@@ -1752,6 +1819,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     throw RankedSourceIdentityMismatch()
             }
             var supplementaryStarted = false
+            var restoringDirectory: Job? = null
             try {
                 val offline = downloadedChapters(manga.id)
                 val (snapshot, retained, initialChapters) = cachedDetailForDisplay(manga.id, previous?.detail, offline)
@@ -1781,15 +1849,25 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     return@launch
                 }
                 if (retained == null) {
-                    // A stale saved directory stays readable while the real source is refreshed.
-                    val stored = readerCatalogs.read(manga.id)
-                    if (requestId != detailRequestId) return@launch
-                    if (stored != null) { checkRankedIdentity(stored.manga); repository.retainWork(stored) }
-                    if (stored != null) _detail.update { current ->
-                        if (current?.manga?.id != manga.id || requestId != detailRequestId) current
-                        else current.copy(detail = MangaDetail(current.manga,
-                            retainedChapters(stored.chapters, downloadedChapters(manga.id))))
+                    suspend fun restoreDirectory() {
+                        val stored = readerCatalogs.read(manga.id) ?: return
+                        if (requestId != detailRequestId) return
+                        checkRankedIdentity(stored.manga)
+                        repository.retainWork(stored)
+                        _detail.update { current ->
+                            if (current?.manga?.id != manga.id || requestId != detailRequestId || !current.loading) current
+                            else current.copy(detail = MangaDetail(current.manga,
+                                retainedChapters(stored.chapters, downloadedChapters(manga.id))))
+                        }
                     }
+                    // An ordinary direct opening can show its saved directory while the source is loading.
+                    // Ranked associations and adult source projections retain their identity-first ordering.
+                    if (rankedFrom != null || isAdultSource(manga.sourceId)) restoreDirectory() else restoringDirectory = launch {
+                        try { restoreDirectory() }
+                        catch (cancel: CancellationException) { throw cancel }
+                        catch (_: Exception) { /* The source still owns this opening when the optional copy is unreadable. */ }
+                    }
+                    if (requestId != detailRequestId) return@launch
                 }
                 val loaded = repository.detail(manga.id) { metadata ->
                     checkRankedIdentity(metadata)
@@ -1806,6 +1884,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 }
                 if (requestId != detailRequestId) return@launch
                 checkRankedIdentity(loaded.manga)
+                restoringDirectory?.cancel()
                 _detail.update { current ->
                     if (requestId != detailRequestId || current?.manga?.id != manga.id) current
                     else {
@@ -1829,6 +1908,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
+                // A fast network error must not drag an available offline directory out with it.
+                restoringDirectory?.join()
                 if (failure is RankedSourceIdentityMismatch && rankedFrom != null) {
                     if (requestId != detailRequestId) return@launch
                     try { siteRankingsRepository.forgetLink(rankedFrom, manga.id) }
@@ -2962,18 +3043,20 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val request = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
                 val local = manga.sourceUrl == LOCAL_SOURCE_URL
-                // Keep the exact stored source chapter; its projection can be large.
-                val snapshot = if (local) null else cachedDetailForDisplay(manga.id, null, emptyList()).first
+                val offline = if (local) downloadedChapters(manga.id) else knownDownloadChapters(manga.id)
+                // Reuse the directory already merged and ordered off Main, including saved chapters.
+                val prepared = if (local) null else cachedDetailForDisplay(manga.id, null, offline)
+                val snapshot = prepared?.first
                 val cached = snapshot?.detail
                 if (requestId != libraryOpenRequestId) return@launch
-                val offline = if (local) downloadedChapters(manga.id) else knownDownloadChapters(manga.id)
                 fun savedFallback(): Chapter {
                     val title = chapterTitle.ifBlank { "继续阅读" }
-                    if (!isAdultSource(manga.sourceId) || !SourceKeys.isEncoded(chapterId))
-                        return Chapter(chapterId, title, 0)
+                    if (!SourceKeys.isEncoded(chapterId)) return Chapter(chapterId, title, 0)
                     val ref = SourceKeys.decodeChapter(manga.id, chapterId)
-                    require(repository.sharesSourceProfile(manga.sourceId, ref.sourceId)) {
-                        "继续阅读所用版本的来源已变化，请进入作品详情重新选择。"
+                    if (isAdultSource(manga.sourceId) || ref.sourceId != manga.sourceId) {
+                        require(repository.sharesSourceProfile(manga.sourceId, ref.sourceId)) {
+                            "继续阅读所用版本的来源已变化，请进入作品详情重新选择。"
+                        }
                     }
                     val info = repository.sources.firstOrNull { it.id == ref.sourceId }
                     val version = ChapterVariant(ref.sourceId, info?.name ?: ref.sourceId, ref.mangaId, ref.chapterId,
@@ -2981,13 +3064,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     return Chapter(chapterId, title, 0, variants = listOf(version),
                         sourceId = ref.sourceId, sourceMangaId = ref.mangaId, sourceChapterId = ref.chapterId)
                 }
-                val chapter = cached?.chapters?.let { findSourceChapter(it, chapterId) }
+                val catalogChapter = cached?.chapters?.let { findSourceChapter(it, chapterId) }
+                val chapter = catalogChapter
                     ?: offline.firstOrNull { it.id == chapterId }
                     ?: fallback
                     ?: savedFallback()
-                val chapters = selectedChapters(retainedChapters(cached?.chapters.orEmpty(), offline), chapter)
-                val hasCurrentCatalog = cached?.chapters?.let { findSourceChapter(it, chapterId) != null } == true &&
-                    snapshot?.fresh == true
+                val chapters = selectedChapters(prepared?.third ?: retainedChapters(emptyList(), offline), chapter)
+                val hasCurrentCatalog = catalogChapter != null && snapshot?.fresh == true
                 val needsCatalog = if (local) offline.isEmpty() else !hasCurrentCatalog
                 // Detach before beginReading cancels previous navigation intents.
                 libraryOpenJob = null
@@ -3307,14 +3390,22 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                         }
                         _nextChapterPreparation.value = initial.copy(manifestQueued = true)
                         val upcoming = try {
-                            repository.cachedPages(owner, chapter.id) ?: withTimeout(manifestSeconds.toLong() * 1_000L) {
+                            // The foreground reader opens a saved page manifest even when only part of the chapter is on disk.
+                            val mayHaveStoredPages = downloads.loading.value || downloads.entries.value.any {
+                                it.manga.id == manga.id && it.chapter.id == chapter.id
+                            }
+                            val cached = if (mayHaveStoredPages) null else repository.cachedPages(owner, chapter.id)
+                            cached ?: withTimeout(manifestSeconds.toLong() * 1_000L) {
                                 policy.withPrefetchAdmission(source, 1_048_576L, { false }, onWaiting = { wait ->
                                     _nextChapterPreparation.update { value -> if (!currentSession()) value else initial.copy(
                                         phase = if (wait == null) ReaderNextChapterPreparationPhase.MANIFEST else ReaderNextChapterPreparationPhase.QUEUED,
                                         manifestQueued = wait != null, manifestActive = wait == null,
                                         reason = if (wait == null) null else "下一话目录等待准备名额或可用资源") }
                                 }) {
-                                    withTimeout(manifestSeconds.toLong() * 1_000L) { repository.pages(owner, chapter.id) }
+                                    withTimeout(manifestSeconds.toLong() * 1_000L) {
+                                        val stored = if (mayHaveStoredPages) downloads.storedPages(manga.id, chapter.id) else null
+                                        stored ?: repository.pages(owner, chapter.id)
+                                    }
                                 }
                             }
                         } catch (_: TimeoutCancellationException) {

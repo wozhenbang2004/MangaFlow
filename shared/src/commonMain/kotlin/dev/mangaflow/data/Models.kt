@@ -70,6 +70,9 @@ interface MangaRepository {
     suspend fun search(query: String, page: Int = 0): MangaPage
     suspend fun detail(mangaId: String): MangaDetail
     suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean = false): List<Page>
+    /** The active reader registers these pages with its own cache window as soon as they are published. */
+    suspend fun readerPages(mangaId: String, chapterId: String, forceRefresh: Boolean = false): List<Page> =
+        pages(mangaId, chapterId, forceRefresh)
     /** Download preparation must own its route; unsupported repositories never fall back to reading. */
     suspend fun prepareDownload(
         context: dev.mangaflow.platform.PlatformContext,

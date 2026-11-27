@@ -183,7 +183,7 @@ internal fun DesktopReadingHistory(
     history: List<ReadingProgress>, repository: MangaRepository, library: LibraryStore, listState: LazyListState,
     active: Boolean, onContinue: (ReadingProgress) -> Unit, onRemove: (String) -> Unit,
     modifier: Modifier, selection: String?, onSelect: (String) -> Unit,
-    onDetails: ((Manga) -> Unit)? = null, header: (@Composable () -> Unit)? = null,
+    onDetails: ((Manga) -> Unit)? = null, warmCovers: Boolean = false, header: (@Composable () -> Unit)? = null,
 ) {
     val positions = remember(history) {
         buildMap<String, Int>(history.size) {
@@ -211,6 +211,7 @@ internal fun DesktopReadingHistory(
     val colors = MaterialTheme.colorScheme
     val today = localToday()
     val groups = remember(history) { readingHistoryByDay(history) }
+    HistoryCoverWarmup(groups, repository, active && warmCovers, listState) { "work:" + it.sourceId + ":" + it.id }
     val focus = LocalFocusManager.current
     val motion = LocalMotionEnabled.current
     val placement = if (motion) spring<IntOffset>(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null

@@ -87,9 +87,9 @@ actual class UpdateManager private constructor(private val context: Context) {
     actual val automatic: Boolean get() = preferences.getBoolean("automatic", true)
 
     actual fun start() {
-        schedule()
         if (!started.compareAndSet(false, true)) return
         scope.launch {
+            schedule()
             recover()
             runCatching { AndroidTransferIntents.read(context, ApplicationTransferKind.UPDATE, "apk")
                 ?.takeIf { it.resumable }?.let { queuedWork = AndroidTransferIntents.schedule(context, it)?.workId } }
@@ -104,7 +104,7 @@ actual class UpdateManager private constructor(private val context: Context) {
 
     actual fun setAutomatic(enabled: Boolean) {
         preferences.edit().putBoolean("automatic", enabled).apply()
-        schedule()
+        scope.launch { schedule() }
         if (enabled) check(manual = false)
     }
 
@@ -1068,6 +1068,7 @@ actual class UpdateManager private constructor(private val context: Context) {
         }
     }
 
+    @Synchronized
     private fun schedule() {
         val scheduler = context.getSystemService(JobScheduler::class.java) ?: return
         if (!automatic) {

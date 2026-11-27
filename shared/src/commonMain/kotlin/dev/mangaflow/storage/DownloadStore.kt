@@ -204,7 +204,7 @@ class DownloadStore private constructor(context: Context) {
     }
 
     private suspend fun restoreChapter(id: String, publishRestored: Boolean = true) = withContext(Dispatchers.IO) {
-        if (!id.matches(Regex("[a-f0-9]{64}"))) return@withContext
+        if (!id.matches(SHA256_HEX)) return@withContext
         chapterChanges.getOrPut(id) { Mutex() }.withLock {
             if (synchronized(lock) { id in restoredMetadata || id in records }) return@withLock
             val folder = directory(id)
@@ -519,7 +519,7 @@ class DownloadStore private constructor(context: Context) {
         val imageSource = dev.mangaflow.data.SourceKeys.decodeChapter(manga.id, chapter.id).sourceId
         require(pages.all { it.url.startsWith("https://") || imageSource.startsWith("js_") &&
             it.url.startsWith("mangaflow-script://$imageSource/") && it.sourceImageToken.isNotEmpty() &&
-            it.sourceRevision.matches(Regex("[a-f0-9]{64}")) }) { "图片地址或脚本来源标识无效。" }
+            it.sourceRevision.matches(SHA256_HEX) }) { "图片地址或脚本来源标识无效。" }
         val id = chapterKey(manga.id, chapter.id)
         changeChapter(id) {
             val (change, capturedRoute) = synchronized(lock) {
@@ -1323,7 +1323,7 @@ class DownloadStore private constructor(context: Context) {
 
     internal fun pageFile(id: String, index: Int): File = File(directory(id), "${index.toString().padStart(5, '0')}.img")
     internal fun directory(id: String): File {
-        require(id.matches(Regex("[a-f0-9]{64}")))
+        require(id.matches(SHA256_HEX))
         return File(root, id)
     }
 
@@ -1336,11 +1336,8 @@ class DownloadStore private constructor(context: Context) {
             for (id in ids) {
                 prepareChapter(id)
                 val snapshot = synchronized(lock) { records[id] } ?: continue
-                if (snapshot.entry.status == DownloadStatus.PAUSED) continue
-                val active = snapshot.entry.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
+                val active = snapshot.entry.status in ACTIVE_STATUSES
                 if (!active && snapshot.entry.status != DownloadStatus.COMPLETED) continue
-                val files = synchronized(lock) { availablePages[snapshot.entry.id].orEmpty().map { pageFile(snapshot.entry.id, it) } }
-                val complete = snapshot.pages.isNotEmpty() && files.size == snapshot.pages.size
                 // A failed scheduler read is unknown, never evidence that a worker disappeared.
                 val workInfo = if (active && snapshot.workId.isNotBlank()) {
                     try {
@@ -1352,20 +1349,24 @@ class DownloadStore private constructor(context: Context) {
                 synchronized(lock) {
                     // A pause, retry, refresh, deletion, or worker progress supersedes this snapshot.
                     if (records[snapshot.entry.id] !== snapshot) return@synchronized
+                    val present = availablePages[id].orEmpty()
+                    val complete = snapshot.pages.isNotEmpty() && present.size == snapshot.pages.size
+                    // Settled records need only the verified count. Read file lengths only when repairing a record.
+                    fun presentBytes() = present.sumOf { pageFile(id, it).length() }
                     try {
                         when {
                             snapshot.entry.status == DownloadStatus.COMPLETED && !complete -> save(snapshot.copy(entry = snapshot.entry.copy(
                                 status = DownloadStatus.FAILED,
-                                completedPages = files.size,
-                                downloadedBytes = files.sumOf(File::length),
+                                completedPages = present.size,
+                                downloadedBytes = presentBytes(),
                                 needsSourceRefresh = snapshot.pages.isEmpty() && snapshot.entry.manga.sourceUrl != LOCAL_SOURCE_URL,
                                 error = if (snapshot.entry.manga.sourceUrl == LOCAL_SOURCE_URL)
                                     "本地文件已损坏，请删除后重新导入" else "本地章节不完整，继续下载可修复",
                             )))
                             active && !hasLiveWork && complete -> save(snapshot.copy(entry = snapshot.entry.copy(
                                 status = DownloadStatus.COMPLETED,
-                                completedPages = files.size,
-                                downloadedBytes = files.sumOf(File::length),
+                                completedPages = present.size,
+                                downloadedBytes = presentBytes(),
                                 needsSourceRefresh = false,
                                 error = "",
                             )))
@@ -1377,8 +1378,8 @@ class DownloadStore private constructor(context: Context) {
                             active && !hasLiveWork -> {
                                 save(snapshot.copy(entry = snapshot.entry.copy(
                                     status = DownloadStatus.QUEUED,
-                                    completedPages = files.size,
-                                    downloadedBytes = files.sumOf(File::length),
+                                    completedPages = present.size,
+                                    downloadedBytes = presentBytes(),
                                     error = "",
                                 )))
                                 schedule(snapshot.entry.id)
@@ -1525,6 +1526,7 @@ class DownloadStore private constructor(context: Context) {
         private const val MAX_IMPORT_PAGE_BYTES = 128L * 1024L * 1024L
         private const val MAX_IMPORT_BYTES = 1_500L * 1024L * 1024L
         private val ACTIVE_STATUSES = setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
+        private val SHA256_HEX = Regex("[a-f0-9]{64}")
         private val instanceLock = StorageLock()
         @Volatile private var instance: DownloadStore? = null
         fun get(context: Context): DownloadStore = instance ?: synchronized(instanceLock) {

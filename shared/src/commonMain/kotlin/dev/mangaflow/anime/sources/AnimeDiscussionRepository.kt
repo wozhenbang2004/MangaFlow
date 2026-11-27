@@ -5,6 +5,7 @@ import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.canonicalBangumiId
 import dev.mangaflow.data.MangaReview
+import dev.mangaflow.data.BangumiEpisodeComments
 import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
@@ -182,7 +183,8 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
         updateSources()
     }
 
-    suspend fun readEpisode(episode: AnimeEpisode, catalogue: List<AnimeEpisode>, force: Boolean): AnimeEpisodeDiscussion? {
+    suspend fun readEpisode(episode: AnimeEpisode, catalogue: List<AnimeEpisode>, force: Boolean,
+        onCached: (AnimeEpisodeDiscussion) -> Unit): AnimeEpisodeDiscussion? {
         val owner = selection?.takeIf { it.subjectId == episode.subjectId } ?: return null
         val revision = selectionRevision
         if (catalogue.none { it.id == episode.id && it.subjectId == episode.subjectId }) return null
@@ -227,27 +229,34 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
         if (!current()) return null
         val key = "discussion:v1:bangumi-episode:$id:${animeHash(route.identity())}"
         val cacheEpoch = cache.generation
-        val cached = if (force) null else cache.read(key)?.takeIf { cache.isFresh(it, ContentCacheKind.COMMENTS) }
-        val previous = cached?.let { entry -> withContext(Dispatchers.Default) {
-            runCatching { decodeBangumiEpisodeComments(JSONArray(entry.text), id) }.getOrNull()
-        } }
-        val data = if (previous != null) previous else {
-            val http = AnimeHttp(provider.routingId, route)
-            val response = try {
-                withTimeoutOrNull(8_000L) {
-                    http.request(animePublicUrl("https://next.bgm.tv/p1/episodes/$id/comments"),
-                        AnimeSourceStage.METADATA, sameOriginRedirects = true)
-                } ?: error("等待读取本集讨论超时。")
-            } finally { http.close() }
-            val decoded = withContext(Dispatchers.Default) { decodeBangumiEpisodeComments(JSONArray(response.text), id) }
+        fun discussion(data: BangumiEpisodeComments) = AnimeEpisodeDiscussion(ReviewSource(provider.id, provider.label,
+            ReviewStatus.READY, "https://bgm.tv/ep/$id", reviews = data.items, subjectId = "episode:$id",
+            reviewCount = data.items.size, supportsReplies = true), data.replies)
+        val cached = if (force) null else cache.read(key)
+        if (cached != null) {
+            val previous = withContext(Dispatchers.Default) {
+                runCatching { decodeBangumiEpisodeComments(JSONArray(cached.text), id) }.getOrNull()
+            }
             if (!current()) return null
-            cache.write(key, response.text, cacheEpoch)
-            decoded
+            if (previous != null && cache.generation == cacheEpoch) {
+                val saved = discussion(previous)
+                if (cache.isFresh(cached, ContentCacheKind.COMMENTS)) return saved
+                onCached(saved)
+            }
         }
         if (!current()) return null
-        return AnimeEpisodeDiscussion(ReviewSource(provider.id, provider.label, ReviewStatus.READY,
-            "https://bgm.tv/ep/$id", reviews = data.items, subjectId = "episode:$id",
-            reviewCount = data.items.size, supportsReplies = true), data.replies)
+        val http = AnimeHttp(provider.routingId, route)
+        val response = try {
+            withTimeoutOrNull(8_000L) {
+                http.request(animePublicUrl("https://next.bgm.tv/p1/episodes/$id/comments"),
+                    AnimeSourceStage.METADATA, sameOriginRedirects = true)
+            } ?: error("等待读取本集讨论超时。")
+        } finally { http.close() }
+        val decoded = withContext(Dispatchers.Default) { decodeBangumiEpisodeComments(JSONArray(response.text), id) }
+        if (!current()) return null
+        cache.write(key, response.text, cacheEpoch)
+        if (!current()) return null
+        return discussion(decoded)
     }
 
     private fun normalizedEpisodeTitle(title: String): String = normalizeNfkc(title).lowercase().trim()

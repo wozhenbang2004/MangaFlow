@@ -16,7 +16,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import dev.mangaflow.MangaFlowHost
-import dev.mangaflow.initializeMangaFlow
 import androidx.compose.runtime.CompositionLocalProvider
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.ui.MangaFlowTheme
@@ -77,7 +76,7 @@ class MainActivity : ComponentActivity() {
             installLaunchExit()
         }
         consumeNavigationIntent(intent)
-        initializeMangaFlow(this)
+        (application as MangaFlowApplication).initializeServices()
         experience = ExperiencePolicyStore.get(this)
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {

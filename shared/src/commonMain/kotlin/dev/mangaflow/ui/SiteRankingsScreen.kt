@@ -485,18 +485,10 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
     val ordinalStyle = mangaMetricValueStyle(16.sp, 22.sp).copy(fontWeight = FontWeight.SemiBold)
     val widest = rememberTextMeasurer().measure("8".repeat(digits), ordinalStyle, maxLines = 1).size.width
     val ordinalWidth = with(LocalDensity.current) { (widest.toDp() + 9.dp).coerceAtLeast(if (indexed) 44.dp else 0.dp) }
-    val nearEnd by remember(grid) { derivedStateOf {
-        val info = grid.layoutInfo
-        info.totalItemsCount > 0 && (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 4
-    } }
-    var lastAutoCount by remember(selectionKey, indexed) { mutableIntStateOf(-1) }
-    LaunchedEffect(active, nearEnd, state.entries.size, state.hasMore, state.loadingMore, state.refreshing, state.error) {
-        if (active && nearEnd && state.entries.isNotEmpty() && state.hasMore &&
-            !state.loadingMore && !state.refreshing && state.error == null && (!indexed || lastAutoCount != state.entries.size)) {
-            lastAutoCount = state.entries.size
-            onMore()
-        }
-    }
+    val tail = remember(state.entries) { browsePageTail(state.entries) { it.work.key } }
+    BrowseGridPagination(grid, selectionKey, state.fetchedAt, state.entries.size, tail, "native-ranking",
+        enabled = active && state.hasMore && !state.loading && !state.loadingMore && !state.refreshing &&
+            state.error == null && state.failedPage == null, fillViewport = true, onMore = onMore)
     Column(Modifier.fillMaxSize().mangaHazeSource(backdrop).motionInputGate(active)) {
         val selection = state.selection
         if (indexed) Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 26.dp, top = 12.dp)) {
@@ -556,7 +548,7 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
                     selectionKey, onOpen, onInspect, modifier = item)
             }
             if (!empty && (state.loadingMore || state.error != null && firstError == null ||
-                    indexed && state.hasMore && firstError == null)) item(
+                    state.hasMore && firstError == null)) item(
                 key = "rank-footer", span = { GridItemSpan(maxLineSpan) }
             ) {
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -565,7 +557,7 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
                         Text(state.error, Modifier.padding(vertical = 10.dp),
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         MotionTextButton(onClick = onRetry, enabled = active) { Text("重试") }
-                    } else if (indexed && state.hasMore) MotionTextButton(onClick = onMore,
+                    } else if (state.hasMore) MotionTextButton(onClick = onMore,
                         enabled = active && !state.loading && !state.refreshing) { Text("加载更多作品") }
                 }
             }

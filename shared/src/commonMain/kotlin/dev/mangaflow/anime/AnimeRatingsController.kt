@@ -22,6 +22,7 @@ import dev.mangaflow.platform.wallTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,9 +31,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 internal data class AnimeRatingSnapshot(
@@ -73,7 +73,8 @@ internal class AnimeRatingsController(
         var job: Job? = null
         var release: Job? = null
         var requestVersion = 0L
-        val writes = Mutex()
+        var pendingWrite: Selection? = null
+        var writer: Job? = null
     }
 
     private val cache = AnimeMetadataCache.get(context)
@@ -89,7 +90,9 @@ internal class AnimeRatingsController(
         val entry = entries[subject.id] ?: return null
         if (selection(fuller(entry.subject, subject)).key != entry.selection.key) return null
         val now = wallTimeMillis()
-        val expired = entry.checkedAt.filterValues { now - it !in 0L..contentCachePreferences(context).retentionMillis }.keys
+        val retention = contentCachePreferences(context).retentionMillis
+        if (entry.checkedAt.values.all { now - it in 0L..retention }) return entry.snapshot
+        val expired = entry.checkedAt.filterValues { now - it !in 0L..retention }.keys
         return entry.snapshot.copy(scores = entry.snapshot.scores.filterNot { it.provider in expired },
             checks = entry.snapshot.checks.filterKeys { it !in expired })
     }
@@ -178,7 +181,7 @@ internal class AnimeRatingsController(
             record(entry, provider, scores.firstOrNull { it.provider == provider && valid(it) }, check)
         }
         publish(entry)
-        scope.launch { if (current(entry, chosen)) persist(entry, chosen) }
+        queueWrite(entry, chosen)
         return true
     }
 
@@ -207,6 +210,11 @@ internal class AnimeRatingsController(
         val routes = providers(subject).associateWith { provider ->
             runCatching { route(provider) }.getOrNull()
         }
+        val epoch = cache.generation
+        val previous = entries[subject.id]?.selection
+        if (previous != null && previous.restoreEpoch == saved.restoreEpoch && previous.cacheEpoch == epoch &&
+            previous.manual == manual && previous.disabled == disabled && previous.routes == routes &&
+            previous.reference?.id == confirmed?.id && previous.reference?.externalIds == confirmed?.externalIds) return previous
         // A sparse list row and a rich detail row are the same catalogue identity. Their
         // aliases/rating fields must not repeatedly cancel each other's visible request.
         val referenceKey = confirmed?.let { value -> value.id + ":" +
@@ -214,7 +222,6 @@ internal class AnimeRatingsController(
         val identity = JSONObject().put("owner", subject.id).put("reference", referenceKey)
             .put("manual", manual).put("disabled", disabled).put("routes", JSONObject(routes.mapKeys { it.key.name }
                 .mapValues { it.value?.identity()?.let(::animeHash) ?: "unavailable" })).toString()
-        val epoch = cache.generation
         return Selection("$identity:${saved.restoreEpoch}:$epoch", "anime-ratings:v1:${animeHash(identity)}",
             confirmed, manual, disabled, saved.restoreEpoch, epoch, routes)
     }
@@ -336,13 +343,13 @@ internal class AnimeRatingsController(
         fun active() = current(entry, chosen) && ticket == entry.requestVersion
         fun owns(provider: AnimeDiscoveryProvider) = active() &&
             entry.providerVersions[provider].orZero() == versions[provider].orZero()
-        suspend fun result(provider: AnimeDiscoveryProvider, score: AnimeSourceScore?, check: AnimeScoreCheck) {
+        fun result(provider: AnimeDiscoveryProvider, score: AnimeSourceScore?, check: AnimeScoreCheck) {
             if (!owns(provider)) return
             record(entry, provider, score, check)
             publish(entry)
-            persist(entry, chosen)
+            queueWrite(entry, chosen)
         }
-        suspend fun failed(provider: AnimeDiscoveryProvider, failure: Exception) {
+        fun failed(provider: AnimeDiscoveryProvider, failure: Exception) {
             if (failure is CancellationException) throw failure
             result(provider, null, AnimeScoreCheck(error = failure.message ?: "评分读取失败，请重试。"))
         }
@@ -370,7 +377,7 @@ internal class AnimeRatingsController(
                         record(entry, provider, null, AnimeScoreCheck(message = failure.message))
                     }
                     publish(entry)
-                    persist(entry, chosen)
+                    queueWrite(entry, chosen)
                     return
                 }
                 if (AnimeDiscoveryProvider.DOUBAN in due) failed(AnimeDiscoveryProvider.DOUBAN, failure)
@@ -437,7 +444,7 @@ internal class AnimeRatingsController(
                         record(entry, provider, null, AnimeScoreCheck(message = failure.message))
                     }
                     publish(entry)
-                    persist(entry, chosen)
+                    queueWrite(entry, chosen)
                     return
                 }
                 failed(AnimeDiscoveryProvider.BANGUMI, failure)
@@ -508,23 +515,50 @@ internal class AnimeRatingsController(
         publish(entry)
     }
 
-    private suspend fun persist(entry: Entry, chosen: Selection): Unit = entry.writes.withLock {
-        if (!current(entry, chosen)) return@withLock
-        val rows = entry.checkedAt.mapNotNull { (provider, time) ->
-            // A refresh keeps the last completed check/value until its own response arrives.
-            val check = entry.snapshot.checks[provider] ?: return@mapNotNull null
-            val score = entry.snapshot.scores.firstOrNull { it.provider == provider }
-            JSONObject().put("provider", provider.name).put("checked", time).put("score", score?.rating)
-                .put("scale", score?.scale).put("count", score?.ratingCount).put("error", check.error).put("message", check.message)
+    /** A completed score can persist after its card leaves. Disk work never holds a visible request slot. */
+    private fun queueWrite(entry: Entry, chosen: Selection) {
+        if (!contentCachePreferences(context).enabled) return
+        entry.pendingWrite = chosen
+        if (entry.writer != null) return
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                while (true) {
+                    val next = entry.pendingWrite ?: break
+                    entry.pendingWrite = null
+                    try { writeSnapshot(entry, next) }
+                    catch (cancel: CancellationException) { throw cancel }
+                    catch (_: Exception) { /* The observed score remains usable. */ }
+                }
+            } finally {
+                entry.writer = null
+                trim()
+            }
         }
-        val text = JSONObject().put("primary", AnimeDocumentCodec.subject(entry.primary ?: entry.subject))
-            .put("primaryRejected", entry.primaryRejected).put("metadataRejected", entry.metadataRejected)
-            .put("reference", entry.metadata?.let(AnimeDocumentCodec::subject)).put("sources", JSONArray(rows)).toString()
-        if (current(entry, chosen)) {
-            try { cache.write(chosen.diskKey, text, chosen.cacheEpoch) }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { /* A disposable cache failure must not discard observed scores. */ }
+        entry.writer = job
+        if (!job.start()) entry.writer = null
+    }
+
+    private suspend fun writeSnapshot(entry: Entry, chosen: Selection) {
+        if (!current(entry, chosen)) return
+        val completed = entry.checkedAt.toMap()
+        val snapshot = entry.snapshot
+        val primary = entry.primary ?: entry.subject
+        val primaryRejected = entry.primaryRejected
+        val metadataRejected = entry.metadataRejected
+        val reference = entry.metadata
+        val text = withContext(Dispatchers.Default) {
+            val rows = completed.mapNotNull { (provider, time) ->
+                // A refresh keeps the last completed check/value until its own response arrives.
+                val check = snapshot.checks[provider] ?: return@mapNotNull null
+                val score = snapshot.scores.firstOrNull { it.provider == provider }
+                JSONObject().put("provider", provider.name).put("checked", time).put("score", score?.rating)
+                    .put("scale", score?.scale).put("count", score?.ratingCount).put("error", check.error).put("message", check.message)
+            }
+            JSONObject().put("primary", AnimeDocumentCodec.subject(primary))
+                .put("primaryRejected", primaryRejected).put("metadataRejected", metadataRejected)
+                .put("reference", reference?.let(AnimeDocumentCodec::subject)).put("sources", JSONArray(rows)).toString()
         }
+        if (current(entry, chosen)) cache.write(chosen.diskKey, text, chosen.cacheEpoch)
     }
 
     private fun current(entry: Entry, chosen: Selection): Boolean = entries[entry.subject.id] === entry &&
@@ -537,7 +571,8 @@ internal class AnimeRatingsController(
 
     private fun trim() {
         while (entries.size > 160) {
-            val old = entries.entries.firstOrNull { it.value.references == 0 && it.value.job?.isActive != true } ?: break
+            val old = entries.entries.firstOrNull { it.value.references == 0 && it.value.job?.isActive != true &&
+                it.value.writer?.isActive != true } ?: break
             old.value.release?.cancel()
             entries.remove(old.key)
             mutableValues.value = mutableValues.value - old.key

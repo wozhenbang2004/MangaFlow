@@ -124,8 +124,7 @@ class LibraryStore(context: Context) {
     private var progressWriterRunning = false
     private var progressEpoch = 0L
     private var ignoreStoredProgress = false
-    private var readingActivityWrites = 0
-    private var readingActivityRevision = 0L
+    private var pendingReadingActivity: List<ReadingActivity>? = null
     private var writesIdle = CompletableDeferred(Unit)
 
     val favorites: StateFlow<List<Manga>> = _favorites.asStateFlow()
@@ -152,7 +151,7 @@ class LibraryStore(context: Context) {
                 val legacy = readLegacyLongImageMigration()
                 val favorites = readArray("favorites", ::readManga).distinctBy(Manga::id)
                 val history = readArray("history", ::readProgress).distinctBy { it.manga.id }
-                val favoriteTimes = readFavoriteAddedTimes().filterKeys { id -> favorites.any { it.id == id } }
+                val favoriteTimes = readFavoriteAddedTimes(favorites)
                 val resumeTargets = readResumeTargets()
                 val states = readShelfStates()
                 val pictures = readArray(PAGE_COLLECTIONS_KEY, ::readPageCollection).distinctBy(PageCollection::key)
@@ -198,16 +197,9 @@ class LibraryStore(context: Context) {
             stateRestored
         }
         if (!restored) return@withContext false
-        waitForProgressWriter()
-        val libraryPersisted = synchronized(lock) {
-            if (progressWriterRunning || readingActivityWrites > 0 || progressWrite != null) false
-            else runCatching {
-                // Also commit the latest in-memory time snapshot if an earlier async encoding
-                // failed; commit waits for preceding Android apply() operations as well.
-                val activity = JSONArray(_readingActivity.value.map { it.toJson() }).toString()
-                disk.edit().putString(READING_ACTIVITY_KEY, activity).commit()
-            }.getOrDefault(false)
-        }
+        // Reader preferences also use apply(). Fence those edits on IO after the journal drains.
+        val libraryPersisted = withProgressIdle { progressWrite == null } &&
+            runCatching { disk.edit().commit() }.getOrDefault(false)
         val preferencesPersisted = flushLocalPreferences()
         libraryPersisted && preferencesPersisted
     }
@@ -285,13 +277,11 @@ class LibraryStore(context: Context) {
         clearResumeTarget(mangaId)
     }
 
-    private fun readFavoriteAddedTimes(): Map<String, Long> = runCatching {
+    private fun readFavoriteAddedTimes(favorites: List<Manga>): Map<String, Long> = runCatching {
         val json = JSONObject(disk.getString(FAVORITE_ADDED_TIMES_KEY, "{}") ?: "{}")
         buildMap {
-            val keys = json.keys()
-            while (keys.hasNext()) {
-                val id = keys.next()
-                json.optLong(id).takeIf { it > 0L }?.let { put(id, it) }
+            for (manga in favorites) {
+                json.optLong(manga.id).takeIf { it > 0L }?.let { put(manga.id, it) }
             }
         }
     }.getOrDefault(emptyMap())
@@ -394,8 +384,7 @@ class LibraryStore(context: Context) {
             val sourcePackages = sourceStore.exportBackup()
             val animeLibrary = AnimeLibraryStore.get(application).exportBackup()
             val animeSourcePackages = LanercSourceStore.get(application).exportBackup()
-            waitForProgressWriter()
-            val root = synchronized(lock) {
+            val root = withProgressIdle {
                 val entries = JSONArray()
                 disk.all.entries.filter { it.key != RESUME_TARGETS_KEY && it.key != LAN_READING_LEDGER_KEY }
                     .sortedBy { it.key }.forEach { (key, value) ->
@@ -435,7 +424,6 @@ class LibraryStore(context: Context) {
             // Validate every source package before either store changes. Validation never runs JS.
             val decoded = decodeBackup(encoded)
             val info = backupInfo(decoded)
-            waitForProgressWriter()
             currentCoroutineContext().ensureActive()
             // Once the validated disk writes start, leaving the screen must not cancel
             // between the source index and library preferences.
@@ -448,8 +436,7 @@ class LibraryStore(context: Context) {
                             failure.message.orEmpty(), failure)
                     }
                 }
-                waitForProgressWriter()
-                synchronized(lock) {
+                withProgressIdle {
                     val previous = disk.all.toMap()
                     val writeFailure = try {
                         // A backup cannot restore an account-specific continuation choice.
@@ -470,7 +457,7 @@ class LibraryStore(context: Context) {
                     }
 
                     progressEpoch++
-                    readingActivityRevision++
+                    pendingReadingActivity = null
                     progressWrite = null
                     pendingChapterPositions.clear()
                     pendingLongImagePositions.clear()
@@ -479,7 +466,7 @@ class LibraryStore(context: Context) {
                     ignoreStoredProgress = false
                     restoreLegacyLongImages = readLegacyLongImageMigration()
                     _favorites.value = readArray("favorites") { readManga(it) }.distinctBy(Manga::id)
-                    _favoriteAddedTimes.value = readFavoriteAddedTimes().filterKeys { id -> _favorites.value.any { it.id == id } }
+                    _favoriteAddedTimes.value = readFavoriteAddedTimes(_favorites.value)
                     _resumeTargets.value = emptyMap()
                     _history.value = readArray("history", ::readProgress).distinctBy { it.manga.id }
                     _chapterHistoryRevision.value++
@@ -527,22 +514,15 @@ class LibraryStore(context: Context) {
         return UnifiedChapterStore.withLibraryRestore { editor.commit() }
     }
 
-    private suspend fun waitForProgressWriter() {
+    /** Take the snapshot or replace the backup under the same lock that admits the next writer. */
+    private suspend fun <T> withProgressIdle(action: () -> T): T {
         while (true) {
             val pending = synchronized(lock) {
-                if (progressWriterRunning || readingActivityWrites > 0) writesIdle else null
-            } ?: return
+                if (!progressWriterRunning) return action()
+                writesIdle
+            }
             pending.await()
         }
-    }
-
-    /** Called under lock; the same completion spans overlapping progress and time writers. */
-    private fun markWritesBusy() {
-        if (writesIdle.isCompleted) writesIdle = CompletableDeferred()
-    }
-
-    private fun markWritesIdle() {
-        if (!progressWriterRunning && readingActivityWrites == 0) writesIdle.complete(Unit)
     }
 
     private data class DecodedBackup(
@@ -1098,7 +1078,7 @@ class LibraryStore(context: Context) {
         // while that write finishes, and new reading positions can join the clearing batch.
         progressEpoch++
         ignoreStoredProgress = true
-        progressWrite = ProgressWrite(progressEpoch, clear = true,
+        progressWrite = ProgressWrite(progressEpoch, clear = true, activity = pendingReadingActivity,
             values = pendingLibraryValues.toMutableMap())
         startProgressWriter()
     }
@@ -1137,7 +1117,7 @@ class LibraryStore(context: Context) {
 
     private fun startProgressWriter() {
         if (progressWriterRunning) return
-        markWritesBusy()
+        writesIdle = CompletableDeferred()
         progressWriterRunning = true
         progressScope.launch { drainProgressWrites() }
     }
@@ -1148,7 +1128,7 @@ class LibraryStore(context: Context) {
                 val next = progressWrite
                 if (next == null) {
                     progressWriterRunning = false
-                    markWritesIdle()
+                    writesIdle.complete(Unit)
                     return
                 }
                 progressWrite = null
@@ -1174,11 +1154,15 @@ class LibraryStore(context: Context) {
                 write.chapters.forEach { (key, position) -> editor.putString(key, position.toJson().toString()) }
                 write.longImages.forEach { (key, position) -> editor.putFloat(key, position) }
                 write.history?.let { history -> editor.putString("history", JSONArray(history.map { it.toJson() }).toString()) }
+                write.activity?.let { activity ->
+                    editor.putString(READING_ACTIVITY_KEY, JSONArray(activity.map { it.toJson() }).toString())
+                }
                 editor.commit()
             }.getOrDefault(false)
             synchronized(lock) {
                 if (write.epoch == progressEpoch) {
                     if (persisted) {
+                        if (write.activity === pendingReadingActivity) pendingReadingActivity = null
                         if (write.clear) ignoreStoredProgress = false
                         write.removedManga.forEach { (mangaId, sequence) ->
                             if (pendingProgressRemovals[mangaId] == sequence) pendingProgressRemovals.remove(mangaId)
@@ -1199,6 +1183,7 @@ class LibraryStore(context: Context) {
                         progressWrite = write.apply {
                             clear = clear || newer?.clear == true
                             history = newer?.history ?: history
+                            activity = newer?.activity ?: activity
                             newer?.removedManga?.forEach { (mangaId, sequence) ->
                                 chapters.keys.removeAll { isProgressKeyFor(it, mangaId) }
                                 longImages.keys.removeAll { isProgressKeyFor(it, mangaId) }
@@ -1214,7 +1199,7 @@ class LibraryStore(context: Context) {
                             newer?.longImages?.let(longImages::putAll)
                         }
                         progressWriterRunning = false
-                        markWritesIdle()
+                        writesIdle.complete(Unit)
                         return
                     }
                 }
@@ -1226,6 +1211,7 @@ class LibraryStore(context: Context) {
         val epoch: Long,
         var clear: Boolean = false,
         var history: List<ReadingProgress>? = null,
+        var activity: List<ReadingActivity>? = null,
         val chapters: MutableMap<String, ChapterProgress> = linkedMapOf(),
         val longImages: MutableMap<String, Float> = linkedMapOf(),
         val removedManga: MutableMap<String, Long> = linkedMapOf(),
@@ -1295,21 +1281,9 @@ class LibraryStore(context: Context) {
                 endedAt, days.toMap())
             val values = listOf(next) + _readingActivity.value.filterNot { it.manga.id == manga.id }
             _readingActivity.value = values
-            val revision = ++readingActivityRevision
-            markWritesBusy()
-            readingActivityWrites++
-            progressScope.launch {
-                try {
-                    val encoded = JSONArray(values.map { it.toJson() }).toString()
-                    synchronized(lock) {
-                        if (revision == readingActivityRevision) {
-                            disk.edit().putString(READING_ACTIVITY_KEY, encoded).apply()
-                        }
-                    }
-                } finally {
-                    synchronized(lock) { readingActivityWrites--; markWritesIdle() }
-                }
-            }
+            pendingReadingActivity = values
+            pendingWrite().activity = values
+            startProgressWriter()
         }
     }
 

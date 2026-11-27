@@ -806,6 +806,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     fun loadMoreDiscovery(key: String) = discoveryLoads.more(key)
 
+    internal fun prepareCachedDiscoveryPage(key: String) = discoveryLoads.prepareCachedPage(key)
+
     /** A video URL needs a saved binding; trusted index lookups may reuse their own subject ID. */
     fun knownDiscoverySubject(reference: AnimeSourceTitle, allowIndexIdentity: Boolean = false): AnimeSubject? {
         if (isRetiredAnimeSource(reference.sourceId)) return null

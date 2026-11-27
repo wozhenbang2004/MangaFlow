@@ -1,5 +1,7 @@
 package dev.mangaflow.platform.storage
 
+import com.sun.jna.platform.win32.Crypt32Util
+import com.sun.jna.platform.win32.WinCrypt
 import dev.mangaflow.platform.PlatformContext
 import java.util.Base64
 import java.util.concurrent.TimeUnit
@@ -51,9 +53,24 @@ actual fun readSecret(context: PlatformContext, key: String): String? = when {
         val file = secretFile(context, key)
         if (!file.isFile) null else {
             require(file.length() <= 2L * 1024 * 1024) { "安全凭据文件超出大小限制。" }
-            val script = "Add-Type -AssemblyName System.Security; \$v=[Convert]::FromBase64String([Console]::In.ReadToEnd()); \$r=[Security.Cryptography.ProtectedData]::Unprotect(\$v,\$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Convert]::ToBase64String(\$r))"
-            val result = runSecretCommand(listOf("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script), file.readText())!!
-            Base64.getDecoder().decode(result).toString(Charsets.UTF_8)
+            val stored = file.readText()
+            val ciphertext = Base64.getDecoder().decode(stored.filterNot { it in " \t\r\n" })
+            val plaintext = try {
+                // Same CurrentUser DPAPI data written by .NET, without starting PowerShell during login restoration.
+                Crypt32Util.cryptUnprotectData(ciphertext, WinCrypt.CRYPTPROTECT_UI_FORBIDDEN)
+            } catch (_: LinkageError) {
+                val script = "Add-Type -AssemblyName System.Security; \$v=[Convert]::FromBase64String([Console]::In.ReadToEnd()); \$r=[Security.Cryptography.ProtectedData]::Unprotect(\$v,\$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Convert]::ToBase64String(\$r))"
+                val result = runSecretCommand(listOf("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script), stored)!!
+                Base64.getDecoder().decode(result)
+            } catch (failure: Exception) {
+                throw IllegalStateException("系统安全凭据存储拒绝了此操作。", failure)
+            }
+            try {
+                require(plaintext.size <= 1024 * 1024) { "安全凭据超出大小限制。" }
+                plaintext.toString(Charsets.UTF_8)
+            } finally {
+                plaintext.fill(0)
+            }
         }
     }
     desktopOs.contains("mac") -> runSecretCommand(listOf("security", "find-generic-password", "-a", "MangaFlow", "-s", service(key), "-w"), allowMissing = true)

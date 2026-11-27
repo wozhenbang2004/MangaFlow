@@ -668,18 +668,27 @@ class SiteRankingsRepository(context: PlatformContext) {
             SourceDiscoveryIdentity.authorEvidence(selected, canonical) != SourceDiscoveryIdentity.AuthorEvidence.CONFLICT
 
     /** Keep old bytes, but an unverified fuzzy legacy link cannot silently become a direct reading entry. */
-    suspend fun linked(work: SiteRankedWork): Manga? = withContext(Dispatchers.IO) {
-        runCatching {
-            val raw = links.getString("link:" + work.key, null) ?: return@runCatching null
-            val saved = JSONObject(raw)
-            if (saved.getString("work") != work.key) return@runCatching null
-            val manga = readManga(saved.getJSONObject("manga"))
-            manga.takeIf {
-                acceptsSource(work, it) && (saved.optInt("version", 1) == 2 && saved.optBoolean("identityChecked", false) ||
-                    SourceDiscoveryIdentity.workMatches(work.manga, it, work.manga.alternativeTitles, sameChapterSystem = false))
+    suspend fun linked(work: SiteRankedWork): Manga? = withContext(Dispatchers.IO) { readLink(work) }
+
+    internal suspend fun linkedEntries(rows: List<SiteRankingEntry>): Map<String, Manga> = withContext(Dispatchers.IO) {
+        buildMap {
+            for (row in rows) {
+                currentCoroutineContext().ensureActive()
+                readLink(row.work)?.let { put(row.work.key, it) }
             }
-        }.getOrNull()
+        }
     }
+
+    private fun readLink(work: SiteRankedWork): Manga? = runCatching {
+        val raw = links.getString("link:" + work.key, null) ?: return@runCatching null
+        val saved = JSONObject(raw)
+        if (saved.getString("work") != work.key) return@runCatching null
+        val manga = readManga(saved.getJSONObject("manga"))
+        manga.takeIf {
+            acceptsSource(work, it) && (saved.optInt("version", 1) == 2 && saved.optBoolean("identityChecked", false) ||
+                SourceDiscoveryIdentity.workMatches(work.manga, it, work.manga.alternativeTitles, sameChapterSystem = false))
+        }
+    }.getOrNull()
 
     /** Only the actual canonical source result, checked against the selected row, can create a new link. */
     suspend fun rememberLink(work: SiteRankedWork, selected: Manga, canonical: Manga,
