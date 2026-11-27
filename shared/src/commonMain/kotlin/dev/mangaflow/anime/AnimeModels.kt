@@ -89,6 +89,8 @@ data class AnimeSourceEpisode(
     val edition: String = "",
     /** Provider-owned opaque play flag. It is never interpreted as a media URL. */
     val playbackData: String? = null,
+    /** Explicit provider season metadata, independent of a playlist's position or generated display label. */
+    val catalogueSeason: Int? = null,
 )
 
 data class AnimeSourceCatalog(
@@ -141,6 +143,8 @@ data class AnimePlaybackAsset(
     val subjectId: String = "",
     val subjectTitle: String = "",
     val episodeTitle: String = "",
+    /** Session-only preference for native video track selection when the source supplies a master manifest. */
+    val preferredAdaptiveHeight: Int = 0,
 )
 
 enum class AnimeWatchStatus { WISH, WATCHING, COMPLETED, ON_HOLD, DROPPED }

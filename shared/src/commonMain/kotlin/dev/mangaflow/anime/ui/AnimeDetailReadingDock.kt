@@ -11,6 +11,16 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -21,6 +31,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeEpisode
 import dev.mangaflow.anime.AnimeEpisodeAvailability
 import dev.mangaflow.anime.AnimeWatchProgress
@@ -90,6 +101,40 @@ internal data class AnimeDetailPlayControl(
     val mode: AnimeDetailPlayMode,
     val fraction: Float?,
 )
+
+internal class AnimeCataloguePlayAction(val control: AnimeDetailPlayControl, val activate: () -> Unit)
+
+@Composable
+internal fun rememberCataloguePlayAction(controller: AnimeController, subjectId: String,
+    active: Boolean, awaitingCatalogue: Boolean): AnimeCataloguePlayAction? {
+    val visit = controller.relatedSourceVisit
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val visible by rememberUpdatedState(active)
+    var requested by remember(controller, subjectId, visit) { mutableStateOf(false) }
+    if (requested) {
+        DisposableEffect(lifecycle) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_DESTROY) requested = false
+            }
+            lifecycle.addObserver(observer)
+            onDispose { lifecycle.removeObserver(observer) }
+        }
+        LaunchedEffect(active, visit) {
+            try {
+                if (active && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+                    controller.playFirstWhenCatalogueArrives(subjectId, visit) {
+                        requested && visible && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+                    }
+            } finally { requested = false }
+        }
+    }
+    if (!active || !requested && !awaitingCatalogue) return null
+    val label = if (requested) "取消等待" else "播放正片"
+    return AnimeCataloguePlayAction(AnimeDetailPlayControl(label, label,
+        if (requested) "正在确认本作正片" else "目录就绪后开播", AnimeDetailPlayMode.PLAY, null)) {
+        if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) requested = !requested
+    }
+}
 
 internal fun animeDetailPlayControl(episode: AnimeEpisode?, previous: AnimeWatchProgress?,
     availability: AnimeEpisodeAvailability?, checking: Boolean, canRetry: Boolean,

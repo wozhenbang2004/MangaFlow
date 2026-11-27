@@ -85,7 +85,7 @@ private fun parseDefaultAudioMaster(base: HttpUrl, lines: List<String>): AnimeHl
 private val HLS_ATTRIBUTE = Regex("([A-Z0-9-]+)=(\"[^\"\\p{Cc}]*\"|[^,\"\\s]+)(,|$)")
 private val HLS_RESOLUTION = Regex("[1-9][0-9]*x[1-9][0-9]*")
 
-private fun hlsAttributes(value: String): Map<String, String> = buildMap {
+internal fun hlsAttributes(value: String): Map<String, String> = buildMap {
     require(value.isNotEmpty() && !value.endsWith(',')) { "HLS 主清单属性格式无效" }
     var next = 0
     while (next < value.length) {

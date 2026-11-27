@@ -425,7 +425,7 @@ internal class AndroidAnimePlayer(
                 val remote = createRemoteMedia(next, gate).also { resources = it }
                 if (startupGeneration != attempt || !foreground || !sameStartupConfiguration(options, preparedOptions))
                     return@withContext false
-                val exo = createEngine(gate).also { candidate = it }
+                val exo = createEngine(gate, asset.preferredAdaptiveHeight).also { candidate = it }
                 val output = AndroidAnimeStartupSurface().also { surface = it }
                 val media = remote.plan.createSource(remote.plan.type, false)
                 val ready = CompletableDeferred<Boolean>()
@@ -770,7 +770,8 @@ internal class AndroidAnimePlayer(
         }
     }
 
-    private fun createEngine(gate: AndroidAnimeStartupGate? = null): ExoPlayer = try {
+    private fun createEngine(gate: AndroidAnimeStartupGate? = null,
+        preferredHeight: Int = request?.asset?.preferredAdaptiveHeight ?: 0): ExoPlayer = try {
         val loadControl = AndroidAnimeLoadControl(options, gate, lastAcceptedForwardBytes)
         lastAcceptedForwardBytes = loadControl.effectiveForwardBytes
         ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
@@ -780,7 +781,11 @@ internal class AndroidAnimePlayer(
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(if (gate == null) C.WAKE_MODE_NETWORK else C.WAKE_MODE_NONE)
             .setPriority(if (gate == null) C.PRIORITY_PLAYBACK else C.PRIORITY_PLAYBACK_PRELOAD)
-            .build().also { loadControls[it] = loadControl }
+            .build().also { player ->
+                loadControls[player] = loadControl
+                if (preferredHeight > 0) player.trackSelectionParameters = player.trackSelectionParameters
+                    .buildUpon().setMaxVideoSize(Int.MAX_VALUE, preferredHeight).build()
+            }
     } catch (cancel: CancellationException) { throw cancel }
     catch (failure: Throwable) {
         val detail = failure.message?.takeIf { it.isNotBlank() } ?: failure.javaClass.simpleName
@@ -1605,6 +1610,7 @@ internal class AndroidAnimePlayer(
                 notice = (if (phase == AnimePlayerPhase.READY && exo.playbackState != Player.STATE_BUFFERING &&
                     previous.notice == recoveryNotice) null else previous.notice) ?: cachePlaybackNotice,
                 downloadBytesPerSecond = if (localLease == null) speed else -1L,
+                receivedNetworkBytes = lastSampleBytes.takeIf { localLease == null },
                 // videoSize can describe the effect output. Source quality must come from
                 // the decoder format, never the 2x render target or a guessed fallback.
                 videoWidth = exo.videoFormat?.width?.takeIf { it > 0 },

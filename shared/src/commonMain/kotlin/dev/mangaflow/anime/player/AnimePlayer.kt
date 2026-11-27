@@ -259,6 +259,8 @@ data class AnimePlayerState(
     val playbackViewportSize: IntSize? = null,
     /** Cumulative elapsed visible video playback in this session; null without native observations. */
     val visibleWatchMillis: Long? = null,
+    /** Cumulative upstream bytes for this online media session. Local cache hits are excluded. */
+    val receivedNetworkBytes: Long? = null,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering

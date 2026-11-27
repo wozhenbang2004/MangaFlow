@@ -1,7 +1,10 @@
 package dev.mangaflow.anime.sources
 
 import com.fleeksoft.ksoup.Ksoup
+import com.fleeksoft.ksoup.nodes.Element
+import dev.mangaflow.anime.AnimeResolution
 import dev.mangaflow.anime.AnimeSubtitle
+import dev.mangaflow.anime.animeDeclaredHeight
 import dev.mangaflow.data.sources.SourcePackedScript
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -20,6 +23,7 @@ internal data class ResolvedAnimeStream(
     val mimeType: String?,
     val referer: String,
     val subtitles: List<AnimeSubtitle> = emptyList(),
+    val resolutions: List<AnimeResolution> = emptyList(),
 )
 
 /**
@@ -61,18 +65,33 @@ internal class AnimeStreamResolver(private val http: AnimeHttp, private val same
         if (document.selectFirst("input[name=gate-answer], form[action*=/captcha/]") != null)
             throw AnimeSourceException(http.sourceId, AnimeSourceStage.RESOLVE, "这条线路要求在原站完成访问验证，请选择其他免验证线路。")
         val pageUrl = response.url.toString()
-        val subtitles = document.select("video track[src]").mapIndexedNotNull { index, element ->
+        val headers = mapOf("User-Agent" to AnimeHttp.USER_AGENT) +
+            mediaReferer(pageUrl).takeIf(String::isNotBlank)?.let { mapOf("Referer" to it) }.orEmpty()
+        fun subtitlesFor(video: Element) = video.select("track[src]").filter { it.parent() === video }.mapIndexedNotNull { index, element ->
             val track = runCatching { animeMediaAbsolute(pageUrl, element.attr("src")) }.getOrNull()
                 ?: return@mapIndexedNotNull null
             AnimeSubtitle("track-$index", track, element.attr("label").ifBlank { "字幕 ${index + 1}" },
-                element.attr("srclang").takeIf { it.isNotBlank() }, "text/vtt",
-                mapOf("User-Agent" to AnimeHttp.USER_AGENT, "Referer" to mediaReferer(pageUrl)))
+                element.attr("srclang").takeIf { it.isNotBlank() }, "text/vtt", headers)
         }
-        for (element in document.select("video[src], video source[src]")) {
-            val candidate = runCatching { animeMediaAbsolute(pageUrl, element.attr("src")) }.getOrNull() ?: continue
-            val mime = element.attr("type").takeIf { it in MEDIA_TYPES } ?: animeMediaType(candidate)
-            if (mime != null) return ResolvedAnimeStream(candidate, mime, mediaReferer(pageUrl), subtitles)
+        val videos = document.select("video")
+        for (video in videos) {
+            val sources = sequenceOf(video) + video.select("source[src]").asSequence().filter { it.parent() === video }
+            val candidates = sources.filter { it.attr("src").isNotBlank() }.mapNotNull { node ->
+                val url = runCatching { animeMediaAbsolute(pageUrl, node.attr("src")) }.getOrNull() ?: return@mapNotNull null
+                val mime = node.attr("type").substringBefore(';').trim().lowercase().takeIf { it in MEDIA_TYPES }
+                    ?: animeMediaType(url) ?: return@mapNotNull null
+                val height = QUALITY_ATTRIBUTES.mapNotNull { node.attr(it).takeIf(String::isNotBlank)?.let(::animeDeclaredHeight) }
+                    .distinct().singleOrNull()
+                val label = height?.let { "${it}p" }.orEmpty()
+                AnimeResolution(animeHash(label + "\n" + animeContentIdentity(url)), label, url, mime, headers)
+            }.distinctBy { it.id }.take(64).toList()
+            val primary = candidates.firstOrNull() ?: continue
+            val labelled = candidates.filter { it.label.isNotEmpty() }
+            val options = if (labelled.isNotEmpty() && labelled.none { it.url == primary.url })
+                listOf(primary.copy(label = "来源默认")) + labelled else labelled
+            return ResolvedAnimeStream(primary.url, primary.mimeType, mediaReferer(pageUrl), subtitlesFor(video), options)
         }
+        val subtitles = videos.singleOrNull()?.let(::subtitlesFor).orEmpty()
 
         anonymousPages.dmbusPublicMedia(response.url, response.text)?.let { target ->
             return ResolvedAnimeStream(target.url, animeMediaType(target.url), target.referer, subtitles)
@@ -181,6 +200,7 @@ internal class AnimeStreamResolver(private val http: AnimeHttp, private val same
     }.getOrNull()
 
     private companion object {
+        val QUALITY_ATTRIBUTES = listOf("data-quality", "data-res", "data-resolution", "res", "label", "size")
         val PLAYER_START = Regex("""(?:\bplayer_[A-Za-z0-9_]+\s*=|\b(?:playerConfig|videoConfig)\s*=)\s*\{""")
         val MEDIA_ASSIGNMENT = Regex("""(?:\bVurl\b|\b(?:video_url|videoUrl|playUrl)\b)\s*[:=]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')""")
         val LMM85_PLAY_HINT = Regex("""([^?#]+\.m3u8)&t=hls(?:&ct=\d+)?""", RegexOption.IGNORE_CASE)

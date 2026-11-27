@@ -24,7 +24,6 @@ import androidx.compose.material.icons.outlined.Replay
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.VolumeOff
 import androidx.compose.material.icons.outlined.VolumeUp
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -232,7 +231,6 @@ internal fun BoxScope.AnimePlayerFeedback(notice: MutableState<AnimePlayerCue?>,
         if (notice.value === cue) notice.value = null
     }
     if (!visible) return
-    val colors = MaterialTheme.colorScheme
     val seek = cue as? AnimePlayerCue.Seek
     val forward = seek?.forward
     val x = (seek?.point?.x ?: when {
@@ -276,7 +274,7 @@ internal fun BoxScope.AnimePlayerFeedback(notice: MutableState<AnimePlayerCue?>,
     val time = seek?.let { animeTime(it.positionMs) }
     val showTarget = desktop && seek?.forward != null
     val announcement = if (seek?.forward != null) "$label，目标 $time" else if (seek != null) "目标 $time" else label
-    Row(Modifier.align(align).graphicsLayer {
+    AnimePlaybackSurface(null, Modifier.align(align).graphicsLayer {
         val amount = alpha.value
         this.alpha = amount
         translationX = if (motion) (1f - amount) * when (forward) {
@@ -285,45 +283,46 @@ internal fun BoxScope.AnimePlayerFeedback(notice: MutableState<AnimePlayerCue?>,
             null -> 0f
         } else 0f
         translationY = if (motion && forward == null) (1f - amount) * 3.dp.toPx() else 0f
-    }.background(colors.surface.copy(alpha = .95f), RoundedCornerShape(50))
-        .clearAndSetSemantics { liveRegion = LiveRegionMode.Polite; contentDescription = announcement }
-        .padding(horizontal = 11.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        val glyph = when (cue) {
-            is AnimePlayerCue.Seek -> when (cue.forward) {
-                true -> Icons.Outlined.FastForward
-                false -> Icons.Outlined.FastRewind
-                null -> Icons.Outlined.Schedule
+    }.clearAndSetSemantics { liveRegion = LiveRegionMode.Polite; contentDescription = announcement }) {
+        val colors = MaterialTheme.colorScheme
+        Row(Modifier.padding(horizontal = 11.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            val glyph = when (cue) {
+                is AnimePlayerCue.Seek -> when (cue.forward) {
+                    true -> Icons.Outlined.FastForward
+                    false -> Icons.Outlined.FastRewind
+                    null -> Icons.Outlined.Schedule
+                }
+                is AnimePlayerCue.Transport -> when {
+                    cue.restart -> Icons.Outlined.Replay
+                    cue.resume -> Icons.Outlined.PlayArrow
+                    else -> Icons.Outlined.Pause
+                }
+                is AnimePlayerCue.Volume -> if (cue.percent == 0) Icons.Outlined.VolumeOff else Icons.Outlined.VolumeUp
             }
-            is AnimePlayerCue.Transport -> when {
-                cue.restart -> Icons.Outlined.Replay
-                cue.resume -> Icons.Outlined.PlayArrow
-                else -> Icons.Outlined.Pause
-            }
-            is AnimePlayerCue.Volume -> if (cue.percent == 0) Icons.Outlined.VolumeOff else Icons.Outlined.VolumeUp
-        }
-        val stepMotion = if (motion && seek != null && forward != null && !seek.atLimit) {
-            val step = remember { Animatable(0f) }
-            LaunchedEffect(seek) {
-                step.animateTo(if (forward) 1f else -1f, spring(MangaMotion.PressDamping, MangaMotion.PressAttackStiffness))
-                step.animateTo(0f, spring(MangaMotion.PressDamping, MangaMotion.PressStiffness))
-            }
-            Modifier.graphicsLayer { translationX = step.value * 3.dp.toPx() }
-        } else Modifier
-        Icon(glyph, null, Modifier.size(17.dp).then(stepMotion), tint = colors.primary)
-        Text(label, color = colors.onSurface, style = mangaMetricValueStyle(), maxLines = 1)
-        if (showTarget && time != null) Text(time, color = colors.onSurfaceVariant,
-            style = mangaMetricValueStyle(12.sp, 16.sp), maxLines = 1)
-        if (cue is AnimePlayerCue.Volume) {
-            val volume = animateFloatAsState(cue.percent / 100f,
-                if (motion) spring(.96f, MangaMotion.NavigationStiffness) else snap(), label = "player-volume")
-            Canvas(Modifier.size(32.dp, 3.dp)) {
-                val corners = CornerRadius(size.height / 2f)
-                drawRoundRect(colors.onSurface.copy(alpha = .14f), cornerRadius = corners)
-                val width = size.width * volume.value.coerceIn(0f, 1f)
-                if (width > 0f) drawRoundRect(colors.primary,
-                    topLeft = Offset(if (rtl) size.width - width else 0f, 0f),
-                    size = Size(width, size.height), cornerRadius = corners)
+            val stepMotion = if (motion && seek != null && forward != null && !seek.atLimit) {
+                val step = remember { Animatable(0f) }
+                LaunchedEffect(seek) {
+                    step.animateTo(if (forward) 1f else -1f, spring(MangaMotion.PressDamping, MangaMotion.PressAttackStiffness))
+                    step.animateTo(0f, spring(MangaMotion.PressDamping, MangaMotion.PressStiffness))
+                }
+                Modifier.graphicsLayer { translationX = step.value * 3.dp.toPx() }
+            } else Modifier
+            AnimeGlassIcon(glyph, null, Modifier.size(17.dp).then(stepMotion), tint = colors.primary)
+            AnimeGlassLabel(label, color = colors.onSurface, style = mangaMetricValueStyle(), maxLines = 1)
+            if (showTarget && time != null) AnimeGlassLabel(time, color = colors.onSurfaceVariant,
+                style = mangaMetricValueStyle(12.sp, 16.sp), maxLines = 1)
+            if (cue is AnimePlayerCue.Volume) {
+                val volume = animateFloatAsState(cue.percent / 100f,
+                    if (motion) spring(.96f, MangaMotion.NavigationStiffness) else snap(), label = "player-volume")
+                Canvas(Modifier.size(32.dp, 3.dp)) {
+                    val corners = CornerRadius(size.height / 2f)
+                    drawRoundRect(colors.onSurface.copy(alpha = .14f), cornerRadius = corners)
+                    val width = size.width * volume.value.coerceIn(0f, 1f)
+                    if (width > 0f) drawRoundRect(colors.primary,
+                        topLeft = Offset(if (rtl) size.width - width else 0f, 0f),
+                        size = Size(width, size.height), cornerRadius = corners)
+                }
             }
         }
     }

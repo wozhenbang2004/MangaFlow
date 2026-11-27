@@ -484,9 +484,8 @@ internal fun AnimePlayerSettings(
                                         val height = heights[it]
                                         controller.updatePlaybackSettings { it.copy(preferredSourceHeight = height) }
                                     }, modifier = Modifier.fillMaxWidth())
-                                AnimeQuietLabel("重新开播时，从来源明确提供的选项中优先取不超过此高度的最高档；来源没有该档时使用可用选项。")
-                                AnimeQuietLabel("1080p 通常为 1920×1080；2160p 通常为 3840×2160。p 表示画面高度，FPS 才表示每秒帧数。")
-                                AnimeQuietLabel("这个偏好不会把 1080p 片源变成 4K；分辨率增强请在画质的输出倍率中设置。")
+                                AnimeQuietLabel("重新开播时优先选择目标高度内的最高档。自适应线路会随网速选档，来源只提供更高画质时沿用可用档位。")
+                                AnimeQuietLabel("1080p 和 2160p 表示片源画面的高度。需要进一步放大时，可调整画质增强的输出倍率。")
                             }
                         }
                         AnimePlayerPanel.AUDIO, AnimePlayerPanel.SUBTITLES -> {

@@ -3,6 +3,7 @@ package dev.mangaflow.anime.sources
 import com.fleeksoft.ksoup.Ksoup
 import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.anime.AnimeResolution
+import dev.mangaflow.anime.animeDeclaredHeight
 import dev.mangaflow.anime.AnimeSourceCatalog
 import dev.mangaflow.anime.AnimeSourceEpisode
 import dev.mangaflow.anime.AnimeSourceTitle
@@ -116,8 +117,12 @@ internal class NativeJinpaiProvider(override val revision: String) : AnimeProvid
                     .sortedByDescending(::resolutionRank).mapNotNull { row ->
                         val url = runCatching { animeMediaUrl(row.text("url")).toString() }.getOrNull()
                             ?: return@mapNotNull null
-                        val label = row.text("resolutionName").ifEmpty {
-                            row.positiveInt("resolution")?.let { it.toString() + "P" } ?: "默认"
+                        val name = row.text("resolutionName")
+                        val height = row.positiveInt("resolution")?.toString()?.let(::animeDeclaredHeight)
+                        val label = when {
+                            name.isBlank() -> height?.let { "${it}p" } ?: "默认"
+                            height != null && animeDeclaredHeight(name) != height -> "$name · ${height}p"
+                            else -> name
                         }
                         AnimeResolution(
                             id = animeHash(label + "\n" + animeContentIdentity(url)),

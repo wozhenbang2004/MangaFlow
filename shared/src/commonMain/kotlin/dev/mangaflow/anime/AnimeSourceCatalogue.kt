@@ -1,5 +1,8 @@
 package dev.mangaflow.anime
 
+import dev.mangaflow.anime.sources.sourceEpisodeIsRange
+import dev.mangaflow.anime.sources.sourceEpisodeMarker
+
 internal data class AnimeSourceCatalogueProjection(
     val episodes: List<AnimeEpisode>,
     val mappings: Map<String, String>,
@@ -16,8 +19,11 @@ internal fun projectAnimeSourceCatalogue(
     if (subject.canonicalDoubanId() == null || catalog.notice != null || catalog.episodes.isEmpty()) return null
     val explicit = binding?.automatic == false
     val annualGroups = if (explicit) emptyMap() else animeAnnualCatalogueGroups(subject, catalog)
-    if (!explicit && annualGroups.isEmpty() && !autoPlaySubjectMatches(subject, catalog.title)) return null
+    if (!explicit && annualGroups.isEmpty() && !autoPlaySubjectMatches(subject, catalog.title) &&
+        !animeNamedCatalogueEpisodeEvidence(detail, catalog)) return null
     val groups = annualGroups.ifEmpty { catalog.episodes.groupBy { it.group } }
+    val expectedSeason = animeCatalogueNames(subject).mapNotNull(::animeWrittenSeasonNumber).distinct().singleOrNull()
+    val scopedTitle = expectedSeason != null && animeWrittenSeasonNumber(catalog.title.title) == expectedSeason
     val movieLines = if (explicit || annualGroups.isNotEmpty()) emptyMap()
         else autoPlayMovieEpisodes(subject, catalog, binding?.selectedGroup)
     fun valid(rows: List<AnimeSourceEpisode>): Boolean {
@@ -25,12 +31,45 @@ internal fun projectAnimeSourceCatalogue(
         if (explicit) return rows.all { it.number == null || it.number.isFinite() }
         if (annualGroups.isNotEmpty()) return true
         if (rows.size == 1 && movieLines[rows.single().group] == rows.single()) return true
-        if (rows.any { it.kind != AnimeEpisodeKind.MAIN || it.number == null || !it.number.isFinite() || it.number <= 0.0 }) return false
-        val numbers = rows.map { requireNotNull(it.number) }.sorted()
-        if (numbers != numbers.indices.map { it + 1.0 } || rows.map { it.edition }.distinct().size != 1) return false
+        if (rows.any { row ->
+                val number = row.number
+                val marker = sourceEpisodeMarker(row.title)
+                val season = row.catalogueSeason ?: marker?.season
+                row.kind != AnimeEpisodeKind.MAIN || sourceEpisodeIsRange(row.title) ||
+                    number == null || !number.isFinite() || number <= 0.0 ||
+                    number % 1.0 != 0.0 || row.url.isBlank() || marker != null && marker.number != number ||
+                    season != null && season != (expectedSeason ?: 1)
+            }) return false
+        val numbers = rows.map { requireNotNull(it.number) }
+        if (numbers.distinct().size != numbers.size || rows.map { it.edition }.distinct().size != 1) return false
         if (subject.format == AnimeDiscoveryFormat.MOVIE && rows.size != 1) return false
         if (subject.episodeCount?.let { rows.size > it } == true || catalog.title.episodeCount?.let { rows.size > it } == true) return false
-        return true
+        // A source may have a genuine gap, start late, or publish overall numbering for an explicitly named season.
+        // Keep exactly the observed rows and their own coordinates; never fill the missing numbers.
+        val maximum = subject.episodeCount ?: catalog.title.episodeCount
+        return maximum == null || numbers.all { it <= maximum } || scopedTitle
+    }
+    val regularGroups = if (explicit || annualGroups.isNotEmpty() || movieLines.isNotEmpty()) groups else groups.mapValues { (_, rows) ->
+        rows.filter { it.kind == AnimeEpisodeKind.MAIN }
+    }
+    fun bestSameWorkGroup(): String? {
+        val candidates = animeAuditedRouteNames(catalog, regularGroups.keys).mapNotNull { name ->
+            regularGroups.getValue(name).takeIf(::valid)?.let { name to it }
+        }.toMap()
+        if (candidates.isEmpty()) return null
+        val anchor = candidates.entries.maxBy { it.value.size }
+        val numbers = anchor.value.associate { requireNotNull(it.number) to it }
+        // Compare overlapping releases, not the entire length. A mirror can be a week behind or miss a middle episode.
+        val sameScope = candidates.values.all { rows ->
+            val overlap = rows.filter { it.number?.let(numbers::containsKey) == true }
+            overlap.isNotEmpty() && overlap.all { row ->
+                val first = numbers.getValue(requireNotNull(row.number))
+                val left = animeEpisodeCaption(first.title)
+                val right = animeEpisodeCaption(row.title)
+                row.edition == first.edition && (left == null || right == null || left == right)
+            }
+        }
+        return anchor.key.takeIf { sameScope }
     }
     val group = binding?.selectedGroup?.takeIf { it in groups } ?: when {
         binding?.selectedGroup != null -> return null
@@ -40,14 +79,21 @@ internal fun projectAnimeSourceCatalogue(
             if (annualGroups.values.map { it.first().edition }.distinct().size != 1) return null
             annualGroups.keys.sorted().maxByOrNull { annualGroups.getValue(it).size } ?: return null
         }
-        !explicit && (catalog.sameWorkRoutes || hasLmmCatalogWorkId(catalog.title)) &&
-            groups.values.all(::valid) && groups.values.map { rows ->
-            rows.map { Triple(it.kind, it.number, it.edition) }.sortedBy { it.second }
-        }.distinct().size == 1 -> groups.keys.sorted().first()
+        !explicit && catalog.title.sourceId == "anime-tvtfun" -> {
+            val automatic = regularGroups.filterValues { rows ->
+                rows.isNotEmpty() && rows.all { it.playbackData == "automatic" } && valid(rows)
+            }
+            val allAutomatic = groups.values.count { rows -> rows.all { it.playbackData == "automatic" } }
+            if (allAutomatic == 1) automatic.keys.singleOrNull() ?: return null
+            else automatic.entries.singleOrNull { (_, rows) ->
+                expectedSeason != null && rows.all { it.catalogueSeason == expectedSeason }
+            }?.key ?: return null
+        }
+        !explicit -> bestSameWorkGroup() ?: return null
         else -> return null
     }
     val movie = movieLines[group]
-    val rows = movie?.let(::listOf) ?: groups.getValue(group)
+    val rows = movie?.let(::listOf) ?: regularGroups.getValue(group)
     if (!valid(rows)) return null
     val origin = listOf("source", catalog.title.sourceId, catalog.title.id, catalog.title.url, group).joinToString("\n")
     val observed = rows.map { episode ->
@@ -72,9 +118,9 @@ internal fun projectAnimeSourceCatalogue(
         val knownIds = previous.mapTo(hashSetOf()) { it.id }
         val knownNumbers = previous.filter { it.number > 0.0 }.mapTo(hashSetOf()) { it.kind to it.number }
         val added = observed.filter { it.id !in knownIds && (it.number <= 0.0 || (it.kind to it.number) !in knownNumbers) }
-        return AnimeSourceCatalogueProjection(retained + added, binding.episodeMappings + mappings.filterKeys {
-            id -> (retained + added).any { it.id == id }
-        }, group)
+        val merged = retained + added
+        val mergedIds = merged.mapTo(hashSetOf()) { it.id }
+        return AnimeSourceCatalogueProjection(merged, binding.episodeMappings + mappings.filterKeys(mergedIds::contains), group)
     }
     return AnimeSourceCatalogueProjection(observed, mappings, group)
 }

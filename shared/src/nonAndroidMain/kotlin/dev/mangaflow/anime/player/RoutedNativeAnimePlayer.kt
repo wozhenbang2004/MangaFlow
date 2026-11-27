@@ -50,7 +50,6 @@ import org.openani.mediamp.features.Buffering
 import org.openani.mediamp.features.AudioLevelController
 import org.openani.mediamp.features.AspectRatioMode
 import org.openani.mediamp.features.MediaMetadata
-import org.openani.mediamp.features.NetworkStats
 import org.openani.mediamp.features.PlaybackSpeed
 import org.openani.mediamp.features.VideoAspectRatio
 import org.openani.mediamp.metadata.AudioTrack
@@ -261,7 +260,8 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
 
     private fun AnimePlaybackAsset.sameStartupMedia(other: AnimePlaybackAsset) = playbackIdentity() == other.playbackIdentity() &&
         episodeId == other.episodeId && sourceEpisodeId == other.sourceEpisodeId && mimeType == other.mimeType &&
-        url == other.url && headers == other.headers && subtitles == other.subtitles && expiresAt == other.expiresAt
+        url == other.url && headers == other.headers && subtitles == other.subtitles && expiresAt == other.expiresAt &&
+        preferredAdaptiveHeight == other.preferredAdaptiveHeight
 
     override suspend fun openNative(request: AnimePlayerRequest, generation: Long) {
         val warm = handoff?.let { pending ->
@@ -274,8 +274,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
         val promotePlaying = state.value.playWhenReady
         val prepared = cachedStartup?.takeIf { (asset, media) ->
             !request.bypassMediaCache && request.localMedia == null && monotonicTimeMillis() < media.validUntil &&
-                asset.playbackIdentity() == request.asset.playbackIdentity() &&
-                asset.url == request.asset.url && asset.headers == request.asset.headers
+                asset.sameStartupMedia(request.asset)
         }?.second
         cachedStartup = null
         val transport = if (warm != null) {
@@ -414,12 +413,18 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
                 }
             }
         }
-        native.features[NetworkStats]?.let { network ->
-            child.launch(Dispatchers.Main.immediate) {
-                network.downloadSpeedBytesPerSecond.collect { speed ->
-                    publish(generation) { it.copy(downloadBytesPerSecond = if (request.localMedia != null) -1L
-                        else speed.takeIf { it >= 0L } ?: -1L) }
-                }
+        if (transport != null) child.launch(Dispatchers.Main.immediate) {
+            // The native player reads a loopback stream that can be served entirely from disk.
+            var previousBytes = transport.receivedNetworkBytes
+            var previousAt = monotonicTimeMillis()
+            while (isActive && isCurrent(generation) && engine.value === native) {
+                delay(1_000L)
+                val now = monotonicTimeMillis()
+                val received = transport.receivedNetworkBytes
+                val rate = (received - previousBytes) * 1_000L / (now - previousAt).coerceAtLeast(1L)
+                publish(generation) { it.copy(downloadBytesPerSecond = rate, receivedNetworkBytes = received) }
+                previousBytes = received
+                previousAt = now
             }
         }
         metadata?.audioTracks?.let { group ->

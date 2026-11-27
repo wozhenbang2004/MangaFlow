@@ -3,7 +3,9 @@ package dev.mangaflow.anime.sources
 import com.fleeksoft.ksoup.Ksoup
 import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimePlaybackAsset
+import dev.mangaflow.anime.AnimeResolution
 import dev.mangaflow.anime.AnimeSourceCatalog
+import dev.mangaflow.anime.animeWrittenSeasonNumber
 import dev.mangaflow.anime.AnimeSourceEpisode
 import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.anime.AnimeSubtitle
@@ -93,20 +95,20 @@ private abstract class RoutedAnimeProvider : AnimeProvider {
     protected fun asset(
         http: AnimeHttp, episode: AnimeSourceEpisode, url: String,
         mimeType: String? = null, referer: String = homeUrl,
-        subtitles: List<AnimeSubtitle> = emptyList(),
+        subtitles: List<AnimeSubtitle> = emptyList(), resolutions: List<AnimeResolution> = emptyList(),
     ): AnimePlaybackAsset = AnimePlaybackAsset(
         id = "$id:${animeHash(episode.id + "\n" + episode.edition + "\n" + animeContentIdentity(url))}",
         sourceId = id, sourceEpisodeId = episode.id, url = animeMediaUrl(url).toString(),
         route = http.route, title = episode.title, edition = episode.edition, mimeType = mimeType ?: animeMediaType(url),
         headers = mapOf("User-Agent" to AnimeHttp.USER_AGENT, "Referer" to animePublicUrl(referer).toString()),
-        subtitles = subtitles, sourceRevision = revision,
+        subtitles = subtitles, sourceRevision = revision, resolutions = resolutions,
     )
     override suspend fun resolve(catalog: AnimeSourceCatalog, episode: AnimeSourceEpisode): AnimePlaybackAsset {
         selected(catalog, episode)
         val http = AnimeHttp(id)
         return try {
             val stream = AnimeStreamResolver(http).resolve(episode.url, homeUrl)
-            asset(http, episode, stream.url, stream.mimeType, stream.referer, stream.subtitles)
+            asset(http, episode, stream.url, stream.mimeType, stream.referer, stream.subtitles, stream.resolutions)
         } finally { http.close() }
     }
     protected fun requireEpisodes(title: AnimeSourceTitle, episodes: List<AnimeSourceEpisode>): AnimeSourceCatalog {
@@ -215,9 +217,21 @@ private class TvtFunProvider : RoutedAnimeProvider() {
         val http = AnimeHttp(id)
         return try {
             val data = details(http, title, AnimeSourceStage.CATALOG)
-            val slug = data.text("slug").ifBlank { identifier(title) }
+            val requested = identifier(title)
+            val slug = data.text("slug").ifBlank { requested }
+            val year = data.positiveInt("year")?.takeIf { it in 1900..2100 }
+            val bangumi = data.positiveInt("bangumiId")?.toString()
+            val previousId = title.externalIds["bangumi"]
+            if (slug != requested && data.text("id") != requested || year != null && title.year != null && title.year != year ||
+                bangumi != null && previousId != null && previousId != bangumi)
+                throw AnimeSourceException(id, AnimeSourceStage.CATALOG, "来源搜索条目和作品目录的标识或年份不一致。")
             val episodes = data.requiredArray("seasons", id, AnimeSourceStage.CATALOG).objects().flatMapIndexed { seasonIndex, season ->
-                val seasonLabel = season.text("name").ifBlank { "第 ${season.positiveInt("seasonNo") ?: seasonIndex + 1} 季" }
+                val observedName = season.text("name")
+                val seasonNo = season.positiveInt("seasonNo")
+                val namedSeason = animeWrittenSeasonNumber(observedName)
+                val confirmedSeason = if (namedSeason != null && seasonNo != null && namedSeason != seasonNo) null
+                    else seasonNo ?: namedSeason
+                val seasonLabel = observedName.ifBlank { "第 ${seasonNo ?: seasonIndex + 1} 季" }
                 val seasonKey = season.text("id").ifBlank { (seasonIndex + 1).toString() }
                 season.requiredArray("episodes", id, AnimeSourceStage.CATALOG).objects().flatMap { ep ->
                     val epId = ep.text("id")
@@ -236,7 +250,7 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                     val automaticEpisode = AnimeSourceEpisode(
                         id = "$seasonKey:$epId:auto", title = label, url = automaticUrl.toString(), number = number,
                         kind = kind, group = "$seasonLabel · 自动线路 [$seasonKey]",
-                        edition = seasonLabel, playbackData = "automatic",
+                        edition = seasonLabel, playbackData = "automatic", catalogueSeason = confirmedSeason,
                     )
                     listOf(automaticEpisode) + embedded.mapIndexedNotNull { lineIndex, line ->
                         val lineId = line.text("id")
@@ -249,12 +263,13 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                         AnimeSourceEpisode(
                             id = "$seasonKey:$epId:$lineId", title = label, url = url.toString(), number = number,
                             kind = kind, group = "$seasonLabel · $lineLabel [$seasonKey/$lineKey]",
-                            edition = seasonLabel,
+                            edition = seasonLabel, catalogueSeason = confirmedSeason,
                         )
                     }
                 }
             }
-            requireEpisodes(title.copy(title = data.text("name").ifBlank { title.title },
+            requireEpisodes(title.copy(title = data.text("name").ifBlank { title.title }, year = year ?: title.year,
+                externalIds = if (bangumi == null) title.externalIds else title.externalIds + ("bangumi" to bangumi),
                 coverUrl = sourceCover(homeUrl, data.text("coverUrl", "posterUrl")).ifBlank { title.coverUrl }), episodes)
         } finally { http.close() }
     }
@@ -334,7 +349,7 @@ private class TvtFunProvider : RoutedAnimeProvider() {
             val mediaType = playbackMediaType(playback, url)
             if (mediaType == null) {
                 val stream = AnimeStreamResolver(http).resolve(url, homeUrl)
-                asset(http, episode, stream.url, stream.mimeType, stream.referer, subtitles + stream.subtitles)
+                asset(http, episode, stream.url, stream.mimeType, stream.referer, subtitles + stream.subtitles, stream.resolutions)
             } else asset(http, episode, url, mediaType, subtitles = subtitles)
         }
     }
@@ -628,19 +643,84 @@ internal fun sourceCover(base: String, raw: String): String =
     if (raw.isBlank()) "" else runCatching { animeAbsolute(base, raw) }.getOrDefault("")
 
 private val sourceTrailerLabel = Regex("""(?<![a-z0-9])(?:pv|trailer)(?![a-z])""")
+private val cjkSpecialLabel = Regex("""特[别別](?:篇|编|編|版|节目|節目|放送|映像|回|话|話)|^特[别別](?:$|[\s0-9])""")
 private val sourceSpecialLabel = Regex("""(?<![a-z0-9])(?:sp|ova|oad)(?![a-z])|^special(?:\s*[0-9]+|\s*$)""")
-private val numericSourceEpisode = Regex("""^(?:第\s*)?([0-9]+(?:\.[0-9]+)?)(?:\s*[集话話回])?(?=$|\s|[:_]|[.-](?![0-9]))""")
-private val englishSourceEpisode = Regex("""^(?:EP|Episode)\s*([0-9]+(?:\.[0-9]+)?)(?=$|\s|[:_]|[.-](?![0-9]))""",
+private const val sourceOrdinal = """[0-9]{1,5}(?:\.[0-9]{1,3})?|[零〇一二两兩三四五六七八九十百千]{1,12}"""
+private val cjkSourceEpisode = Regex("""^(?:第\s*($sourceOrdinal)\s*季\s*)?第\s*($sourceOrdinal)\s*[集话話回]""")
+private val seasonSourceEpisode = Regex("""^S([0-9]{1,2})[\s._-]*E(?:P)?\.?\s*([0-9]{1,5})(?![0-9A-Za-z])""",
     RegexOption.IGNORE_CASE)
+private val numericSourceEpisode = Regex("""^(?:第\s*)?([0-9]+(?:\.[0-9]+)?)(?:\s*[集话話回])?(?=$|\s|[:：_·]|[.-](?![0-9]))""")
+private val englishSourceEpisode = Regex("""^(?:Episode|EP)\.?\s*([0-9]+(?:\.[0-9]+)?)(?=$|\s|[:：_·]|[.-](?![0-9])|[\u3400-\u9fff])""",
+    RegexOption.IGNORE_CASE)
+private val joinedEpisodeRange = Regex(
+    """^(?:(?:第\s*(?:$sourceOrdinal)\s*季\s*)?第\s*|S\d{1,2}[\s._-]*E(?:P)?\.?\s*|(?:Episode|EP)\.?\s*)?(?:$sourceOrdinal)\s*[集话話回]?\s*[-–—~～/、至到]\s*(?:第\s*|E(?:P)?\s*)?(?:$sourceOrdinal)(?:\s*[集话話回]|$|[\s:：,，(-])""",
+    RegexOption.IGNORE_CASE,
+)
+internal fun sourceEpisodeIsRange(label: String): Boolean = joinedEpisodeRange.containsMatchIn(normalizeNfkc(label).trim())
+private val qualitySuffix = Regex("""^(?:[pPiIkK]\b|年\s*\d{1,2}月)""")
+private val calendarSuffix = Regex("""^[-/.]\s*[0-9].*""")
+/** Bounded ordinary CJK cardinals, including 一百七十一 and 〇一. Word/route numbers never enter this parser. */
+private fun sourceOrdinalNumber(raw: String): Double? {
+    raw.toDoubleOrNull()?.let { return it.takeIf { n -> n.isFinite() && n >= 0 } }
+    val label = raw.replace('〇', '零').replace('两', '二').replace('兩', '二')
+    val digits = "零一二三四五六七八九"
+    if (label.all { it in digits })
+        return label.map { digits.indexOf(it) }.joinToString("").toIntOrNull()?.takeIf { it <= 9999 }?.toDouble()
+    var total = 0
+    var digit = 0
+    var lastUnit = 10000
+    for ((index, char) in label.withIndex()) {
+        val value = digits.indexOf(char)
+        if (value >= 0) {
+            if (digit != 0) return null
+            digit = value
+        } else {
+            val unit = when (char) {
+                '十' -> 10
+                '百' -> 100
+                '千' -> 1000
+                else -> return null
+            }
+            if (unit >= lastUnit || digit == 0 && !(index == 0 && unit == 10)) return null
+            total += (if (digit == 0) 1 else digit) * unit
+            digit = 0
+            lastUnit = unit
+        }
+    }
+    // Colloquial 一百七 can mean 170; 一百零七 and 一百七十 are unambiguous.
+    if (lastUnit >= 100 && digit > 0 && label.getOrNull(label.lastIndex - 1) != '零') return null
+    return (total + digit).takeIf { it in 1..9999 }?.toDouble()
+}
+
+internal data class SourceEpisodeMarker(val number: Double, val season: Int?, val caption: String, val exact: Boolean)
+
+internal fun sourceEpisodeMarker(label: String): SourceEpisodeMarker? {
+    val text = normalizeNfkc(label).trim()
+    val scoped = cjkSourceEpisode.find(text) ?: seasonSourceEpisode.find(text)
+    val match = scoped ?: numericSourceEpisode.find(text) ?: englishSourceEpisode.find(text) ?: return null
+    val number = sourceOrdinalNumber(match.groupValues[if (scoped == null) 1 else 2]) ?: return null
+    val seasonText = scoped?.groupValues?.get(1).orEmpty()
+    val season = if (seasonText.isBlank()) null else {
+        val value = sourceOrdinalNumber(seasonText) ?: return null
+        value.toInt().takeIf { it in 1..99 && it.toDouble() == value } ?: return null
+    }
+    val rest = text.substring(match.range.last + 1).trim()
+    if (joinedEpisodeRange.containsMatchIn(text) || qualitySuffix.containsMatchIn(rest) ||
+        scoped == null && text.firstOrNull()?.isDigit() == true && number in 1900.0..2099.0 &&
+        (rest.startsWith("年") || calendarSuffix.matches(rest))) return null
+    val caption = rest.trimStart { it.isWhitespace() || it in "·:：|－—_-" }.trimEnd()
+    return SourceEpisodeMarker(number, season, caption, rest.isEmpty())
+}
 
 internal fun sourceEpisodeKind(label: String): AnimeEpisodeKind {
     val text = normalizeNfkc(label).trim().lowercase()
     return when {
         text.contains("预告") || text.contains("預告") || sourceTrailerLabel.containsMatchIn(text) -> AnimeEpisodeKind.TRAILER
+        joinedEpisodeRange.containsMatchIn(text) -> AnimeEpisodeKind.OTHER
         text.contains("片头") || text.contains("片頭") ||
             Regex("""^(?:op|opening)(?:\d|\s|$)""").containsMatchIn(text) -> AnimeEpisodeKind.OPENING
         text.contains("片尾") || Regex("""^(?:ed|ending)(?:\d|\s|$)""").containsMatchIn(text) -> AnimeEpisodeKind.ENDING
-        text.contains("特别") || text.contains("特別") || text.contains("特典") ||
+        cjkSpecialLabel.containsMatchIn(text) || text.contains("特典") ||
             text.contains("总集") || text.contains("總集") ||
             sourceSpecialLabel.containsMatchIn(text) -> AnimeEpisodeKind.SPECIAL
         else -> AnimeEpisodeKind.MAIN
@@ -648,12 +728,8 @@ internal fun sourceEpisodeKind(label: String): AnimeEpisodeKind {
 }
 
 /** No ordinal fallback: an unparseable label stays unresolved for the mapping UI. */
-internal fun sourceEpisodeNumber(label: String, exactLabel: Boolean = false): Double? {
-    val text = normalizeNfkc(label).trim()
-    val match = if (exactLabel) numericSourceEpisode.matchEntire(text) ?: englishSourceEpisode.matchEntire(text)
-        else numericSourceEpisode.find(text) ?: englishSourceEpisode.find(text)
-    return match?.groupValues?.get(1)?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 }
-}
+internal fun sourceEpisodeNumber(label: String, exactLabel: Boolean = false): Double? =
+    sourceEpisodeMarker(label)?.takeIf { !exactLabel || it.exact }?.number
 
 internal fun animeEpisodeLabel(number: Double): String =
     if (number % 1.0 == 0.0) number.toLong().toString() else number.toString()

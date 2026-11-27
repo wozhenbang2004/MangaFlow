@@ -1,6 +1,7 @@
 package dev.mangaflow.anime
 
 import dev.mangaflow.anime.player.animeHlsTransportOffset
+import dev.mangaflow.anime.player.isAnimeStartupVideoPrefix
 import dev.mangaflow.anime.player.usesImagePrefixedAnimeHls
 import dev.mangaflow.anime.sources.animeMediaUrl
 import dev.mangaflow.net.HttpUrl
@@ -25,18 +26,19 @@ internal data class AnimeMediaPreflight(
 
 private const val PROBE_BYTES = 64 * 1024
 private const val PROBE_TRACK_BYTES = 256 * 1024
-private val HLS_HEIGHT = Regex("""(?i)\bRESOLUTION=\d+x(\d+)""")
 private val DASH_HEIGHT = Regex("""(?i)\bheight\s*=\s*["'](\d+)["']""")
 private val HLS_MAP = Regex("(?i)\\bURI=\"([^\"]+)\"")
 private val HLS_MAP_RANGE = Regex("(?:^|,)BYTERANGE=\"([^\"]+)\"")
 
-private data class ProbeSample(val url: HttpUrl, val response: NetworkResponse, val elapsedMs: Long) {
+private data class ProbeSample(val url: HttpUrl, val response: NetworkResponse, val bodyMs: Long) {
     val bytes get() = response.bytes
     val text get() = bytes.decodeToString().trimStart('\uFEFF', ' ', '\r', '\n', '\t')
-    fun rate() = bytes.size.takeIf { it >= 16_384 && elapsedMs >= 50L }?.toLong()?.times(1_000L)?.div(elapsedMs)
+    fun rate() = bytes.size.takeIf { it >= 48 * 1024 && bodyMs >= 100L }?.toLong()?.times(1_000L)?.div(bodyMs)
 }
 
 internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset): AnimeMediaPreflight {
+    if (!animePlaybackFormatSupported(asset))
+        return AnimeMediaPreflight(wallTimeMillis(), verified = false, failure = "当前平台暂不支持这条 DASH 线路")
     val origin = publicProbeUrl(asset.url)
         ?: return AnimeMediaPreflight(wallTimeMillis(), failure = "媒体地址超出公开 HTTP(S) 探测范围")
     val client = NetworkClient(route = asset.route, publicMediaOnly = true, connectTimeoutMillis = 2_500,
@@ -64,7 +66,9 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
                 val start = monotonicTimeMillis()
                 val maximum = range?.let { (it.last - it.first + 1L).toInt() } ?: maximumBytes
                 val offset = range?.first ?: 0L
+                var headersAt = start
                 val response = client.readPrefix(request.build(), maximum, deadline - start) { header ->
+                    headersAt = monotonicTimeMillis()
                     header.code == 200 && offset == 0L || header.code == 206 &&
                         header.header("Content-Range")?.startsWith("bytes $offset-", ignoreCase = true) == true
                 } ?: return null
@@ -76,7 +80,7 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
                         url = next
                     }
                     else -> return ProbeSample(url, response,
-                        (monotonicTimeMillis() - start).coerceAtLeast(1L))
+                        (monotonicTimeMillis() - headersAt).coerceAtLeast(0L))
                 }
             }
             null
@@ -109,45 +113,46 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
             401, 403, 404, 410, 429 -> false
             else -> null
         }, probeHttpMessage(code))
+        if (isVideoPrefix(root.bytes, asset.sourceId)) return result(code, true, rate = root.rate(),
+            height = videoSampleHeight(root.bytes, asset.sourceId) ?: sampleMp4TrackHeight(root))
         val text = root.text
         val hls = text.startsWith("#EXTM3U") && text.contains("#EXT-X-")
         val dash = text.startsWith("<MPD") || (text.startsWith("<?xml") && text.contains("<MPD"))
         if (hls) {
-            val lines = text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
-            val variants = lines.zipWithNext().filter { (tag, uri) ->
-                tag.startsWith("#EXT-X-STREAM-INF:") && !uri.startsWith("#")
-            }
+            val lines = limitAnimeHlsMaster(text, asset.preferredAdaptiveHeight).lines()
+            val variants = animeHlsRenditions(lines)
             suspend fun samplePlaylist(media: ProbeSample?, height: Int?): AnimeMediaPreflight {
                 val mediaLines = media?.text?.takeIf { it.startsWith("#EXTM3U") }.orEmpty()
                     .lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
-                val firstSegment = mediaLines.indexOfFirst { !it.startsWith("#") }
-                val prefix = if (firstSegment >= 0) mediaLines.take(firstSegment) else emptyList()
-                val byteRange = prefix.lastOrNull { it.startsWith("#EXT-X-BYTERANGE:") }?.substringAfter(':')
-                val initTag = prefix.lastOrNull { it.startsWith("#EXT-X-MAP:") }.orEmpty().substringAfter(':')
+                val segment = firstClearHlsPart(mediaLines)
+                val initTag = segment?.initTag.orEmpty()
                 val init = HLS_MAP.find(initTag)?.groupValues?.get(1)
-                val part = media?.let { playlist ->
-                    mediaLines.getOrNull(firstSegment)?.let { publicProbeChild(playlist.url, it) }
-                }?.let { sampleHlsPart(it, byteRange, if (height == null) PROBE_TRACK_BYTES else PROBE_BYTES) }
-                val goodPart = part?.takeIf { it.response.code in 200..299 && it.bytes.isNotEmpty() &&
-                    (isVideoPrefix(it.bytes, asset.sourceId) || isVideoContentType(it.response)) }
-                val headerHeight = if (height != null) null else goodPart?.let { videoSampleHeight(it.bytes, asset.sourceId) } ?:
-                    media?.let { playlist -> init?.let { publicProbeChild(playlist.url, it) } }
-                        ?.let { sampleHlsPart(it, HLS_MAP_RANGE.find(initTag)?.groupValues?.get(1)) }
-                        ?.takeIf { it.response.code in 200..299 }?.let { videoSampleHeight(it.bytes, asset.sourceId) }
+                val part = if (media != null && segment != null) publicProbeChild(media.url, segment.uri)?.let {
+                    sampleHlsPart(it, segment.byteRange, if (height == null) PROBE_TRACK_BYTES else PROBE_BYTES)
+                } else null
+                val goodPart = part?.takeIf { it.response.code in 200..299 && isVideoPrefix(it.bytes, asset.sourceId) }
+                val trackHeight = goodPart?.let { videoSampleHeight(it.bytes, asset.sourceId) }
+                val initUrl = if (trackHeight == null && height == null && goodPart != null && media != null && init != null)
+                    publicProbeChild(media.url, init) else null
+                val headerHeight = trackHeight ?: initUrl?.let { sampleHlsPart(it, HLS_MAP_RANGE.find(initTag)?.groupValues?.get(1)) }
+                    ?.takeIf { it.response.code in 200..299 }?.let { videoSampleHeight(it.bytes, asset.sourceId) }
                 val detail = when {
                     part != null && part.response.code !in 200..299 -> "清单可读 · 片段 ${probeHttpMessage(part.response.code)}"
                     media != null && media.response.code !in 200..299 -> "清单可读 · 子清单 ${probeHttpMessage(media.response.code)}"
                     goodPart == null -> "清单可读 · 未取得视频片段样本"
                     else -> null
                 }
-                return result(code, true, detail, height?.let { "${it}p" }, goodPart?.rate(), headerHeight)
+                // A readable master is useful even when the selected rendition returned an HTML error.
+                // Only a recognized media segment backs a rendition's advertised height or transfer rate.
+                val advertised = if (goodPart != null && height != null) "${height}p" else null
+                return result(code, true, detail, advertised, goodPart?.rate(), headerHeight)
             }
-            if (variants.isEmpty()) return samplePlaylist(root, HLS_HEIGHT.maxHeight(text))
+            if (variants.isEmpty()) return samplePlaylist(root, null)
             // A broken high-resolution rendition does not invalidate the master playlist.
             var firstEvidence: AnimeMediaPreflight? = null
-            val renditions = variants.mapNotNull { (tag, raw) ->
-                publicProbeChild(root.url, raw)?.let { it to HLS_HEIGHT.maxHeight(tag) }
-            }.sortedByDescending { it.second ?: 0 }.distinctBy { it.first }.take(3)
+            val renditions = variants.mapNotNull { variant ->
+                publicProbeChild(root.url, lines[variant.uriIndex].trim())?.let { it to variant.height }
+            }.sortedBy { animeRenditionOrder(it.second, asset.preferredAdaptiveHeight) }.distinctBy { it.first }.take(3)
             for ((url, height) in renditions) {
                 if (monotonicTimeMillis() >= startedAt + 8_000L) break
                 val evidence = samplePlaylist(sample(url), height)
@@ -156,11 +161,13 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
             }
             return firstEvidence ?: result(code, true, "清单可读 · 未取得视频片段样本")
         }
-        if (dash) return result(code, true, "清单可读 · 尚未采样视频片段",
-            quality = DASH_HEIGHT.maxHeight(text)?.let { "${it}p" })
-        val recognized = isVideoPrefix(root.bytes, asset.sourceId)
-        if (recognized) return result(code, true, rate = root.rate(),
-            height = videoSampleHeight(root.bytes, asset.sourceId) ?: sampleMp4TrackHeight(root))
+        if (dash) {
+            if (!animePlaybackFormatSupported(asset.url, "application/dash+xml"))
+                return result(code, false, "当前平台暂不支持这条 DASH 线路")
+            val advertised = DASH_HEIGHT.findAll(text).mapNotNull { it.groupValues[1].toIntOrNull() }
+                .filter { it in 144..8640 }.minByOrNull { animeRenditionOrder(it, asset.preferredAdaptiveHeight) }
+            return result(code, true, "清单可读 · 尚未采样视频片段", quality = advertised?.let { "${it}p" })
+        }
         val document = text.startsWith("<html", true) || text.startsWith("<!doctype", true) ||
             text.startsWith("{") || text.startsWith("[")
         if (document) return result(code, false, "媒体地址返回了网页或接口内容")
@@ -175,6 +182,30 @@ private val ignoredProbeHeaders = setOf("host", "connection", "content-length", 
     "proxy-authorization", "proxy-authenticate", "upgrade", "range", "if-range", "accept-encoding")
 private val publicMediaHeaders = setOf("user-agent", "referer", "origin", "accept", "accept-language")
 private val redirectCodes = setOf(301, 302, 303, 307, 308)
+
+private data class HlsProbePart(val uri: String, val byteRange: String?, val initTag: String?)
+
+private fun firstClearHlsPart(lines: List<String>): HlsProbePart? {
+    var segment = false
+    var gap = false
+    var encrypted = false
+    var byteRange: String? = null
+    var initTag: String? = null
+    for (line in lines) when {
+        line.startsWith("#EXTINF:") -> segment = true
+        line == "#EXT-X-GAP" -> gap = true
+        line.startsWith("#EXT-X-KEY:") -> encrypted = "METHOD=NONE" !in line.substringAfter(':').split(',')
+        line.startsWith("#EXT-X-MAP:") -> initTag = line.substringAfter(':')
+        line.startsWith("#EXT-X-BYTERANGE:") -> byteRange = line.substringAfter(':')
+        !line.startsWith('#') -> {
+            if (segment && !gap && !encrypted) return HlsProbePart(line, byteRange, initTag)
+            segment = false
+            gap = false
+            byteRange = null
+        }
+    }
+    return null
+}
 
 private fun publicProbeUrl(value: String): HttpUrl? = runCatching { animeMediaUrl(value) }.getOrNull()
 private fun publicProbeChild(parent: HttpUrl, value: String): HttpUrl? = parent.resolve(value)?.toString()?.let(::publicProbeUrl)
@@ -193,9 +224,6 @@ private suspend fun videoSampleHeight(bytes: ByteArray, sourceId: String): Int? 
 }
 
 internal expect suspend fun platformAnimeSampleHeight(bytes: ByteArray): Int?
-private fun Regex.maxHeight(text: String): Int? = findAll(text).mapNotNull {
-    it.groupValues[1].toIntOrNull()?.takeIf { height -> height in 144..8640 }
-}.maxOrNull()
 private fun probeHttpMessage(code: Int): String = when (code) {
     401, 403 -> "HTTP $code · 媒体地址被拒绝"
     404, 410 -> "HTTP $code · 媒体地址已失效"
@@ -206,9 +234,7 @@ private fun isVideoContentType(response: NetworkResponse) =
     response.header("Content-Type")?.startsWith("video/", ignoreCase = true) == true
 
 private fun isVideoPrefix(bytes: ByteArray, sourceId: String): Boolean =
-    bytes.size >= 12 && fourCc(bytes, 4) in setOf("ftyp", "styp", "moof") ||
-        bytes.size >= 4 && bytes.int32(0) == 0x1a45dfa3 ||
-        bytes.size >= 188 * 5 && (0 until 5).all { bytes[it * 188] == 0x47.toByte() } ||
+    isAnimeStartupVideoPrefix(bytes) ||
         bytes.size >= 9 && bytes.decodeToString(0, 3) == "FLV" ||
         usesImagePrefixedAnimeHls(sourceId) && animeHlsTransportOffset(bytes, bytes.size) > 0
 

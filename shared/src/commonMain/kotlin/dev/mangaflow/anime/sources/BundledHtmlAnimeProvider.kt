@@ -79,7 +79,7 @@ internal class BundledHtmlAnimeProvider(
                 val episodes = document.select("a[href*=$playPrefix]").mapNotNull { anchor ->
                     val target = runCatching { animePublicUrl(animeAbsolute(homeUrl, anchor.attr("href"))) }.getOrNull()
                         ?: return@mapNotNull null
-                    if (target.host != url.host) return@mapNotNull null
+                    if (target.scheme != url.scheme || target.host != url.host || target.port != url.port) return@mapNotNull null
                     val parts = pathPattern.matchEntire(target.encodedPath)?.groupValues ?: return@mapNotNull null
                     val label = anchor.text().trim()
                     if (label.isEmpty()) return@mapNotNull null
@@ -122,7 +122,10 @@ internal class BundledHtmlAnimeProvider(
             }
             if (episodes.isEmpty()) throw AnimeSourceException(id, AnimeSourceStage.CATALOG,
                 "来源未返回可识别的剧集，可能需要原站验证或页面规则已变化。")
-            AnimeSourceCatalog(identity, episodes)
+            // Every accepted Aki link embeds this work ID and a native line ID on the original detail origin.
+            val sameDetail = response.url.scheme == url.scheme && response.url.host == url.host &&
+                response.url.port == url.port && response.url.encodedPath == url.encodedPath
+            AnimeSourceCatalog(identity, episodes, sameWorkRoutes = aki && sameDetail)
         } finally { http.close() }
     }
 
@@ -138,7 +141,7 @@ internal class BundledHtmlAnimeProvider(
                 // An explicit public parser omission must not become an empty Referer header.
                 headers = mapOf("User-Agent" to AnimeHttp.USER_AGENT) +
                     stream.referer.takeIf(String::isNotBlank)?.let { mapOf("Referer" to it) }.orEmpty(),
-                subtitles = stream.subtitles, sourceRevision = revision)
+                subtitles = stream.subtitles, sourceRevision = revision, resolutions = stream.resolutions)
         } finally { http.close() }
     }
 }

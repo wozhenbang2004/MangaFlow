@@ -306,7 +306,11 @@ internal fun AnimeDetailPane(
     } else AnimeDetailOffline.MISSING.takeIf { savedProgress?.localDownloadId != null && !savedProgress.completed &&
         (first == null || first.id == savedProgress.episodeId) }
     val checkingSavedEpisode = savedProgress != null && state.pendingHistoryEpisodeId == savedProgress.episodeId
-    val playControl = animeDetailPlayControl(first, savedProgress, firstAvailability,
+    val cataloguePlay = rememberCataloguePlayAction(controller, subject.id,
+        active = active && detailTab == 0 && !statusPresent && !discussionChecksPresent && !discussionFilter && episodeMenuOwner == null,
+        awaitingCatalogue = first == null && savedProgress == null && !state.libraryReadUnavailable && detail.episodes.isEmpty() &&
+            (state.detailLoading || sourceSearchInProgress))
+    val playControl = cataloguePlay?.control ?: animeDetailPlayControl(first, savedProgress, firstAvailability,
         checkingSavedEpisode, firstCanRetry, offline, resumeCheckpoint, offeredSavedLine)
     val pendingNativeCatalog = state.sourceCatalogs.firstOrNull {
         it.title.sourceId == nativeSource && !it.notice.isNullOrBlank() && detail.episodes.isEmpty()
@@ -418,6 +422,10 @@ internal fun AnimeDetailPane(
                         val latest = controller.state.value
                         val liveDetail = latest.detail?.takeIf { it.subject.id == subject.id } ?: return@play
                         if (!dockActive || latest.resolving || latest.playbackTarget != null) return@play
+                        if (cataloguePlay != null) {
+                            cataloguePlay.activate()
+                            return@play
+                        }
                         val liveProgress = latest.library.firstOrNull { it.subject.id == subject.id }?.resume
                         if (offeredSavedLine && control.mode == AnimeDetailPlayMode.PLAY) {
                             if (liveProgress != null && savedProgress != null && liveProgress.episodeId == savedProgress.episodeId &&

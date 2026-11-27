@@ -1,6 +1,7 @@
 package dev.mangaflow.anime.player
 
 import dev.mangaflow.anime.AnimePlaybackAsset
+import dev.mangaflow.anime.limitAnimeHlsMaster
 import dev.mangaflow.anime.AnimeSubtitle
 import dev.mangaflow.anime.downloads.parseAnimeHlsDownload
 import dev.mangaflow.anime.sources.animeMediaUrl
@@ -88,6 +89,8 @@ internal class AnimeStreamBridge private constructor(
     val lastFailureRetryable: Boolean? get() = synchronized(lock) { failureRetryable }
     private class ReadAttempt { val mediaDeliveries = atomic(0L) }
     private var attempt = ReadAttempt()
+    private val upstreamMediaBytes = atomic(0L)
+    val receivedNetworkBytes: Long get() = upstreamMediaBytes.value
     /** Changes as media payload is delivered on this attempt, independently of playlist or subtitle traffic. */
     val mediaDeliveryRevision: Long get() = synchronized(lock) { attempt.mediaDeliveries.value }
     private val startupOriginUntil = atomic(0L)
@@ -333,6 +336,7 @@ internal class AnimeStreamBridge private constructor(
                     },
                     onChunk = { bytes, count ->
                         warmReads?.admit(count)
+                        val unclassifiedBytes = prefix.size
                         if (!classified) {
                             prefix.write(bytes, 0, count)
                             if (prefix.size >= 256) {
@@ -359,8 +363,10 @@ internal class AnimeStreamBridge private constructor(
                             val normalized = segment
                             if (normalized == null) output.bytes(bytes, count) else normalized.write(bytes, count)
                         }
-                        if (classified && !manifest && count > 0 && (resource.kind == Kind.MEDIA || resource.kind == Kind.AUTO))
+                        if (classified && !manifest && count > 0 && (resource.kind == Kind.MEDIA || resource.kind == Kind.AUTO)) {
+                            upstreamMediaBytes.addAndGet(unclassifiedBytes + count)
                             ownedAttempt.mediaDeliveries.incrementAndGet()
+                        }
                     },
                 )
                 if (redirect != null) {
@@ -375,6 +381,7 @@ internal class AnimeStreamBridge private constructor(
                     manifest = sample.startsWith("#EXTM3U")
                     if (manifest) manifestBody.writeAll(prefix)
                     else {
+                        if (resource.kind == Kind.AUTO) upstreamMediaBytes.addAndGet(prefix.size)
                         output.headers(response!!.code, responseHeaders(response!!, false))
                         output.bytes(prefix.readByteArray())
                     }
@@ -437,7 +444,8 @@ internal class AnimeStreamBridge private constructor(
         }
     }
 
-    private fun rewriteManifest(resource: Resource, base: HttpUrl, text: String): String {
+    private fun rewriteManifest(resource: Resource, base: HttpUrl, upstream: String): String {
+        val text = limitAnimeHlsMaster(upstream, asset.preferredAdaptiveHeight)
         require(text.trimStart('\uFEFF', ' ', '\r', '\n').startsWith("#EXTM3U")) { "来源返回的内容不是有效 HLS 清单" }
         require(!text.contains("#EXT-X-CONTENT-STEERING:")) { "当前线路使用了内容转向服务，请选择其他线路" }
         if (preparationOnly) {
@@ -679,7 +687,7 @@ internal class AnimeStreamBridge private constructor(
             return response
         }
         var response = playlist(resource) ?: return AnimeStartupCacheResult(0L)
-        val text = response.bytes.decodeToString()
+        val text = limitAnimeHlsMaster(response.bytes.decodeToString(), asset.preferredAdaptiveHeight)
         val lines = text.trimStart('\uFEFF').lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
         if (lines.firstOrNull() != "#EXTM3U")
             return AnimeStartupCacheResult(0L, detail = "来源没有返回可预读的 HLS 清单")

@@ -259,8 +259,8 @@ internal fun LiquidGlassSurface(
                         contentNormalBlend(.025f)
                     }
                     GlassSurfaceRole.VIDEO_DOCK -> {
-                        // Preserve the frame colours through the lens. The player draws the local
-                        // contrast scrim above both this sample and a native video surface.
+                        // The player adds one white reflection and outlines its glyphs. Keep the
+                        // sampled frame at its original colour and concentrate refraction at the rim.
                         backgroundColor(Color.Transparent)
                         tint(Color.Transparent)
                         whitePoint(0f)
@@ -276,7 +276,7 @@ internal fun LiquidGlassSurface(
                     }
                     else -> Unit
                 }
-                if (role == GlassSurfaceRole.VIDEO_DOCK) chromaMultiplier(.98f)
+                if (role == GlassSurfaceRole.VIDEO_DOCK) chromaMultiplier(1f)
                 else if (compactHeader) chromaMultiplier(1.015f)
                 else if (role != GlassSurfaceRole.GALLERY) chromaMultiplier(1.05f)
                 if (role == GlassSurfaceRole.ARTWORK) {

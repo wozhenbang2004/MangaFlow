@@ -224,15 +224,15 @@ internal fun AnimePlaybackStatus(
         onDispose { holdControls(false) }
     }
     AnimePlaybackSurface(null, modifier.heightIn(max = maximumHeight).onFocusChanged { focused = it.hasFocus },
-        cornerRadius = 15.dp) {
+        panel = expanded, cornerRadius = 15.dp) {
         Column {
             val rowWidth = if (quiet) Modifier else Modifier.fillMaxWidth()
             Row(rowWidth.heightIn(min = if (quiet) 26.dp else 44.dp).padding(start = 9.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                Icon(Icons.Outlined.QueryStats, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (expanded && desktop) Text("播放读数 · ${readouts.size} 项", Modifier.weight(1f),
+                AnimeGlassIcon(Icons.Outlined.QueryStats, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (expanded && desktop) AnimeGlassLabel("播放读数 · ${readouts.size} 项", Modifier.weight(1f),
                     style = MaterialTheme.typography.labelMedium)
-                else Text(readouts.joinToString("  ·  ") { it.value },
+                else AnimeGlassLabel(readouts.joinToString("  ·  ") { it.value },
                     Modifier.weight(1f, fill = !quiet).horizontalScroll(summaryScroll, enabled = interactive)
                         .padding(end = 8.dp, top = 3.dp, bottom = 3.dp)
                         .semantics { contentDescription = readouts.joinToString("；") { it.description } },
@@ -241,7 +241,7 @@ internal fun AnimePlaybackStatus(
                 if (!quiet && canExpand) MotionIconButton(onClick = { details = !details; onInteraction() },
                     modifier = Modifier.size(44.dp), enabled = interactive,
                     tooltip = if (expanded) "收起观看读数" else "展开观看读数") {
-                    Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    AnimeGlassIcon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
                         if (expanded) "收起观看读数" else "展开 ${readouts.size} 项观看读数", Modifier.size(17.dp),
                         tint = MaterialTheme.colorScheme.onSurface)
                 }

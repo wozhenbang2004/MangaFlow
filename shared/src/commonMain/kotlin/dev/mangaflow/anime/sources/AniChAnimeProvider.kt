@@ -193,7 +193,7 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
                 sourceId = id, sourceEpisodeId = episode.id, url = stream.url, route = http.route,
                 title = episode.title, edition = episode.edition, mimeType = stream.mimeType,
                 headers = mapOf("User-Agent" to AnimeHttp.USER_AGENT, "Referer" to stream.referer),
-                subtitles = stream.subtitles, sourceRevision = revision)
+                subtitles = stream.subtitles, sourceRevision = revision, resolutions = stream.resolutions)
         } finally { http.close() }
     }
 

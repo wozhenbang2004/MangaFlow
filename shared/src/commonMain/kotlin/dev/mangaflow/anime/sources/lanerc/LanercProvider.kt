@@ -196,6 +196,7 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
             sourceId = id, sourceEpisodeId = episode.id, url = stream.url, route = http.route, title = episode.title,
             headers = mapOf("Referer" to stream.referer, "User-Agent" to AnimeHttp.USER_AGENT),
             mimeType = stream.mimeType, edition = episode.edition, subtitles = stream.subtitles, sourceRevision = revision,
+            resolutions = stream.resolutions,
         )
     }
 }

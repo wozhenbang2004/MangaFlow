@@ -16,6 +16,7 @@ import androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsMultivariantPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylistParser
+import dev.mangaflow.anime.animeRenditionOrder
 import dev.mangaflow.anime.sources.animeMediaUrl
 import dev.mangaflow.platform.PlatformContext
 import java.io.ByteArrayInputStream
@@ -135,7 +136,9 @@ private class StartupCacheReader(
                 if (playlist.contentSteeringInfo != null || playlist.sessionKeyDrmInitData.isNotEmpty() ||
                     playlist.declaresEncryption())
                     return "当前 HLS 线路含动态分流或受保护内容，保留正常播放"
-                val variant = playlist.variants.firstOrNull() ?: return "来源没有可预读的视频线路"
+                val height = asset.preferredAdaptiveHeight
+                val variant = (if (height == 0) playlist.variants.firstOrNull() else playlist.variants
+                    .minByOrNull { animeRenditionOrder(it.format.height, height) }) ?: return "来源没有可预读的视频线路"
                 // The regular player keeps adaptive selection. A candidate rendition
                 // must not masquerade as the exact buffer that player will consume.
                 if (playlist.variants.size != 1) exactNativeSelection = false

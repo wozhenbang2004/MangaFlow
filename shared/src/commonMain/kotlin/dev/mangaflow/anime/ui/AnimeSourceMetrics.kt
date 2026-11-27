@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.outlined.AspectRatio
@@ -22,7 +21,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextAlign
@@ -36,35 +34,27 @@ import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.ui.mangaMetricValueStyle
 import dev.mangaflow.ui.mangaStatusColors
 
-/** The list exposes one quality value and one network value on the same axes for each source. */
+/** Only show evidence owned by this line. Keep startup, transport sampling and address resolution distinct. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun AnimeSourceMetricsStrip(measurements: AnimePlaybackMeasurements?, modifier: Modifier = Modifier,
     episodeLabel: String? = null, progress: AnimeSourceLineMeasurement? = null) {
+    if (measurements == null && progress == null) return
     val width = measurements?.width?.takeIf { it > 0 }
     val height = measurements?.height?.takeIf { it > 0 }
     val measured = width != null && height != null
     val declared = measurements?.let(::animeDeclaredQuality)
     val mediaQuality = measurements?.mediaQuality
     val headerHeight = measurements?.mediaHeaderHeight
-    val quality = if (measured) "${height}p" else headerHeight?.let { "${it}p" } ?: mediaQuality ?: declared
-    val qualityChecked = measurements?.mediaObservedAt != null || measurements?.addressObservedAt != null
-    val hasVideoEvidence = measurements?.playbackObservedAt != null || measurements?.firstFrameObservedAt != null ||
-        measurements?.mediaVerified == true && measurements.mediaFailure == null
-    val qualityDescription = when {
-        measured -> "播放解码实测分辨率 $width × $height"
-        headerHeight != null -> "媒体轨道标注 ${headerHeight}p"
-        mediaQuality != null -> "媒体清单标注最高画质 $mediaQuality，非实播分辨率"
-        declared != null -> "来源标注画质 $declared，尚未实播验证"
-        qualityChecked -> "本次取址或媒体检查未取得分辨率，播放后可读取实际画质"
-        else -> "尚未取得画质数据"
-    }
     val scope = episodeLabel?.let { "$it，" }.orEmpty()
-    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     FlowRow(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        SourceMetricToken(if (!measured && quality != null) Icons.AutoMirrored.Outlined.Label else Icons.Outlined.AspectRatio,
-            quality ?: if (hasVideoEvidence) "未知" else "—", scope + qualityDescription,
-            modifier = Modifier.width(58.dp * scale))
+        episodeLabel?.let { AnimeQuietLabel(it) }
+        when {
+            measured -> SourceMetricToken(Icons.Outlined.AspectRatio, "${height}p", scope + "播放实测分辨率 $width × $height")
+            headerHeight != null -> SourceMetricToken(Icons.Outlined.AspectRatio, "轨道 ${headerHeight}p", scope + "视频轨道标注 ${headerHeight}p")
+            mediaQuality != null -> SourceMetricToken(Icons.AutoMirrored.Outlined.Label, "清单 $mediaQuality", scope + "媒体清单标注最高画质 $mediaQuality")
+            declared != null -> SourceMetricToken(Icons.AutoMirrored.Outlined.Label, "标注 $declared", scope + "来源标注画质 $declared")
+        }
         val speed = measurements?.measuredBytesPerSecond?.takeIf { it > 0 }?.let(::animeSourceRate)
         val probeSpeed = measurements?.takeIf { it.mediaVerified == true && it.mediaFailure == null }
             ?.mediaSampleBytesPerSecond?.takeIf { it > 0 }?.let(::animeSourceRate)
@@ -79,39 +69,36 @@ internal fun AnimeSourceMetricsStrip(measurements: AnimePlaybackMeasurements?, m
         val statusCode = measurements?.mediaHttpStatus?.takeIf { it >= 400 }
         when {
             progressLabel != null && progress?.phase?.checking == true ->
-                SourceMetricToken(Icons.Outlined.Speed, progressLabel, progressLabel, Modifier.width(82.dp * scale))
+                SourceMetricToken(Icons.Outlined.Speed, progressLabel, scope + progressLabel)
             latestProbe && failure != null && measurements?.mediaVerified == true -> SourceMetricToken(Icons.Outlined.Link,
-                "仅清单", scope + failure, Modifier.width(82.dp * scale), waiting = true)
+                "仅清单", scope + failure, waiting = true)
             latestProbe && failure != null && (statusCode != null || measurements?.mediaVerified == false) -> SourceMetricToken(Icons.Outlined.Link,
-                statusCode?.let { "HTTP $it" } ?: "未验证", scope + failure,
-                Modifier.width(82.dp * scale), waiting = true)
+                statusCode?.let { "HTTP $it" } ?: "未验证", scope + failure, waiting = true)
             progressLabel != null && address == null && speed == null && probeSpeed == null && frame == null ->
                 SourceMetricToken(Icons.Outlined.Speed, progressLabel,
-                progress?.reason ?: "此来源$progressLabel", Modifier.width(82.dp * scale),
+                progress?.reason ?: "此来源$progressLabel",
                 waiting = progress?.phase == AnimeSourceMeasurementPhase.UNAVAILABLE ||
                     progress?.phase == AnimeSourceMeasurementPhase.FAILED)
-            speed != null -> SourceMetricToken(Icons.Outlined.Speed, speed, scope + "播放实测传输速率 $speed", Modifier.width(82.dp * scale))
-            frame != null -> SourceMetricToken(Icons.Outlined.Timer, frame, scope + "播放实测首帧 $frame", Modifier.width(82.dp * scale))
-            probeSpeed != null -> SourceMetricToken(Icons.Outlined.Link, probeSpeed, scope + "媒体样本传输速率 $probeSpeed，非实播速率", Modifier.width(82.dp * scale))
-            measurements?.mediaVerified == true && failure == null -> SourceMetricToken(Icons.Outlined.Link, "样本可读", scope + "已读取媒体样本，非实播结果", Modifier.width(82.dp * scale))
-            address != null -> SourceMetricToken(Icons.Outlined.Link, "取址 $address", scope + "解析地址耗时 $address", Modifier.width(82.dp * scale))
-            failure != null -> SourceMetricToken(Icons.Outlined.Link, "未验证", scope + failure, Modifier.width(82.dp * scale))
-            else -> SourceMetricToken(Icons.Outlined.Speed, "未测", scope + "尚未取得网络实测数据",
-                Modifier.width(82.dp * scale))
+            frame != null -> SourceMetricToken(Icons.Outlined.Timer, "首帧 $frame", scope + "播放实测首帧 $frame")
+            speed != null -> SourceMetricToken(Icons.Outlined.Speed, "播放 $speed", scope + "播放传输实测 $speed")
+            probeSpeed != null -> SourceMetricToken(Icons.Outlined.Speed, "样本 $probeSpeed", scope + "媒体样本传输速率 $probeSpeed")
+            measurements?.mediaVerified == true && failure == null -> SourceMetricToken(Icons.Outlined.Link, "样本可读", scope + "已读取媒体样本")
+            address != null -> SourceMetricToken(Icons.Outlined.Link, "取址 $address", scope + "解析地址耗时 $address")
+            failure != null -> SourceMetricToken(Icons.Outlined.Link, "未验证", scope + failure)
+            else -> Unit
         }
     }
 }
 
 @Composable
-private fun SourceMetricToken(icon: ImageVector, value: String?, description: String,
-    modifier: Modifier = Modifier, waiting: Boolean = false) {
+private fun SourceMetricToken(icon: ImageVector, value: String, description: String, waiting: Boolean = false) {
     val status = mangaStatusColors()
     val colors = MaterialTheme.colorScheme
-    Row(modifier.clearAndSetSemantics { contentDescription = description },
-        horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.clearAndSetSemantics { contentDescription = description },
+        horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(icon, null, Modifier.size(14.dp), tint = if (waiting) status.waiting else colors.onSurfaceVariant)
-        Text(value ?: "—", Modifier.weight(1f), style = mangaMetricValueStyle(),
-            color = if (waiting) status.waiting else colors.onSurfaceVariant, textAlign = TextAlign.End,
+        Text(value, style = mangaMetricValueStyle(),
+            color = if (waiting) status.waiting else colors.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
@@ -132,6 +119,7 @@ internal fun AnimeSourceMetricsDetails(measurements: AnimePlaybackMeasurements?,
     val address = measurements?.addressMs?.takeIf { it >= 0 }?.let(::animeSourceDuration)
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         episodeLabel?.let { AnimeQuietLabel(it) }
+        if (measurements == null && progress == null) AnimeQuietLabel("播放后可查看实测画质和首帧时间。")
         if (progress != null) {
             SourceMetricDetail(Icons.Outlined.Speed, "本次测速", animeSourceMeasurementLabel(progress.phase),
                 waiting = progress.phase == AnimeSourceMeasurementPhase.UNAVAILABLE ||
@@ -144,7 +132,6 @@ internal fun AnimeSourceMetricsDetails(measurements: AnimePlaybackMeasurements?,
             headerHeight != null -> SourceMetricDetail(Icons.Outlined.AspectRatio, "视频轨道标注", "${headerHeight}p")
             mediaQuality != null -> SourceMetricDetail(Icons.AutoMirrored.Outlined.Label, "清单最高画质", mediaQuality)
             declared != null -> SourceMetricDetail(Icons.AutoMirrored.Outlined.Label, "来源标注画质", declared)
-            else -> SourceMetricDetail(Icons.Outlined.AspectRatio, "画质", null)
         }
         SourceMetricDetail(Icons.Outlined.Speed, "播放传输", rate)
         if (probeSpeed != null) SourceMetricDetail(Icons.Outlined.Speed, "样本传输", probeSpeed)
@@ -189,19 +176,15 @@ private fun animeSourceMeasurementLabel(phase: AnimeSourceMeasurementPhase): Str
 
 @Composable
 private fun SourceMetricDetail(icon: ImageVector, title: String, value: String?, waiting: Boolean = false) {
+    if (value == null) return
     val colors = MaterialTheme.colorScheme
     val status = mangaStatusColors()
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp),
         verticalAlignment = Alignment.Top) {
         Icon(icon, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
         Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-        Text(value ?: "—", Modifier.weight(1.7f).clearAndSetSemantics { contentDescription = value ?: "未测量" },
-            style = mangaMetricValueStyle(), textAlign = TextAlign.End,
-            color = when {
-                waiting -> status.waiting
-                value == null -> colors.onSurfaceVariant
-                else -> colors.onSurface
-            })
+        Text(value, Modifier.weight(1.7f), style = mangaMetricValueStyle(), textAlign = TextAlign.End,
+            color = if (waiting) status.waiting else colors.onSurface)
     }
 }
 
