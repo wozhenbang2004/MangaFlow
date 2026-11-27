@@ -833,7 +833,7 @@ private fun AnimeWorkspaceContent(
                                     } },
                                     modifier = Modifier.motionInputGate(rootActive),
                                     treatment = MotionTabTreatment.Capsule,
-                                    selectionBackdrop = backdrop,
+                                    inGlassGroup = true,
                                     selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
                                     controlHeight = 44.dp)
                             }
@@ -876,11 +876,10 @@ private fun AnimeWorkspaceContent(
                                             Spacer(Modifier.size(44.dp))
                                         }
                                     }))
-                                if (stackDesktopTabs) LiquidGlassSurface(backdrop,
+                                if (stackDesktopTabs) HeaderGlassSurface(backdrop,
                                     Modifier.fillMaxWidth().padding(horizontal = 8.dp)
                                         .graphicsLayer { alpha = controlsAlpha() },
-                                    cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, preferSource = true,
-                                    trackPointer = true, elevation = 1.dp) { primaryTabs() }
+                                    quietShadow = true) { primaryTabs() }
                             }
                         }
                     }) { headerInset ->

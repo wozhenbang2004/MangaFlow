@@ -45,7 +45,6 @@ internal fun GlassControlGroup(
     quietShadow: Boolean = false,
 ) {
     val motion = LocalMotionEnabled.current
-    val elevation = if (quietShadow) 1.dp else null
     // This source owns proximity only. Each SDK member observes its own pointer
     // coordinates; broadcasting a sibling's local Press would light the wrong edge.
     val interaction = remember { MutableInteractionSource() }
@@ -65,15 +64,12 @@ internal fun GlassControlGroup(
             stiffness = MangaMotion.NavigationStiffness) else snap(),
     ), verticalAlignment = Alignment.Top) {
         BoxWithConstraints(Modifier.weight(1f)) {
-            LiquidGlassSurface(backdrop, Modifier.width(controlsWidth.coerceAtMost(maxWidth))
-                .glassGroupPress(interaction), cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
-                trackPointer = true, elevation = elevation, softCard = !quietShadow, preferSource = true) {
+            HeaderGlassSurface(backdrop, Modifier.width(controlsWidth.coerceAtMost(maxWidth))
+                .glassGroupPress(interaction), quietShadow) {
                 Column(Modifier.fillMaxWidth(), content = content)
             }
         }
         Spacer(Modifier.width(6.dp))
-        LiquidGlassSurface(backdrop, Modifier.width(actionsWidth).glassGroupPress(interaction),
-            cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
-            trackPointer = true, elevation = elevation, softCard = !quietShadow, preferSource = true) { actions() }
+        HeaderGlassSurface(backdrop, Modifier.width(actionsWidth).glassGroupPress(interaction), quietShadow) { actions() }
     }
 }

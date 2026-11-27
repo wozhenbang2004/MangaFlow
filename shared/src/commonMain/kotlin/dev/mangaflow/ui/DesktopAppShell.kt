@@ -398,6 +398,11 @@ internal fun DesktopDiscoveryHeader(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier) {
+        val tabGroup: @Composable (Modifier) -> Unit = { bounds ->
+            HeaderGlassSurface(backdrop, bounds, quietShadow = true) {
+                tabs(Modifier.fillMaxWidth().padding(horizontal = 4.dp))
+            }
+        }
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val stacked = maxWidth < 680.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
             Column {
@@ -407,12 +412,12 @@ internal fun DesktopDiscoveryHeader(
                         tooltip = "返回发现，保留搜索") {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回发现", Modifier.size(20.dp))
                     } else navigation()
-                    if (!stacked && !searching) tabs(Modifier.widthIn(max = 244.dp))
+                    if (!stacked && !searching) tabGroup(Modifier.widthIn(max = 244.dp))
                     input(Modifier.weight(1f))
                     recent()
                 }
                 if (!searching && stacked) Box(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp)) {
-                    tabs(Modifier.widthIn(max = 300.dp).align(Alignment.CenterStart))
+                    tabGroup(Modifier.widthIn(max = 300.dp).align(Alignment.CenterStart))
                 }
             }
         }

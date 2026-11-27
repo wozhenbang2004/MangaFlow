@@ -45,13 +45,13 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 
 internal enum class GlassSurfaceRole {
-    CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, SELECTION, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO,
+    CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO,
     VIDEO_DOCK,
 }
 
 // The short side grows as a compact rail expands into a search field or a two-row dock.
 private val toolbarBlur = OpticalSizeValue.Responsive(
-    OpticalSizePoint(44.dp, 5.dp), OpticalSizePoint(84.dp, 11.dp), OpticalSizePoint(144.dp, 17.dp),
+    OpticalSizePoint(44.dp, 8.dp), OpticalSizePoint(84.dp, 12.dp), OpticalSizePoint(144.dp, 17.dp),
 )
 private val toolbarDepth = OpticalSizeValue.Responsive(
     OpticalSizePoint(44.dp, .58f), OpticalSizePoint(84.dp, .78f), OpticalSizePoint(144.dp, .92f),
@@ -83,14 +83,18 @@ internal fun LiquidGlassSurface(
     val light = surface.luminance() > .5f
     val foreground = contentColor ?: if (surfaceColor == null) colors.onSurface
         else if (light) Color(0xFF242426) else Color.White
-    val tintColor = if (softCard && surfaceColor == null) lerp(colors.background, surface, .70f) else surface
-    val selectionTint = if (role == GlassSurfaceRole.SELECTION)
-        lerp(tintColor, foreground, if (light) .18f else .12f) else tintColor
+    val toolbar = role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.READING_DOCK
+    val tintColor = when {
+        surfaceColor != null -> surfaceColor
+        toolbar -> colors.surfaceContainerHigh
+        softCard -> lerp(colors.background, surface, .70f)
+        else -> surface
+    }
     val protectArtworkInk = role == GlassSurfaceRole.ARTWORK && contentColor != null
     val shape = remember(cornerRadius, surfaceShape) { surfaceShape ?: RoundedCornerShape(cornerRadius) }
     val liquid = role != GlassSurfaceRole.PANEL && role != GlassSurfaceRole.POPOVER && role != GlassSurfaceRole.DRAWER
     val clear = role == GlassSurfaceRole.CONTROL || role == GlassSurfaceRole.ARTWORK ||
-        role == GlassSurfaceRole.THUMB || role == GlassSurfaceRole.SELECTION || role == GlassSurfaceRole.VIDEO_DOCK
+        role == GlassSurfaceRole.THUMB || role == GlassSurfaceRole.VIDEO_DOCK
     val motion = LocalMotionEnabled.current
     val accessibility = LocalGlassAccessibilitySettings.current
     // Declaring hover/press installs Haze's non-consuming, node-local pointer observer.
@@ -109,11 +113,13 @@ internal fun LiquidGlassSurface(
     }
     val material = if (liquid) {
         val themedGlass = (if (clear) GlassStyle.clear else GlassStyle.regular).material3(tintColor)
-        val glassStyle = remember(themedGlass, shape, role, interactive, light, accessibility, selectionTint, protectArtworkInk) {
+        val glassStyle = remember(themedGlass, shape, role, interactive, light, accessibility, protectArtworkInk) {
             themedGlass.then {
                 shape(shape)
                 val progress = expansion.value().coerceIn(0f, 1f)
                 tint(tintColor.copy(alpha = if (role == GlassSurfaceRole.GALLERY) .05f else .025f + .025f * progress))
+                // The exterior shadow gives the surface lift. Keep only directional light on the glass itself.
+                edgeShadow(Color.Transparent)
                 if (role != GlassSurfaceRole.DETAIL_HERO) {
                     lightPosition(Alignment.TopStart)
                     edgeSoftness(1.dp)
@@ -121,49 +127,34 @@ internal fun LiquidGlassSurface(
                 when (role) {
                     GlassSurfaceRole.CONTROL, GlassSurfaceRole.THUMB -> {
                         val thumb = role == GlassSurfaceRole.THUMB
-                        optics { copy(refractionStrength = if (thumb) .66f else .78f,
+                        optics { copy(refractionStrength = if (thumb) .52f else .46f,
                             refractionHeightFraction = .28f,
-                            refractionDisplacement = if (thumb) 7.dp else 15.dp,
-                            refractionProfile = RefractionProfile.Edge(if (thumb) 4.dp else 8.dp),
-                            refractionDetailIntensity = .26f) }
-                        tint(tintColor.copy(alpha = if (light) .035f else .055f))
+                            refractionDisplacement = if (thumb) 4.dp else 7.dp,
+                            refractionProfile = RefractionProfile.Edge(if (thumb) 3.dp else 4.dp),
+                            refractionDetailIntensity = .12f) }
+                        tint(tintColor.copy(alpha = if (light) .13f else .17f))
                         whitePoint(if (light) .08f else -.12f)
-                        specularIntensity(if (light) .58f else .49f)
-                        ambientResponse(.15f)
-                        edgeShadow(Color.Black.copy(alpha = if (light) .12f else .19f))
+                        specularIntensity(if (thumb) .28f else .22f)
+                        ambientResponse(.08f)
                         chromaticAberrationStrength(0f)
                         contentNormalBlend(.08f)
                     }
-                    GlassSurfaceRole.SELECTION -> {
-                        // This lens resamples the artwork, so it owns contrast for its label.
-                        // A progress thumb has no label and can stay fully clear.
-                        optics { copy(refractionStrength = .70f + .08f * progress,
-                            refractionDisplacement = 8.dp + 2.dp * progress,
-                            refractionProfile = RefractionProfile.Edge(5.dp),
-                            refractionDetailIntensity = 0f, blurRadius = OpticalSizeValue.Fixed(4.dp)) }
-                        tint(selectionTint.copy(alpha = if (light) .61f else .65f))
-                        whitePoint(if (light) .20f else -.16f)
-                        specularIntensity(.52f + .10f * progress)
-                        edgeShadow(Color.Black.copy(alpha = if (light) .14f else .24f))
-                        ambientResponse(.14f)
-                        chromaticAberrationStrength(0f)
-                    }
                     GlassSurfaceRole.NAVIGATION, GlassSurfaceRole.READING_DOCK -> {
                         val dock = role == GlassSurfaceRole.READING_DOCK
-                        optics { copy(refractionStrength = if (dock) .65f else .72f,
+                        optics { copy(refractionStrength = if (dock) .32f else .40f,
                             refractionHeightFraction = .20f,
-                            refractionDisplacement = 15.dp + 3.dp * progress,
-                            refractionProfile = RefractionProfile.Edge(8.dp + 2.dp * progress),
+                            refractionDisplacement = 6.dp + 2.dp * progress,
+                            refractionProfile = RefractionProfile.Edge(4.dp + 1.dp * progress),
                             blurRadius = toolbarBlur, depth = toolbarDepth) }
                         // A single tonal layer protects glyphs over opposite-tone artwork.
                         // Tint is also honoured by Haze's software fallback, unlike whitePoint.
-                        val bodyTint = if (light) .54f else .56f
+                        val bodyTint = if (light) .68f else .76f
                         tint(tintColor.copy(alpha = bodyTint + (if (dock) .04f else 0f) + .025f * progress))
-                        whitePoint(if (light) .07f else -.08f)
-                        specularIntensity(if (light) .52f else .43f)
-                        ambientResponse(.14f)
-                        edgeShadow(Color.Black.copy(alpha = if (light) .11f else .20f))
-                        contentNormalBlend(.10f)
+                        whitePoint(if (light) .045f else -.08f)
+                        specularIntensity(if (light) .18f else .15f)
+                        ambientResponse(.06f)
+                        chromaticAberrationStrength(0f)
+                        contentNormalBlend(.045f)
                     }
                     GlassSurfaceRole.DETAIL_HERO -> {
                         // One large passive lens. Keep the long-text interior stable and
@@ -175,7 +166,6 @@ internal fun LiquidGlassSurface(
                         whitePoint(if (light) .62f else -.62f)
                         specularIntensity(.16f)
                         ambientResponse(.035f)
-                        edgeShadow(Color.Transparent)
                         chromaticAberrationStrength(0f)
                         contentNormalBlend(.025f)
                     }
@@ -190,9 +180,8 @@ internal fun LiquidGlassSurface(
                             refractionProfile = RefractionProfile.Edge(8.dp), refractionHeightFraction = .24f,
                             depth = OpticalSizeValue.Fixed(.46f), blurRadius = OpticalSizeValue.Fixed(3.5.dp),
                             refractionDetailIntensity = 0f) }
-                        specularIntensity(.66f)
-                        ambientResponse(.14f)
-                        edgeShadow(Color.Black.copy(alpha = .12f))
+                        specularIntensity(.26f)
+                        ambientResponse(.08f)
                         chromaticAberrationStrength(0f)
                         contentNormalBlend(.05f)
                     }
@@ -203,20 +192,19 @@ internal fun LiquidGlassSurface(
                 if (role == GlassSurfaceRole.ARTWORK) {
                     // Keep the cover visible through a shallow Clear lens, rather than
                     // whitening the action into another opaque button over the artwork.
-                    optics { copy(refractionStrength = .60f, refractionHeightFraction = .24f,
-                        refractionDisplacement = 12.dp, depth = OpticalSizeValue.Fixed(.50f),
-                        blurRadius = OpticalSizeValue.Fixed(2.5.dp), refractionProfile = RefractionProfile.Edge(8.dp),
-                        refractionDetailIntensity = .22f) }
+                    optics { copy(refractionStrength = .42f, refractionHeightFraction = .24f,
+                        refractionDisplacement = 7.dp, depth = OpticalSizeValue.Fixed(.50f),
+                        blurRadius = OpticalSizeValue.Fixed(2.5.dp), refractionProfile = RefractionProfile.Edge(4.dp),
+                        refractionDetailIntensity = .12f) }
                     val artworkTint = if (protectArtworkInk) {
                         if (light) .54f else .56f
-                    } else if (light) .035f else .055f
+                    } else if (light) .13f else .17f
                     tint(tintColor.copy(alpha = artworkTint))
                     whitePoint(if (light) .08f else -.10f)
                     contrast(0f)
                     chromaMultiplier(1.015f)
-                    ambientResponse(.14f)
-                    specularIntensity(if (light) .56f else .46f)
-                    edgeShadow(Color.Black.copy(alpha = if (light) .11f else .17f))
+                    ambientResponse(.07f)
+                    specularIntensity(if (light) .24f else .19f)
                     chromaticAberrationStrength(0f)
                     contentNormalBlend(.06f)
                 }
@@ -226,7 +214,6 @@ internal fun LiquidGlassSurface(
                         progressive = HazeProgressive.verticalGradient(startIntensity = .15f, endIntensity = .85f)) }
                     whitePoint(if (light) .06f else -.06f)
                     specularIntensity(.12f)
-                    edgeShadow(Color.Transparent)
                     ambientResponse(.055f)
                     chromaMultiplier(1.025f)
                 }
@@ -274,7 +261,8 @@ internal fun LiquidGlassSurface(
         Modifier.hazeBlur(input = input, style = blurStyle)
     }
     val shadow = if (softCard) Modifier.softSurfaceShadow(shape, light,
-        strength = elevation?.let { (it.value / 16f).coerceIn(0f, 1f) } ?: 1f,
+        strength = elevation?.let { (it.value / 16f).coerceIn(0f, 1f) } ?: if (toolbar) .72f else 1f,
+        radius = if (toolbar) 16.dp else 24.dp,
         strengthScale = { 1f + .28f * expansion.value().coerceIn(0f, 1f) })
     else Modifier.shadow(elevation ?: 3.dp, shape, clip = false,
         ambientColor = Color.Black.copy(alpha = .04f), spotColor = Color.Black.copy(alpha = .065f))

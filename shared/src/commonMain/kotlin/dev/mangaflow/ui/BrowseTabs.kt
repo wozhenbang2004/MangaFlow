@@ -10,28 +10,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
 
 /** Keep the compact toolbar geometry while sharing interruptible, draw-time tab motion. */
 @Composable
-internal fun BrowseTabs(selected: Int, labels: List<String>, modifier: Modifier = Modifier,
-    backdrop: HazeState? = null, onSelect: (Int) -> Unit) {
+internal fun BrowseTabs(selected: Int, labels: List<String>, modifier: Modifier = Modifier, onSelect: (Int) -> Unit) {
     MotionTabs(
         selected = selected,
         labels = labels,
         onSelect = onSelect,
         modifier = modifier,
         foreground = MaterialTheme.colorScheme.onSurface,
-        muted = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f),
-        indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .07f),
         controlHeight = 44.dp,
-        indicatorHeight = 28.dp,
         treatment = MotionTabTreatment.Soft,
-        selectionBackdrop = backdrop,
+        inGlassGroup = true,
         fontSize = 14.sp,
-        selectedFontWeight = FontWeight.Medium,
+        selectedFontWeight = FontWeight.SemiBold,
         unselectedFontWeight = FontWeight.Normal,
     )
 }

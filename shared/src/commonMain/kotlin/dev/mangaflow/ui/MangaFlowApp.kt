@@ -2008,7 +2008,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     onLeaveSearch = closeSearch, navigation = navigation,
                                     tabs = { tabModifier ->
                                         BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryLabels,
-                                            tabModifier, backdrop = searchBackdrop) { index ->
+                                            tabModifier) { index ->
                                             closeSearch()
                                             browseActions.selectDiscovery(discoveryModes[index], clearQuery = true)
                                         }
@@ -2103,7 +2103,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 val slot = bounds.width / discoveryModes.size
                                                 val left = bounds.left + slot * discoveryModes.indexOf(DiscoveryMode.RANKING).coerceAtLeast(0)
                                                 rankingAnchor = Rect(left, bounds.top, left + slot, bounds.bottom)
-                                            }.motionInputGate(rootActive && chromeReady), backdrop = searchBackdrop) { index ->
+                                            }.motionInputGate(rootActive && chromeReady)) { index ->
                                         closeSearch()
                                         browseActions.selectDiscovery(discoveryModes[index], clearQuery = true)
                                     }
