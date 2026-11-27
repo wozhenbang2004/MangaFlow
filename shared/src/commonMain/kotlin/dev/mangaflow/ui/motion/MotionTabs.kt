@@ -177,12 +177,12 @@ internal fun MotionTabs(
         !inGlassGroup -> indicator
         accessibility?.increaseContrast == true -> lerp(surface, foreground, .36f)
         accessibility?.reduceTransparency == true -> lerp(surface, foreground, .18f)
-        surface.luminance() > .5f -> Color.White.copy(alpha = .54f)
+        surface.luminance() > .5f -> Color.White.copy(alpha = .20f)
         else -> foreground.copy(alpha = .15f)
     }
     val inactiveInk = when {
         accessibility?.increaseContrast == true -> foreground
-        inGlassGroup -> foreground.copy(alpha = .84f)
+        inGlassGroup -> foreground.copy(alpha = .90f)
         else -> muted
     }
     val movingGroupFill = inGlassGroup && !compact && scrubPosition == null && treatment != MotionTabTreatment.Underline

@@ -75,17 +75,15 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
@@ -111,11 +109,7 @@ import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
-import dev.mangaflow.ui.glass.mangaHazeSource
-import dev.chrisbanes.haze.rememberHazeState
-import dev.chrisbanes.haze.HazeInput
-import dev.chrisbanes.haze.blur.HazeBlurStyle
-import dev.chrisbanes.haze.blur.hazeBlur
+import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -424,16 +418,8 @@ private fun FeaturedManga(
     val motion = LocalMotionEnabled.current
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
-    val heroBackdrop = rememberHazeState()
-    val atmosphereBlur = remember {
-        HazeBlurStyle {
-            blurRadius(18.dp)
-            backgroundColor(Color.Transparent)
-            colorEffects(emptyList())
-            noiseFactor(0f)
-            blurredEdgeTreatment(BlurredEdgeTreatment.Unbounded)
-        }
-    }
+    val accessibility = LocalGlassAccessibilitySettings.current
+    val solidCaption = accessibility.reduceTransparency || accessibility.increaseContrast
     var decoded by remember(manga.coverUrl) { mutableStateOf<Image?>(null) }
     val latestOnColor by rememberUpdatedState(onColor)
     val latestOnReady by rememberUpdatedState(onReady)
@@ -456,14 +442,17 @@ private fun FeaturedManga(
                 identity.headers.forEach { (name, value) -> set(name, value) }
             }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()
     }
-    // Both artwork layers share one bounded Coil decode and the original request headers.
+    // The peek and fitted poster share one bounded Coil decode and the original request headers.
     val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit,
         onSuccess = { decoded = it.result.image; latestOnReady() })
-    val surface = if (color.value.luminance() > .28f) lerp(color.value, Color.White, .56f)
-        else lerp(color.value, Color.Black, .22f)
-    val onDark = surface.luminance() <= .5f
-    val ink by animateColorAsState(if (onDark) Color.White else Color(0xFF222329),
-        if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(), label = "featured-ink")
+    val coverTone = color.value
+    val fieldAlpha = .32f
+    val pageTone = MaterialTheme.colorScheme.background
+    val fieldTone = coverTone.copy(alpha = fieldAlpha).compositeOver(pageTone)
+    val textBase = lerp(fieldTone, coverTone, .15f)
+    val lightInk = textBase.luminance() < .20f
+    val ink = if (lightInk) Color.White else Color(0xFF151717)
+    val captionTone = lerp(textBase, if (lightInk) Color.Black else Color.White, .08f)
     val information = {
         val t = ((emphasis() - .55f) / .45f).coerceIn(0f, 1f)
         t * t * (3f - 2f * t)
@@ -498,48 +487,42 @@ private fun FeaturedManga(
             val infoTop = if (inlineInformation) 6.dp else maxHeight - captionHeight
             val infoWidth = (maxWidth - infoLeft - if (inlineInformation) 8.dp else 0.dp).coerceAtLeast(1.dp)
             val infoHeight = if (inlineInformation) maxHeight - 12.dp else captionHeight
-            val mergeStart = ((if (inlineInformation) infoLeft - 24.dp else infoTop - 4.dp) /
-                (if (inlineInformation) maxWidth else maxHeight)).coerceIn(0f, .94f)
-            val mergeEnd = ((if (inlineInformation) infoLeft + 8.dp else infoTop + 12.dp) /
-                (if (inlineInformation) maxWidth else maxHeight)).coerceIn(mergeStart + .01f, 1f)
-            val shape = remember { RoundedCornerShape(22.dp) }
-            // One rounded artwork field, including the entire trailing edge. The
-            // information material feathers across this field, never an inset rectangle.
-            Box(Modifier.matchParentSize().clip(shape).mangaHazeSource(heroBackdrop)
-                .drawBehind { drawRect(lerp(surface, atmosphere.value, .12f)) }) {
-                Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize().graphicsLayer {
-                        scaleX = 1.16f; scaleY = 1.16f
-                        translationX = offset() * 10.dp.toPx()
-                        alpha = if (modernPlatformBlur) .48f else .18f
-                    }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur))
+            Box(Modifier.matchParentSize().drawBehind {
+                drawRect(if (solidCaption) captionTone else lerp(coverTone, atmosphere.value, .15f).copy(alpha = fieldAlpha))
+            }) {
                 Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
                     modifier = Modifier.matchParentSize().graphicsLayer { alpha = 1f - emphasis() })
-                Box(Modifier.matchParentSize().drawBehind {
-                    val startColor = surface.copy(alpha = .02f)
-                    val endColor = surface.copy(alpha = .70f * emphasis())
-                    drawRect(if (inlineInformation)
-                        Brush.horizontalGradient(0f to startColor, mergeStart to startColor,
-                            mergeEnd to surface.copy(alpha = .38f * emphasis()), 1f to endColor)
-                    else Brush.verticalGradient(0f to startColor, mergeStart to startColor,
-                        mergeEnd to surface.copy(alpha = .38f * emphasis()), 1f to endColor))
-                })
             }
-            LiquidGlassSurface(heroBackdrop, Modifier.matchParentSize().graphicsLayer {
-                alpha = information()
-                compositingStrategy = CompositingStrategy.Offscreen
-            }.drawWithContent {
-                drawContent()
-                drawRect(if (inlineInformation)
-                    Brush.horizontalGradient(0f to Color.Transparent, mergeStart to Color.Transparent,
-                        mergeEnd to Color.Black, 1f to Color.Black)
-                else Brush.verticalGradient(0f to Color.Transparent, mergeStart to Color.Transparent,
-                    mergeEnd to Color.Black, 1f to Color.Black),
-                    blendMode = BlendMode.DstIn)
-            }, cornerRadius = 22.dp, role = GlassSurfaceRole.GALLERY,
-                softCard = false, surfaceColor = surface, elevation = 0.dp) {}
-            // Keep the full sharp poster above the feathered material. It shares
-            // the original painter/decode and clips at its real fitted image bounds.
+            Box(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight),
+                contentAlignment = if (inlineInformation) Alignment.CenterStart else Alignment.BottomStart) {
+                Column(Modifier.fillMaxWidth().drawWithCache {
+                    // Feather around the measured title and metrics. Logical placement follows RTL;
+                    // the parent card clips the falloff and the sharp poster paints above it.
+                    val radiusX = size.width + 8.dp.toPx()
+                    val radiusY = size.height + 8.dp.toPx()
+                    val midpoint = Offset(size.width / 2f, size.height / 2f)
+                    val wash = Brush.radialGradient(0f to captionTone, .68f to captionTone.copy(alpha = .95f),
+                        1f to captionTone.copy(alpha = 0f), center = midpoint, radius = radiusX)
+                    onDrawBehind {
+                        if (!solidCaption) scale(1f, radiusY / radiusX, midpoint) {
+                            drawCircle(wash, radiusX, midpoint, alpha = information())
+                        }
+                    }
+                }.graphicsLayer {
+                    alpha = information()
+                    translationY = if (motion) (1f - information()) * 4.dp.toPx() else 0f
+                }.padding(horizontal = if (inlineInformation) 2.dp else 12.dp)
+                    .padding(vertical = if (inlineInformation) 6.dp else 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (inlineInformation) 8.dp else 2.dp)) {
+                    Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), modifier = Modifier.clearAndSetSemantics { }, color = ink,
+                        style = MaterialTheme.typography.titleSmall, fontSize = 14.sp, lineHeight = 20.sp,
+                        fontWeight = FontWeight.Medium, minLines = if (inlineInformation) 1 else titleLines,
+                        maxLines = if (inlineInformation) 3 else titleLines, overflow = TextOverflow.Ellipsis)
+                    if (showSource) MangaBrowseSource(manga, foreground = ink.copy(alpha = .80f))
+                    else MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,
+                        onExpand = if (enabled && information() >= .98f && onRatings != null) ({ onRatings(manga) }) else null)
+                }
+            }
             if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                 tint = ink.copy(alpha = .22f), modifier = Modifier.offset(posterLeft, posterTop)
                     .size(posterWidth, posterHeight).padding(20.dp))
@@ -550,25 +533,6 @@ private fun FeaturedManga(
                         translationX = offset() * 4.dp.toPx()
                         alpha = emphasis()
                     }.clip(RoundedCornerShape(16.dp)))
-            Box(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight).graphicsLayer {
-                alpha = information()
-                translationY = if (motion) (1f - information()) * 4.dp.toPx() else 0f
-            }) {
-                Column(Modifier.fillMaxSize().padding(horizontal = if (inlineInformation) 2.dp else 12.dp)
-                    .padding(vertical = if (inlineInformation) 6.dp else 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(if (inlineInformation) 8.dp else 2.dp,
-                        if (inlineInformation) Alignment.CenterVertically else Alignment.Bottom)) {
-                    Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), modifier = Modifier.clearAndSetSemantics { }, color = ink,
-                        style = MaterialTheme.typography.titleSmall.copy(
-                            shadow = Shadow(if (onDark) Color.Black.copy(alpha = .16f) else Color.White.copy(alpha = .18f),
-                                Offset(0f, 1f), 3f)), fontSize = 14.sp, lineHeight = 20.sp,
-                        fontWeight = FontWeight.Medium, minLines = if (inlineInformation) 1 else titleLines,
-                        maxLines = if (inlineInformation) 3 else titleLines, overflow = TextOverflow.Ellipsis)
-                    if (showSource) MangaBrowseSource(manga, foreground = ink.copy(alpha = .80f))
-                    else MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,
-                        onExpand = if (enabled && information() >= .98f && onRatings != null) ({ onRatings(manga) }) else null)
-                }
-            }
         }
     }
 }

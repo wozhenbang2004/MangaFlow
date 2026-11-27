@@ -15,7 +15,10 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
@@ -49,8 +52,11 @@ internal enum class GlassSurfaceRole {
     VIDEO_DOCK,
 }
 
-// The short side grows as a compact rail expands into a search field or a two-row dock.
-private val toolbarBlur = OpticalSizeValue.Responsive(
+// A compact rail lets cover details through. Expanded search and reading tools need more diffusion.
+private val navigationBlur = OpticalSizeValue.Responsive(
+    OpticalSizePoint(44.dp, 4.dp), OpticalSizePoint(84.dp, 10.dp), OpticalSizePoint(144.dp, 17.dp),
+)
+private val readingDockBlur = OpticalSizeValue.Responsive(
     OpticalSizePoint(44.dp, 8.dp), OpticalSizePoint(84.dp, 12.dp), OpticalSizePoint(144.dp, 17.dp),
 )
 private val toolbarDepth = OpticalSizeValue.Responsive(
@@ -139,17 +145,29 @@ internal fun LiquidGlassSurface(
                         chromaticAberrationStrength(0f)
                         contentNormalBlend(.08f)
                     }
-                    GlassSurfaceRole.NAVIGATION, GlassSurfaceRole.READING_DOCK -> {
-                        val dock = role == GlassSurfaceRole.READING_DOCK
-                        optics { copy(refractionStrength = if (dock) .32f else .40f,
+                    GlassSurfaceRole.NAVIGATION -> {
+                        optics { copy(refractionStrength = .58f, refractionHeightFraction = .22f,
+                            refractionDisplacement = 9.dp + 2.dp * progress,
+                            refractionProfile = RefractionProfile.Edge(4.dp + 1.dp * progress),
+                            blurRadius = navigationBlur, depth = toolbarDepth) }
+                        val bodyTint = if (light) .40f + .20f * progress else .56f + .16f * progress
+                        tint(tintColor.copy(alpha = bodyTint))
+                        whitePoint(if (light) .015f else -.03f)
+                        contrast(0f)
+                        specularIntensity(if (light) .28f else .22f)
+                        specularExponent(32f)
+                        ambientResponse(.055f)
+                        chromaticAberrationStrength(0f)
+                        contentNormalBlend(.045f)
+                    }
+                    GlassSurfaceRole.READING_DOCK -> {
+                        optics { copy(refractionStrength = .32f,
                             refractionHeightFraction = .20f,
                             refractionDisplacement = 6.dp + 2.dp * progress,
                             refractionProfile = RefractionProfile.Edge(4.dp + 1.dp * progress),
-                            blurRadius = toolbarBlur, depth = toolbarDepth) }
-                        // A single tonal layer protects glyphs over opposite-tone artwork.
-                        // Tint is also honoured by Haze's software fallback, unlike whitePoint.
-                        val bodyTint = if (light) .68f else .76f
-                        tint(tintColor.copy(alpha = bodyTint + (if (dock) .04f else 0f) + .025f * progress))
+                            blurRadius = readingDockBlur, depth = toolbarDepth) }
+                        val bodyTint = if (light) .72f else .80f
+                        tint(tintColor.copy(alpha = bodyTint + .025f * progress))
                         whitePoint(if (light) .045f else -.08f)
                         specularIntensity(if (light) .18f else .15f)
                         ambientResponse(.06f)
@@ -266,8 +284,23 @@ internal fun LiquidGlassSurface(
         strengthScale = { 1f + .28f * expansion.value().coerceIn(0f, 1f) })
     else Modifier.shadow(elevation ?: 3.dp, shape, clip = false,
         ambientColor = Color.Black.copy(alpha = .04f), spotColor = Color.Black.copy(alpha = .065f))
+    // Blend with the material pixels before drawing the labels. The soft floor/ceiling responds
+    // to passing artwork in the same frame, without reading a bitmap or switching glyph colours.
+    val inkContrast = if (role == GlassSurfaceRole.NAVIGATION &&
+        !accessibility.reduceTransparency && !accessibility.increaseContrast) {
+        val darkInk = foreground.luminance() < .5f
+        val tone = if (darkInk) Color(0xFFA0A0A0) else Color(0xFF56565A)
+        val blend = if (darkInk) BlendMode.Lighten else BlendMode.Darken
+        Modifier.drawWithCache {
+            val feather = (4.dp.toPx() / size.height.coerceAtLeast(1f)).coerceAtMost(.49f)
+            val edge = tone.copy(alpha = 0f)
+            val center = tone.copy(alpha = .85f)
+            val guard = Brush.verticalGradient(0f to edge, feather to center, 1f - feather to center, 1f to edge)
+            onDrawBehind { drawRect(guard, blendMode = blend) }
+        }
+    } else Modifier
     CompositionLocalProvider(LocalContentColor provides foreground) {
         // Haze draws the material below its content and transforms only that material.
-        Box(modifier.then(shadow).clip(shape).then(material), content = content)
+        Box(modifier.then(shadow).clip(shape).then(material).then(inkContrast), content = content)
     }
 }
