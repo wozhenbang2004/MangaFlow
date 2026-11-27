@@ -5,6 +5,7 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
@@ -88,13 +89,15 @@ internal fun DesktopManagementToolbar(
     modifier: Modifier = Modifier,
     navigation: @Composable () -> Unit = {},
     minimumToolsWidth: Dp? = null,
+    horizontalInset: Dp? = null,
     content: @Composable RowScope.() -> Unit,
 ) {
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     BoxWithConstraints(modifier.fillMaxWidth()) {
+        val inset = horizontalInset ?: MangaLayout.sidePadding(maxWidth)
         val stacked = minimumToolsWidth?.let { maxWidth < it * fontScale } == true
         if (stacked) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            Column(Modifier.fillMaxWidth().padding(horizontal = inset, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -107,7 +110,7 @@ internal fun DesktopManagementToolbar(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp), content = content)
             }
-        } else Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+        } else Row(Modifier.fillMaxWidth().padding(horizontal = inset, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             navigation()
@@ -117,7 +120,8 @@ internal fun DesktopManagementToolbar(
     }
 }
 
-internal class DesktopSettingsLink(val category: Int, val title: String, val terms: String, val open: () -> Unit)
+internal class DesktopSettingsLink(val category: Int, val title: String, val terms: String,
+    val shortcutIcon: androidx.compose.ui.graphics.vector.ImageVector? = null, val open: () -> Unit)
 
 @Composable
 internal fun DesktopSettingsLayout(
@@ -164,8 +168,9 @@ internal fun DesktopSettingsLayout(
                 handledFind = findRequest
             }
         }
-        Row(Modifier.fillMaxWidth().heightIn(min = 38.dp)
-            .background(if (focused) colors.secondaryContainer else colors.surfaceContainerHigh, RoundedCornerShape(8.dp))
+        Row(Modifier.fillMaxWidth().heightIn(min = 42.dp)
+            .background(if (focused) colors.primary.copy(alpha = .09f) else colors.onSurface.copy(alpha = .05f), RoundedCornerShape(12.dp))
+            .desktopFieldFocusLine(focused, colors.primary)
             .padding(start = 10.dp, end = 3.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Outlined.Search, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
             BasicTextField(query, { query = it }, Modifier.weight(1f).focusRequester(searchFocus)
@@ -191,8 +196,7 @@ internal fun DesktopSettingsLayout(
                 } })
             if (query.isNotEmpty()) MotionIconButton(onClick = { query = "" }, modifier = Modifier.size(30.dp), tooltip = "清空") {
                 Icon(Icons.Outlined.Close, "清空查找", Modifier.size(14.dp))
-            } else if (!focused) Text("Ctrl+F", Modifier.padding(end = 6.dp), style = MaterialTheme.typography.labelSmall,
-                color = colors.onSurfaceVariant)
+            } else if (!focused) DesktopShortcutHint("Ctrl+F", Modifier.padding(end = 6.dp))
         }
     }
     val results: @Composable (Modifier) -> Unit = { modifier ->
@@ -220,38 +224,54 @@ internal fun DesktopSettingsLayout(
     }
     val latestContent by rememberUpdatedState(content)
     val retainedPane = remember { movableContentOf { inset: Dp -> latestContent(inset) } }
-    BoxWithConstraints(Modifier.fillMaxSize().padding(top = topPadding)) {
+    val latestFinder by rememberUpdatedState(finder)
+    val retainedFinder = remember { movableContentOf { latestFinder() } }
+    BoxWithConstraints(Modifier.fillMaxSize().padding(top = topPadding), contentAlignment = Alignment.TopCenter) {
         if (maxWidth >= 700.dp * fontScale) {
-            Row(Modifier.fillMaxSize().padding(start = 18.dp, end = 12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                Column(Modifier.width(176.dp * fontScale).fillMaxHeight().padding(top = 14.dp)) {
-                finder()
-                if (query.isNotBlank()) results(Modifier.fillMaxWidth().weight(1f))
-                else
-                MotionNavigationColumn(selected, labels.size,
-                    Modifier.fillMaxWidth().padding(top = 12.dp)) { index, itemModifier ->
-                    val chosen = index == selected
-                    MotionTextButton(onClick = { onSelected(index) },
-                        modifier = itemModifier.fillMaxWidth().semantics { this.selected = chosen },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = if (chosen) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)) {
-                        Icon(pages[index].second, null, Modifier.size(18.dp))
-                        Text(labels[index], Modifier.weight(1f).padding(start = 12.dp),
-                            fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal)
+            val rail = (maxWidth * .22f).coerceIn(170.dp * fontScale, 220.dp * fontScale)
+            Row(Modifier.widthIn(max = 1250.dp * fontScale).fillMaxSize().padding(start = 18.dp, end = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column(Modifier.width(rail).fillMaxHeight().padding(top = 18.dp)) {
+                    retainedFinder()
+                    if (query.isNotBlank()) results(Modifier.fillMaxWidth().weight(1f))
+                    else Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
+                        MotionNavigationColumn(selected, labels.size,
+                            Modifier.fillMaxWidth().padding(top = 16.dp)) { index, itemModifier ->
+                            val chosen = index == selected
+                            MotionTextButton(onClick = { onSelected(index) },
+                                modifier = itemModifier.fillMaxWidth().semantics { this.selected = chosen },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.textButtonColors(
+                                    contentColor = if (chosen) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)) {
+                                Icon(pages[index].second, null, Modifier.size(18.dp))
+                                Text(labels[index], Modifier.weight(1f).padding(start = 12.dp),
+                                    fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal)
+                            }
+                        }
+                        PreferenceSectionLabel("常用", Modifier.padding(start = 10.dp, end = 8.dp, top = 22.dp, bottom = 6.dp))
+                        links.forEach { link ->
+                            link.shortcutIcon?.let { icon ->
+                                MotionTextButton(onClick = { open(link) }, modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp),
+                                    shape = RoundedCornerShape(10.dp), contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp)) {
+                                    Icon(icon, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                                    Text(link.title, Modifier.weight(1f).padding(start = 12.dp),
+                                        style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
+                                }
+                            }
+                        }
                     }
-                }
                 }
                 Box(Modifier.width(1.dp).fillMaxHeight().background(colors.outlineVariant.copy(alpha = .45f)))
                 Box(Modifier.weight(1f).fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                    Box(Modifier.widthIn(max = 850.dp).fillMaxSize()) { retainedPane(12.dp) }
+                    Box(Modifier.widthIn(max = 980.dp * fontScale).fillMaxSize()) { retainedPane(16.dp) }
                 }
             }
         } else {
             Column(Modifier.fillMaxSize()) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 5.dp)) {
-                    finder()
+                    retainedFinder()
                     if (query.isBlank()) MotionTabs(selected, labels, onSelected, modifier = Modifier.fillMaxWidth(),
                         treatment = MotionTabTreatment.Underline, controlHeight = 40.dp)
                     else results(Modifier.fillMaxWidth().heightIn(max = 154.dp))

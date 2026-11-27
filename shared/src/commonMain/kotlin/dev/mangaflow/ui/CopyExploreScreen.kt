@@ -50,6 +50,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -79,6 +80,8 @@ import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.copyTagForName
 import dev.mangaflow.experience.readerPageCacheKey
 import dev.mangaflow.experience.sourceNetwork
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.ui.glass.mangaHazeSource
@@ -136,6 +139,7 @@ internal fun CopyExploreScreen(
     MotionBackHandler(enabled = active && state.topic != null && !directoryOpen, state = null, onBack = goBack)
 
     BoxWithConstraints(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        val desktop = platformKind == PlatformKind.DESKTOP
         val wide = fitsDesktopIndex(maxWidth, 880.dp)
         val openDirectory = { if (active) { releaseInput(); directoryOpen = true } }
         Column(Modifier.fillMaxSize().screenFitViewport()
@@ -216,13 +220,15 @@ internal fun CopyExploreScreen(
                     Row(Modifier.fillMaxWidth().padding(start = 22.dp, end = 20.dp, top = 8.dp, bottom = 9.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text(when { topicList -> "专题目录"; pane.topic != null -> "专题作品";
+                            Text(when { topicList -> "专题目录"; pane.topic != null -> pane.topic.title
                                 else -> pane.selection.theme?.name ?: pane.selection.original?.name ?: "分类目录" },
-                                style = browseTitleStyle(24.sp, 31.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                modifier = Modifier.semantics { heading() }, style = browseTitleStyle(26.sp, 34.sp),
+                                maxLines = if (pane.topic == null) 1 else 2, overflow = TextOverflow.Ellipsis)
                             val count = if (topicList) topics.size else pane.items.size
                             val summary = when {
                                 topicList && query.isNotEmpty() -> "匹配 $count 个，共 ${pane.topics.size} 个已载入专题"
                                 topicList -> "已载入 $count 个专题 · 来源顺序"
+                                pane.topic != null -> "已载入 $count 部"
                                 else -> listOfNotNull("已载入 $count 部", pane.selection.scope?.name,
                                     pane.directory.orderings.firstOrNull { pane.topic == null && it.path == pane.selection.ordering }?.name)
                                     .joinToString(" · ")
@@ -240,19 +246,20 @@ internal fun CopyExploreScreen(
                 }
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                     val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-                    val columns = if (wide) MangaLayout.automaticDesktopColumns(maxWidth, scale, 14.dp, 20.dp)
+                    val gap = if (desktop) 16.dp else 10.dp
+                    val columns = if (desktop) MangaLayout.automaticDesktopColumns(maxWidth, scale, gap, 20.dp)
                         else MangaLayout.columns(maxWidth, if (maxWidth >= 600.dp) 4 else 3, 83.dp * scale, 10.dp, 16.dp)
-                    val listColumns = if (index) 1 else if (topicList) MangaLayout.columns(maxWidth, 3, 280.dp * scale, 10.dp, 16.dp)
+                    val listColumns = if (index) 1 else if (topicList) MangaLayout.columns(maxWidth, 3, 280.dp * scale, gap, 16.dp)
                         else columns
                     LazyVerticalGrid(columns = GridCells.Fixed(listColumns), state = grid,
                         modifier = Modifier.fillMaxSize().motionInputGate(paneActive),
                         contentPadding = PaddingValues(start = 16.dp, end = if (wide) 22.dp else 16.dp, top = if (index) 0.dp else 10.dp,
                             bottom = 28.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
-                        horizontalArrangement = Arrangement.spacedBy(if (wide) 14.dp else 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(gap),
                         verticalArrangement = Arrangement.spacedBy(if (index) 0.dp else if (topicList) 24.dp else 18.dp)) {
                         pane.topic?.let { topic ->
                             item(key = "topic-heading", span = { GridItemSpan(maxLineSpan) }) {
-                                CopyTopicHeading(topic, repository, paneActive)
+                                CopyTopicHeading(topic, repository, paneActive, titleInHeader = wide)
                             }
                         }
                         if (initial) {
@@ -281,6 +288,7 @@ internal fun CopyExploreScreen(
                                         figure = { MangaMetricBadges(manga, compact = true, plain = true, showMore = false) },
                                         onLongClick = { if (paneActive) actionsId = manga.id }, onOpen = open)
                                     else CoverTile(manga, repository, dense = true, narrow = columns >= 4, placement = placement,
+                                        desktopCatalogue = desktop,
                                         onLongClick = { if (paneActive) actionsId = manga.id },
                                         onClick = open)
                                     }
@@ -648,7 +656,7 @@ private fun CopyTopicRow(topic: CopyTopic, repository: MangaRepository, active: 
 }
 
 @Composable
-private fun CopyTopicHeading(topic: CopyTopic, repository: MangaRepository, active: Boolean) {
+private fun CopyTopicHeading(topic: CopyTopic, repository: MangaRepository, active: Boolean, titleInHeader: Boolean) {
     val colors = MaterialTheme.colorScheme
     val description = remember(topic.intro, topic.brief) { copyTopicPlainText(topic.intro.ifBlank { topic.brief }) }
     var expanded by rememberSaveable(topic.path) { mutableStateOf(false) }
@@ -656,14 +664,12 @@ private fun CopyTopicHeading(topic: CopyTopic, repository: MangaRepository, acti
     val motion = LocalMotionEnabled.current
     val disclosure = animateFloatAsState(if (expanded) 1f else 0f,
         if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(), label = "topic-disclosure")
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (topic.coverUrl.isNotBlank()) CopyTopicCover(topic, repository,
-            Modifier.fillMaxWidth().heightIn(max = 236.dp).aspectRatio(2.65f).mangaCoverCard(14.dp, shadowRadius = 9.dp))
+    val caption: @Composable () -> Unit = {
         SelectionContainer {
             Column(Modifier.animateContentSize(if (motion)
                 spring(MangaMotion.NavigationDamping, MangaMotion.GestureStiffness) else snap()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(topic.title, style = browseTitleStyle(25.sp, 32.sp))
+                if (!titleInHeader) Text(topic.title, style = browseTitleStyle(25.sp, 32.sp))
                 if (description.isNotBlank()) Text(description, style = MaterialTheme.typography.bodyMedium,
                     color = colors.onSurfaceVariant, maxLines = if (expanded) Int.MAX_VALUE else 3,
                     overflow = TextOverflow.Ellipsis,
@@ -680,6 +686,21 @@ private fun CopyTopicHeading(topic: CopyTopic, repository: MangaRepository, acti
         Text(listOf(topic.period, "拷贝专题顺序").filter { it.isNotBlank() }.joinToString(" · "),
             style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
             modifier = Modifier.padding(bottom = 6.dp))
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (topic.coverUrl.isNotBlank() && fitsDesktopIndex(maxWidth, 620.dp)) {
+            val artWidth = (maxWidth * .43f).coerceAtMost(450.dp)
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(22.dp), verticalAlignment = Alignment.CenterVertically) {
+                CopyTopicCover(topic, repository, Modifier.width(artWidth).aspectRatio(2.8f)
+                    .mangaCoverCard(6.dp, shadowRadius = 4.dp), scale = ContentScale.Fit)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) { caption() }
+            }
+        } else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (topic.coverUrl.isNotBlank()) CopyTopicCover(topic, repository,
+                Modifier.fillMaxWidth().heightIn(max = 236.dp).aspectRatio(2.65f).mangaCoverCard(14.dp, shadowRadius = 9.dp))
+            caption()
+        }
     }
 }
 
@@ -740,7 +761,8 @@ private fun CopyExploreNotice(title: String, message: String, enabled: Boolean, 
 
 /** Topic artwork has its own referer; it never enters the comic identity/header pipeline. */
 @Composable
-private fun CopyTopicCover(topic: CopyTopic, repository: MangaRepository, modifier: Modifier) {
+private fun CopyTopicCover(topic: CopyTopic, repository: MangaRepository, modifier: Modifier,
+    scale: ContentScale = ContentScale.Crop) {
     val context = LocalMangaContext.current
     val motion = LocalMotionEnabled.current
     val copy = when (repository) {
@@ -764,7 +786,7 @@ private fun CopyTopicCover(topic: CopyTopic, repository: MangaRepository, modifi
         Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(25.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .35f))
         if (request != null) AsyncImage(model = request, contentDescription = null,
-            contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            contentScale = scale, modifier = Modifier.fillMaxSize())
     }
 }
 

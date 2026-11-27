@@ -45,7 +45,9 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.normalizeNfkc
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.MotionIconButton
 
 private val chapterSearchNumbers = Regex("""\d+(?:\.\d+)?""")
@@ -86,6 +88,7 @@ internal fun ChapterSearchField(
     modifier: Modifier = Modifier,
     onOpenMatch: (() -> Unit)? = null,
     showKeyboardOnOpen: Boolean = false,
+    showFindShortcut: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val keyboard = LocalSoftwareKeyboardController.current
@@ -102,9 +105,13 @@ internal fun ChapterSearchField(
         }
     }
     val shape = RoundedCornerShape(10.dp)
-    Row(modifier.heightIn(min = if (showKeyboardOnOpen) 48.dp else 36.dp)
-        .background(colors.onSurface.copy(alpha = .045f), shape)
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val fieldSurface = if (desktop) Modifier.background(colors.surfaceContainerLow, shape)
+        .desktopFieldFocusLine(focused && active, colors.primary)
+    else Modifier.background(colors.onSurface.copy(alpha = .045f), shape)
         .border(1.dp, if (focused) colors.primary.copy(alpha = .70f) else colors.onSurface.copy(alpha = .10f), shape)
+    Row(modifier.heightIn(min = if (showKeyboardOnOpen) 48.dp else 36.dp)
+        .then(fieldSurface)
         .padding(start = 10.dp, end = 3.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Outlined.Search, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
         BasicTextField(query, onValueChange = onQuery, enabled = active, singleLine = true,
@@ -123,7 +130,7 @@ internal fun ChapterSearchField(
                         true
                     }
                 }
-                .semantics { contentDescription = "查找章节" },
+                .semantics { contentDescription = if (showFindShortcut) "查找章节，Ctrl+F" else "查找章节" },
             decorationBox = { input ->
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
                     if (query.isEmpty()) Text(
@@ -132,7 +139,9 @@ internal fun ChapterSearchField(
                     input()
                 }
             })
-        if (query.isNotEmpty()) MotionIconButton(onClick = {
+        if (desktop && showFindShortcut && query.isEmpty() && !focused) {
+            DesktopShortcutHint("Ctrl+F", Modifier.padding(end = 5.dp))
+        } else if (query.isNotEmpty()) MotionIconButton(onClick = {
             onQuery("")
             requester.requestFocus()
             if (showKeyboardOnOpen) keyboard?.show()

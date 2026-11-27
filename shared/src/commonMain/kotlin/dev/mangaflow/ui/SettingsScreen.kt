@@ -25,6 +25,7 @@ import dev.mangaflow.ui.platform.*
 import androidx.compose.foundation.layout.navigationBarsPadding
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.snap
@@ -33,6 +34,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -479,6 +482,7 @@ fun SettingsScreen(
             val sections: @Composable () -> Unit = {
                 RetainedSettingsCategory(0, selected) {
                 SettingsSection("阅读", sourceBackdrop) {
+                    if (desktop) PreferenceSectionLabel("翻页方式")
                     SettingsDisclosure("阅读顺序", when (preferences.mode) {
                         ReadingMode.VERTICAL -> "纵向滚动"
                         ReadingMode.LEFT_TO_RIGHT -> "从左至右"
@@ -503,6 +507,7 @@ fun SettingsScreen(
                             selected = preferences.pageTurnGesture,
                             onSelected = { libraryStore.updatePageTurnGesture(it) })
                     }
+                    if (desktop) PreferenceSectionLabel("阅读画面", Modifier.padding(top = 12.dp))
                     SettingsDisclosure("阅读底色", when (preferences.theme) {
                         ReaderTheme.PAPER -> "纸白"
                         ReaderTheme.SEPIA -> "暖纸"
@@ -525,9 +530,11 @@ fun SettingsScreen(
                 }
                 RetainedSettingsCategory(1, selected) {
                 SettingsSection("外观", sourceBackdrop) {
+                    if (desktop) PreferenceSectionLabel("作品详情")
                     DetailAppearanceSettings(searchTarget("cover-tone"), if (foundSetting == "cover-tone") findRequest else 0,
                         manga = appearanceManga, repository = sourceRepository)
-                    SettingsDisclosure("字体", "", Icons.Outlined.TextFields,
+                    if (desktop) PreferenceSectionLabel("界面个性化", Modifier.padding(top = 12.dp))
+                    SettingsDisclosure("字体", if (desktop) interfaceFontSettingValue() else "", Icons.Outlined.TextFields,
                         expandedSetting == "fonts", { toggleSetting("fonts") }, headerModifier = searchTarget("fonts")) {
                         FontSettings()
                     }
@@ -553,22 +560,27 @@ fun SettingsScreen(
                             }, Icons.Outlined.CloudSync, onClick = open)
                         }
                     }
-                    if (desktop) lanReadingSyncEntry()
-                    sourceRegistry?.let { registry ->
-                        val sources by registry.entries.collectAsStateWithLifecycle()
-                        val added = sources.count { !it.removed }
-                        val enabled = sources.count { !it.removed && it.enabled }
-                        SettingsLinkRow("漫画源", "已启用 $enabled · 已添加 $added",
-                            Icons.AutoMirrored.Outlined.MenuBook, inlineDetail = true, compact = true) {
-                            showBodySources = true
+                    val sourceActions: @Composable () -> Unit = {
+                        sourceRegistry?.let { registry ->
+                            val sources by registry.entries.collectAsStateWithLifecycle()
+                            val added = sources.count { !it.removed }
+                            val enabled = sources.count { !it.removed && it.enabled }
+                            SettingsLinkRow("漫画源", "已启用 $enabled · 已添加 $added",
+                                Icons.AutoMirrored.Outlined.MenuBook, inlineDetail = true, compact = true) {
+                                showBodySources = true
+                            }
+                        }
+                        if (animeController != null) {
+                            SettingsLinkRow("动漫源", "内容来源与线路", Icons.Outlined.PlayCircleOutline,
+                                inlineDetail = true, compact = true) {
+                                showAnimeSources = true
+                            }
                         }
                     }
-                    if (animeController != null) {
-                        SettingsLinkRow("动漫源", "内容来源与线路", Icons.Outlined.PlayCircleOutline,
-                            inlineDetail = true, compact = true) {
-                            showAnimeSources = true
-                        }
-                    }
+                    if (desktop) {
+                        PreferenceSectionLabel("备份、同步与存储")
+                        lanReadingSyncEntry()
+                    } else sourceActions()
                     SettingsDisclosure("备份与同步", when {
                         desktop && expandedSetting == "backup" -> "漫画账号 · 阅读备份"
                         backupBusy == "export-saving" -> "等待选择保存位置"
@@ -621,6 +633,10 @@ fun SettingsScreen(
                     }
                     SettingsLinkRow("存储管理", "阅读缓存、离线下载与模型", Icons.Outlined.Storage,
                         inlineDetail = true) { showStorage = true }
+                    if (desktop && (sourceRegistry != null || animeController != null)) {
+                        PreferenceSectionLabel("内容来源", Modifier.padding(top = 12.dp))
+                        sourceActions()
+                    }
                     if (!desktop) backupNotice?.let { Text(it.message, style = MaterialTheme.typography.bodySmall,
                         color = if (it.failed) colors.error else secondary,
                         modifier = Modifier.padding(vertical = 6.dp)) }
@@ -632,10 +648,13 @@ fun SettingsScreen(
                 RetainedSettingsCategory(3, selected) {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SettingsSection("应用", sourceBackdrop) {
-                        SettingsLinkRow("体验策略", "画质、补帧、缓冲与预读 · ${experienceModeLabel(experienceMode)}", Icons.Outlined.Tune,
+                        if (desktop) PreferenceSectionLabel("播放与连接")
+                        SettingsLinkRow("体验策略", if (desktop) experienceModeLabel(experienceMode)
+                            else "画质、补帧、缓冲与预读 · ${experienceModeLabel(experienceMode)}", Icons.Outlined.Tune,
                             inlineDetail = true) { showExperience = true }
                         SettingsLinkRow("网络与下载", networkRouteOverview(routes), Icons.Outlined.SwapVert,
                             inlineDetail = true) { showNetworkDownloads = true }
+                        if (desktop) PreferenceSectionLabel("版本与更新", Modifier.padding(top = 12.dp))
                         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                             .animateContentSize(if (LocalMotionEnabled.current) tween(MangaMotion.Content) else snap()),
                             verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -765,7 +784,7 @@ fun SettingsScreen(
                             )
                         }
                     }
-                    Box(searchTarget("project").fillMaxWidth().padding(horizontal = 16.dp)) {
+                    Box(searchTarget("project").fillMaxWidth().padding(horizontal = if (desktop) 0.dp else 16.dp)) {
                         SettingsLinkRow("项目主页", "", Icons.Outlined.Code, external = true, compact = true) { if (!openUrl(context, "https://github.com/${UpdateManager.REPOSITORY}")) showPlatformMessage(context, "暂时无法打开项目主页") }
                     }
                 }
@@ -788,11 +807,11 @@ fun SettingsScreen(
             add(DesktopSettingsLink(0, "图片之间留白", "页面 间距 空隙") { openSetting("page-gap") })
             add(DesktopSettingsLink(1, "封面氛围", "详情 模糊 亮度 背景") { openSetting("cover-tone") })
             add(DesktopSettingsLink(1, "字体", "字形 排版 导入") { openSetting("fonts") })
-            add(DesktopSettingsLink(1, "壁纸", "图片 桌面 轮换 背景") { openSetting("wallpaper") })
-            add(DesktopSettingsLink(2, "备份与同步", "恢复 导出 WebDAV 进度") { openSetting("backup") })
-            add(DesktopSettingsLink(2, "存储管理", "缓存 清理 离线 下载 模型") { showStorage = true })
-            onOpenLanReadingSync?.let { add(DesktopSettingsLink(2, "局域网阅读同步", "设备 配对 书签", it)) }
-            onOpenMangaTracking?.let { add(DesktopSettingsLink(2, "漫画账号同步", "Bangumi AniList 追踪", it)) }
+            add(DesktopSettingsLink(1, "壁纸", "图片 桌面 轮换 背景", Icons.Outlined.Image) { openSetting("wallpaper") })
+            add(DesktopSettingsLink(2, "备份与同步", "恢复 导出 WebDAV 进度", Icons.Outlined.CloudSync) { openSetting("backup") })
+            add(DesktopSettingsLink(2, "存储管理", "缓存 清理 离线 下载 模型", Icons.Outlined.Storage) { showStorage = true })
+            onOpenLanReadingSync?.let { add(DesktopSettingsLink(2, "局域网阅读同步", "设备 配对 书签", open = it)) }
+            onOpenMangaTracking?.let { add(DesktopSettingsLink(2, "漫画账号同步", "Bangumi AniList 追踪", open = it)) }
             if (sourceRegistry != null) add(DesktopSettingsLink(2, "漫画源", "来源 站点 插件") { showBodySources = true })
             if (animeController != null) add(DesktopSettingsLink(2, "动漫源", "来源 播放") { showAnimeSources = true })
             add(DesktopSettingsLink(3, "体验策略", "画质 补帧 缓冲 预读") { showExperience = true })
@@ -1289,11 +1308,10 @@ internal fun PreferenceHeading(title: String, modifier: Modifier = Modifier, max
 private fun SettingsSection(title: String, backdrop: HazeState?, content: @Composable ColumnScope.() -> Unit) {
     val colors = MaterialTheme.colorScheme
     if (platformKind == PlatformKind.DESKTOP) {
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold,
+        Column(Modifier.fillMaxWidth().padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            Text(title, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.semantics { heading() })
-            Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(12.dp))
-                .padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp),
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp),
                 content = content)
         }
         return
@@ -1331,11 +1349,16 @@ internal fun SettingsDisclosure(
     val colors = MaterialTheme.colorScheme
     val motion = LocalMotionEnabled.current
     val interaction = remember { MutableInteractionSource() }
+    val desktop = platformKind == PlatformKind.DESKTOP
     val reveal = animateFloatAsState(if (expanded) 1f else 0f,
         if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(), label = "setting-disclosure")
-    Column(Modifier.fillMaxWidth()) {
+    Column(Modifier.fillMaxWidth().then(if (desktop) Modifier.drawBehind {
+        val amount = reveal.value.coerceIn(0f, 1f)
+        if (amount > 0f) drawRoundRect(colors.surfaceContainerLow.copy(alpha = .78f * amount),
+            cornerRadius = CornerRadius(16.dp.toPx()))
+    } else Modifier)) {
         val header: @Composable (Boolean) -> Unit = { stacked ->
-            Row(headerModifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            Row(headerModifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).preferencePointerSurface(interaction)
                 .semantics(mergeDescendants = compact) {
                     stateDescription = listOf(if (compact) "" else value,
                         if (modified) "已自定义" else "", if (expanded) "已展开" else "已收起")
@@ -1344,7 +1367,8 @@ internal fun SettingsDisclosure(
                 .clickable(interactionSource = interaction, indication = null,
                     role = if (compact) Role.Button else null, onClick = onToggle)
                 .motionPress(interaction, pressedScale = .99f)
-                .heightIn(min = if (compact) 44.dp else 52.dp).padding(vertical = 6.dp),
+                .heightIn(min = if (desktop) 54.dp else if (compact) 44.dp else 52.dp)
+                .padding(horizontal = if (desktop) 10.dp else 0.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 12.dp)) {
                 SettingsRowIcon(icon, selected = expanded)
@@ -1371,7 +1395,7 @@ internal fun SettingsDisclosure(
             }
         }
         if (value.isBlank()) header(false) else BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val minimum = if (compact) 300.dp else 260.dp
+            val minimum = if (desktop) 396.dp else if (compact) 300.dp else 260.dp
             header(maxWidth < minimum * LocalDensity.current.fontScale.coerceAtLeast(1f))
         }
         Column(Modifier.fillMaxWidth().clipToBounds().motionInputGate(expanded)
@@ -1391,7 +1415,8 @@ internal fun SettingsDisclosure(
                     }
                 }
             }
-            .padding(top = 4.dp, bottom = if (compact) 8.dp else 12.dp),
+            .padding(start = if (desktop) 14.dp else 0.dp, end = if (desktop) 14.dp else 0.dp,
+                top = if (desktop) 8.dp else 4.dp, bottom = if (desktop) 16.dp else if (compact) 8.dp else 12.dp),
             verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 10.dp), content = content)
     }
 }
@@ -1399,9 +1424,30 @@ internal fun SettingsDisclosure(
 @Composable
 internal fun SettingsRowIcon(icon: ImageVector, selected: Boolean = false) {
     val colors = MaterialTheme.colorScheme
+    if (platformKind == PlatformKind.DESKTOP) {
+        Box(Modifier.size(32.dp).background(if (selected) colors.primary.copy(alpha = .12f)
+            else colors.onSurface.copy(alpha = .045f), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+            Icon(icon, null, Modifier.size(18.dp), tint = if (selected) colors.primary else colors.onSurfaceVariant)
+        }
+        return
+    }
     Box(Modifier.width(24.dp), contentAlignment = Alignment.Center) {
         Icon(icon, null, Modifier.size(19.dp), tint = if (selected) colors.primary else colors.onSurfaceVariant)
     }
+}
+
+@Composable
+internal fun Modifier.preferencePointerSurface(interaction: MutableInteractionSource): Modifier {
+    if (platformKind != PlatformKind.DESKTOP) return this
+    val hovered by interaction.collectIsHoveredAsState()
+    val focused by interaction.collectIsFocusedAsState()
+    val colors = MaterialTheme.colorScheme
+    val tint = animateColorAsState(when {
+        focused -> colors.primary.copy(alpha = .09f)
+        hovered -> colors.onSurface.copy(alpha = .045f)
+        else -> Color.Transparent
+    }, if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "preference-pointer")
+    return drawBehind { drawRoundRect(tint.value, cornerRadius = CornerRadius(10.dp.toPx())) }
 }
 
 
@@ -1424,9 +1470,10 @@ internal fun SettingsToggle(title: String, checked: Boolean, icon: ImageVector, 
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Row(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).preferencePointerSurface(interaction)
             .toggleable(checked, enabled = enabled, interactionSource = interaction, indication = null,
-                role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = 52.dp),
+                role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = 52.dp)
+            .padding(horizontal = if (platformKind == PlatformKind.DESKTOP) 10.dp else 0.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -1444,12 +1491,14 @@ internal fun SettingsLinkRow(title: String, detail: String, icon: ImageVector, e
     inlineDetail: Boolean = false, compact: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
+    val desktop = platformKind == PlatformKind.DESKTOP
     val row: @Composable (Boolean) -> Unit = { trailing ->
-        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).preferencePointerSurface(interaction)
             .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
             .motionPress(interaction, enabled = enabled, pressedScale = .99f)
             .then(if (enabled) Modifier else Modifier.graphicsLayer { alpha = .5f })
-            .heightIn(min = if (compact) 48.dp else 56.dp).padding(vertical = if (compact) 6.dp else 8.dp),
+            .heightIn(min = if (desktop) 54.dp else if (compact) 48.dp else 56.dp)
+            .padding(horizontal = if (desktop) 10.dp else 0.dp, vertical = if (compact) 6.dp else 8.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             SettingsRowIcon(icon)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -1465,7 +1514,7 @@ internal fun SettingsLinkRow(title: String, detail: String, icon: ImageVector, e
         }
     }
     if (inlineDetail && detail.isNotBlank()) BoxWithConstraints(Modifier.fillMaxWidth()) {
-        row(maxWidth >= 260.dp * LocalDensity.current.fontScale.coerceAtLeast(1f))
+        row(maxWidth >= (if (desktop) 396.dp else 260.dp) * LocalDensity.current.fontScale.coerceAtLeast(1f))
     } else row(false)
 }
 

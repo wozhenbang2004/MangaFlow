@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -87,6 +88,7 @@ internal fun SourceAccountLoading(message: String) {
 }
 
 /** One account form for the account destination and source settings. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun SourceAccountControls(
     source: BodySourceInfo, repository: UnifiedMangaRepository, capabilities: SourceCapabilities,
@@ -266,18 +268,24 @@ internal fun SourceAccountControls(
             }
         }
     }
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(Modifier.fillMaxWidth().accountReviewRow(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("账号", style = MaterialTheme.typography.titleSmall)
-                Text(when {
-                    account.signedIn -> account.displayName.ifBlank { "已登录" }
-                    account.hasCredentials -> "已保存凭据，需重新验证"
-                    capabilities.loginRequired -> "浏览和阅读需要登录"
-                    else -> "未登录"
-                },
-                    fontSize = 11.sp, color = colors.onSurfaceVariant)
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(if (desktop) 10.dp else 6.dp)) {
+        val stateText = when {
+            account.signedIn -> "已登录"
+            account.hasCredentials -> "已保存凭据，需重新验证"
+            capabilities.loginRequired -> "浏览和阅读需要登录"
+            else -> "未登录"
+        }
+        val identity: @Composable () -> Unit = {
+            Column(verticalArrangement = Arrangement.spacedBy(if (desktop) 4.dp else 2.dp)) {
+                Text(if (desktop && account.signedIn) account.displayName.ifBlank { "账号" } else "账号",
+                    style = if (desktop) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall)
+                val label = if (!desktop && account.signedIn) account.displayName.ifBlank { stateText } else stateText
+                if (desktop) Text(label, style = MaterialTheme.typography.labelLarge,
+                    color = if (account.signedIn) mangaStatusColors().success else colors.onSurfaceVariant)
+                else Text(label, fontSize = 11.sp, color = colors.onSurfaceVariant)
             }
+        }
+        val actions: @Composable () -> Unit = {
             if (running) MotionTextButton(onClick = ::cancel, enabled = !cancelling) { Text(if (cancelling) "正在取消…" else "取消", fontSize = 12.sp) }
             else if (account.signedIn) {
                 if (onOpenShelf != null) MotionTextButton(onClick = onOpenShelf, enabled = enabled) {
@@ -292,6 +300,20 @@ internal fun SourceAccountControls(
                     Text("收起", style = MaterialTheme.typography.labelMedium)
                 }
             }
+        }
+        if (desktop) BoxWithConstraints(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+            val stacked = maxWidth < 360.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+            if (stacked) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                identity()
+                if (running || account.signedIn || expanded) FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) { actions() }
+            } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box(Modifier.weight(1f)) { identity() }
+                actions()
+            }
+        } else Row(Modifier.fillMaxWidth().accountReviewRow(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) { identity() }
+            actions()
         }
         if (!running && !account.signedIn) {
             val localPanels = buildList {
@@ -516,19 +538,24 @@ internal fun SourceAccountField(
     modifier: Modifier = Modifier, onSubmit: (() -> Unit)? = null, onChange: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    val desktop = platformKind == PlatformKind.DESKTOP
     var focused by remember { mutableStateOf(false) }
     BasicTextField(value, onChange, modifier = modifier.fillMaxWidth().semantics { contentDescription = label }
-        .onFocusChanged { focused = it.isFocused }.clip(RoundedCornerShape(14.dp))
-        .background(lerp(colors.surface, if (focused) colors.primary else colors.onSurface, if (focused) .095f else .045f))
-        .heightIn(min = 50.dp).padding(horizontal = 14.dp, vertical = 8.dp), singleLine = singleLine,
+        .onFocusChanged { focused = it.isFocused }.then(if (desktop) Modifier else Modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(lerp(colors.surface, if (focused) colors.primary else colors.onSurface, if (focused) .095f else .045f))
+            .heightIn(min = 50.dp).padding(horizontal = 14.dp, vertical = 8.dp)), singleLine = singleLine,
         maxLines = if (singleLine) 1 else 6, enabled = enabled,
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text,
             imeAction = if (onSubmit != null) ImeAction.Done else if (singleLine) ImeAction.Next else ImeAction.Default),
         keyboardActions = KeyboardActions(onDone = { if (enabled) onSubmit?.invoke() }),
         cursorBrush = SolidColor(colors.primary), textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
-        decorationBox = { inner -> Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        decorationBox = { inner -> Column(verticalArrangement = Arrangement.spacedBy(if (desktop) 5.dp else 2.dp)) {
             Text(label, style = MaterialTheme.typography.labelMedium, color = if (focused) colors.primary else colors.onSurfaceVariant)
-            inner()
+            if (desktop) Box(Modifier.fillMaxWidth().background(if (focused) colors.primary.copy(alpha = .09f)
+                else colors.onSurface.copy(alpha = .05f), RoundedCornerShape(9.dp)).heightIn(min = 42.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp), contentAlignment = Alignment.CenterStart) { inner() }
+            else inner()
         } })
 }

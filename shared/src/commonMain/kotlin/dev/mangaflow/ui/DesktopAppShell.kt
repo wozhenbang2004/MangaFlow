@@ -1,11 +1,12 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.animateDpAsState
@@ -18,11 +19,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -81,6 +84,7 @@ import androidx.compose.ui.input.pointer.indexOfLastPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -90,6 +94,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
@@ -216,7 +221,7 @@ private fun Modifier.revealDesktopNavigationLabel(progress: State<Float>): Modif
 private fun DesktopNavigationAction(
     title: String, icon: ImageVector, labels: State<Float>, onClick: () -> Unit,
     modifier: Modifier = Modifier, current: Boolean? = null, subtitle: String? = null,
-    shortcut: String? = null, paintCurrent: Boolean = false,
+    shortcut: String? = null, identity: Boolean = false,
 ) {
     val showText by remember(labels) { derivedStateOf { labels.value > .04f } }
     val showShortcut by remember(labels) { derivedStateOf { labels.value > .80f } }
@@ -225,17 +230,24 @@ private fun DesktopNavigationAction(
     val colors = MaterialTheme.colorScheme
     val selectedInk = if (LocalPlatformAccessibilityPreferences.current.increaseContrast) colors.onSurface else colors.primary
     val hint = listOfNotNull(title, subtitle, shortcut).joinToString(" · ")
-    val shape = RoundedCornerShape(10.dp)
+    val shape = RoundedCornerShape(if (identity) 13.dp else 10.dp)
     Box(modifier.fillMaxWidth().clip(shape)
-        .then(if (paintCurrent && current == true) Modifier.background(selectedInk.copy(alpha = .11f)) else Modifier)
+        .then(if (identity) Modifier.background(if (current == true) colors.primaryContainer else colors.surface) else Modifier)
         .clickable(role = Role.Button, interactionSource = interactions, indication = null, onClick = onClick)
         .motionPress(interactions).semantics {
             contentDescription = hint
             if (current != null) selected = current
         }, contentAlignment = Alignment.CenterStart) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 38.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = if (identity) 51.dp else 38.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.width(44.dp), contentAlignment = Alignment.Center) {
-                Icon(icon, null, Modifier.size(19.dp), tint = if (current == true) selectedInk else colors.onSurfaceVariant)
+                if (identity) {
+                    val initial = remember(subtitle) { subtitle?.trim()?.firstOrNull()?.takeIf { it.isLetterOrDigit() }?.uppercaseChar() }
+                    Box(Modifier.size(30.dp).background(colors.primaryContainer, CircleShape).clearAndSetSemantics { }, contentAlignment = Alignment.Center) {
+                        if (initial != null) Text(initial.toString(), fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                            color = colors.onPrimaryContainer, maxLines = 1)
+                        else Icon(icon, null, Modifier.size(17.dp), tint = colors.onPrimaryContainer)
+                    }
+                } else Icon(icon, null, Modifier.size(19.dp), tint = if (current == true) selectedInk else colors.onSurfaceVariant)
             }
             if (showText) {
                 Column(Modifier.weight(1f).padding(end = 4.dp, top = 5.dp, bottom = 5.dp)
@@ -248,13 +260,20 @@ private fun DesktopNavigationAction(
                     if (subtitle != null) Text(title, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                if (shortcut != null && showShortcut) Text(shortcut, Modifier.padding(end = 8.dp).revealDesktopNavigationLabel(labels)
-                    .clearAndSetSemantics {}, style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant, maxLines = 1, softWrap = false)
+                if (shortcut != null && showShortcut) DesktopShortcutHint(shortcut,
+                    Modifier.padding(end = 8.dp).revealDesktopNavigationLabel(labels))
             }
         }
         DesktopIconTooltip(hint.takeIf { !showText || subtitle != null || clippedLabel }, interactions, enabled = true)
     }
+}
+
+@Composable
+internal fun DesktopShortcutHint(label: String, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    Text(label, modifier.clearAndSetSemantics { }.background(colors.surface, RoundedCornerShape(5.dp))
+        .padding(horizontal = 5.dp, vertical = 1.dp), style = MaterialTheme.typography.labelSmall,
+        color = colors.onSurfaceVariant, maxLines = 1, softWrap = false)
 }
 
 @Composable
@@ -304,26 +323,36 @@ internal fun DesktopNavigationPane(
     val scroll = rememberScrollState()
     val fontScale = LocalMangaWindow.current.fontScale
     val motion = LocalMotionEnabled.current
-    val paper = lerp(colors.surface, colors.onSurfaceVariant, .055f)
+    val paper = colors.surfaceContainerLow
     val pages = remember(destinations) { destinations.indices.filter { !destinations[it].utility } }
     val utilities = remember(destinations) { destinations.indices.filter { destinations[it].utility && !destinations[it].account } }
     val accountIndex = destinations.indexOfFirst { it.account }
     val rows = remember(destinations, pages) { sidebarNavigationRows(pages.map { destinations[it].groupHeading }) }
     val selectedRow = rows.indexOf(SidebarNavigationRow.Destination(pages.indexOf(selectedIndex)))
     val management: @Composable () -> Unit = {
-        Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-            DesktopNavigationAction(if (profile == ContentProfile.ANIME) "管理片源" else "管理来源", Icons.Outlined.Source,
-                labels, onManageSources)
-            utilities.forEach { route ->
-                val target = destinations[route]
-                DesktopNavigationAction(target.title, target.icon, labels, { onNavigate(route) },
-                    current = route == selectedIndex, paintCurrent = true)
+        Column(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            val sourceTitle = if (profile == ContentProfile.ANIME) "管理片源" else "管理来源"
+            if (roomy) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    DesktopUtilityAction(sourceTitle, Icons.Outlined.Source, onManageSources, Modifier.weight(1f), labelled = true)
+                    utilities.forEach { route ->
+                        val target = destinations[route]
+                        DesktopUtilityAction(target.title, target.icon, { onNavigate(route) }, Modifier.weight(1f),
+                            labelled = true, current = route == selectedIndex)
+                    }
+                }
+            } else {
+                DesktopUtilityAction(sourceTitle, Icons.Outlined.Source, onManageSources)
+                utilities.forEach { route ->
+                    val target = destinations[route]
+                    DesktopUtilityAction(target.title, target.icon, { onNavigate(route) }, current = route == selectedIndex)
+                }
             }
             if (accountIndex >= 0) {
                 val account = destinations[accountIndex]
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(8.dp))
                 DesktopNavigationAction(account.title, account.icon, labels, { onNavigate(accountIndex) },
-                    subtitle = account.accountName, current = selectedIndex == accountIndex, paintCurrent = true)
+                    subtitle = account.accountName, current = selectedIndex == accountIndex, identity = true)
             }
         }
     }
@@ -340,37 +369,25 @@ internal fun DesktopNavigationPane(
                 // Change row structure only once the rail can show both labels and controls.
                 Column(Modifier.fillMaxWidth().then(if (motion) Modifier.animateContentSize(
                     spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) else Modifier)) {
-                    if (roomy) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.weight(1f)) { DesktopScopePicker(profile, onSelectProfile) }
-                        if (toggleLabel != null) MotionIconButton(onClick = onToggle, modifier = Modifier.size(34.dp), tooltip = toggleLabel) {
+                    val toggle: @Composable () -> Unit = {
+                        if (toggleLabel != null) MotionIconButton(onClick = onToggle, modifier = Modifier.size(36.dp), tooltip = toggleLabel) {
                             Icon(if (floating) Icons.Outlined.Close else Icons.Outlined.ViewSidebar, toggleLabel, Modifier.size(17.dp))
                         }
-                    } else Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                        if (toggleLabel != null) MotionIconButton(onClick = onToggle, modifier = Modifier.size(36.dp), tooltip = toggleLabel) {
-                            Icon(Icons.Outlined.ViewSidebar, toggleLabel, Modifier.size(17.dp))
-                        }
-                        ContentProfile.entries.forEach { entry ->
-                            val current = profile == entry
-                            MotionIconButton(onClick = { if (!current) onSelectProfile(entry) }, tooltip = entry.title,
-                                modifier = Modifier.size(38.dp).semantics { selected = current }
-                                    .then(if (current) Modifier.background(colors.primary.copy(alpha = .13f),
-                                        RoundedCornerShape(10.dp)) else Modifier)) {
-                                Icon(entry.icon, entry.title, Modifier.size(18.dp),
-                                    tint = if (current) colors.primary else colors.onSurfaceVariant)
-                            }
-                        }
                     }
-                    Spacer(Modifier.height(if (roomy) 8.dp else 4.dp))
-                    if (roomy && showHistory) Row(verticalAlignment = Alignment.CenterVertically) {
-                        MotionIconButton(onClick = { onBack?.invoke() }, enabled = onBack != null, modifier = Modifier.size(34.dp),
-                            tooltip = "后退 · Alt+←") {
-                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, "后退", Modifier.size(17.dp))
+                    if (roomy && (showHistory || toggleLabel != null)) Row(Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        if (showHistory) {
+                            MotionIconButton(onClick = { onBack?.invoke() }, enabled = onBack != null, modifier = Modifier.size(36.dp),
+                                tooltip = "后退 · Alt+←") { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "后退", Modifier.size(17.dp)) }
+                            MotionIconButton(onClick = { onForward?.invoke() }, enabled = onForward != null, modifier = Modifier.size(36.dp),
+                                tooltip = "前进 · Alt+→") { Icon(Icons.AutoMirrored.Outlined.ArrowForward, "前进", Modifier.size(17.dp)) }
                         }
-                        MotionIconButton(onClick = { onForward?.invoke() }, enabled = onForward != null, modifier = Modifier.size(34.dp),
-                            tooltip = "前进 · Alt+→") {
-                            Icon(Icons.AutoMirrored.Outlined.ArrowForward, "前进", Modifier.size(17.dp))
-                        }
-                    } else if (showHistory) Box(Modifier.align(Alignment.CenterHorizontally)) {
+                        Spacer(Modifier.weight(1f))
+                        toggle()
+                    } else if (!roomy && toggleLabel != null) Box(Modifier.align(Alignment.CenterHorizontally)) { toggle() }
+                    ContentProfileSwitch(profile, onSelectProfile, onManage = null, compact = !roomy, enabled = enabled,
+                        modifier = Modifier.padding(top = 3.dp, bottom = if (roomy) 10.dp else 6.dp))
+                    if (!roomy && showHistory) Box(Modifier.align(Alignment.CenterHorizontally)) {
                         var historyOpen by remember { mutableStateOf(false) }
                         MotionIconButton(onClick = { historyOpen = true }, enabled = onBack != null || onForward != null,
                             modifier = Modifier.size(36.dp), tooltip = "导航历史") {
@@ -413,27 +430,23 @@ internal fun DesktopNavigationPane(
 }
 
 @Composable
-private fun DesktopScopePicker(profile: ContentProfile, onSelect: (ContentProfile) -> Unit) {
+private fun DesktopUtilityAction(title: String, icon: ImageVector, onClick: () -> Unit, modifier: Modifier = Modifier,
+    labelled: Boolean = false, current: Boolean = false) {
     val colors = MaterialTheme.colorScheme
-    var open by remember(profile) { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
-    Box {
-        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(role = Role.Button,
-            interactionSource = interaction, indication = null) { open = true }.motionPress(interaction)
-            .semantics { contentDescription = "切换内容分区，当前${profile.title}" }
-            .heightIn(min = 48.dp).padding(horizontal = 5.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.size(32.dp).background(colors.primary.copy(alpha = .12f), RoundedCornerShape(9.dp)),
-                contentAlignment = Alignment.Center) { Icon(profile.icon, null, Modifier.size(18.dp), tint = colors.primary) }
-            Text(profile.title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium,
-                color = colors.onSurface, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            DesktopMenuChevron(open)
+    val ink = if (current) colors.onPrimaryContainer else colors.onSurfaceVariant
+    val shape = RoundedCornerShape(10.dp)
+    Box(modifier.then(if (labelled) Modifier.heightIn(min = 44.dp) else Modifier.size(38.dp))
+        .clip(shape).then(if (current) Modifier.background(colors.primaryContainer) else Modifier)
+        .clickable(role = Role.Button, interactionSource = interaction, indication = null, onClick = onClick)
+        .motionPress(interaction).semantics { contentDescription = title; selected = current }, contentAlignment = Alignment.Center) {
+        Column(Modifier.padding(horizontal = 2.dp, vertical = 4.dp).clearAndSetSemantics { },
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Icon(icon, null, Modifier.size(17.dp), tint = ink)
+            if (labelled) Text(title, style = MaterialTheme.typography.labelSmall, color = ink,
+                maxLines = 2, textAlign = androidx.compose.ui.text.style.TextAlign.Center, overflow = TextOverflow.Ellipsis)
         }
-        DesktopActionPopup(open, ContentProfile.entries.map { entry ->
-            DesktopMenuAction(entry.title, icon = entry.icon, selected = profile == entry) {
-                if (profile != entry) onSelect(entry)
-            }
-        }, onDismiss = { open = false }, alignToStart = true)
+        DesktopIconTooltip(title, interaction, enabled = true)
     }
 }
 
@@ -548,10 +561,11 @@ internal fun DesktopSearchField(
     val focused by inputInteraction.collectIsFocusedAsState()
     val colors = MaterialTheme.colorScheme
     val height = maxOf(40.dp, 22.dp * LocalMangaWindow.current.fontScale + 13.dp)
-    val searchLabel = when {
-        !showScopeSelector -> "搜索漫画标题"
-        target == SearchTarget.TRANSLATION_GROUP -> "搜索汉化组名称"
-        else -> "搜索漫画、作者或标签"
+    val searchLabel = if (!showScopeSelector) "搜索漫画标题" else when (target) {
+        SearchTarget.TITLE -> "搜索漫画标题"
+        SearchTarget.AUTHOR -> "搜索作者"
+        SearchTarget.TAG -> "搜索标签"
+        SearchTarget.TRANSLATION_GROUP -> "搜索汉化组名称"
     }
     LaunchedEffect(focusRequest, active) {
         if (active && focusRequest > 0) {
@@ -567,14 +581,18 @@ internal fun DesktopSearchField(
         requester.requestFocus()
     }
     BoxWithConstraints(modifier.height(height)) {
-        val hintRoom = maxWidth >= 356.dp * LocalMangaWindow.current.fontScale
+        val fontScale = LocalMangaWindow.current.fontScale
+        val showScopeName = showScopeSelector && maxWidth >= 332.dp * fontScale
+        val hintRoom = maxWidth >= 416.dp * fontScale
         val keyHint = when {
             focused && searchFocus?.results != null -> "F6 结果"
             !focused && query.isBlank() -> "Ctrl+K"
             else -> null
         }
-        val fieldPaper = lerp(colors.surface, colors.onSurfaceVariant, .062f)
-        Box(Modifier.matchParentSize().clip(RoundedCornerShape(10.dp)).background(fieldPaper)
+        val fieldPaper by animateColorAsState(if (focused) lerp(colors.surface, colors.primary, .085f)
+            else colors.surfaceContainerLow, if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(),
+            label = "desktop-search-paper")
+        Box(Modifier.matchParentSize().clip(RoundedCornerShape(12.dp)).background(fieldPaper)
             .desktopFieldFocusLine(focused && active, colors.primary))
         Row(Modifier.fillMaxSize().padding(start = 2.dp, end = 3.dp),
             verticalAlignment = Alignment.CenterVertically) {
@@ -603,8 +621,7 @@ internal fun DesktopSearchField(
             if (hintRoom) Box(Modifier.width(54.dp * LocalMangaWindow.current.fontScale).clearAndSetSemantics {},
                 contentAlignment = Alignment.Center) {
                 MotionSwap(keyHint, scaleContent = false) { hint ->
-                    if (hint != null) Text(hint, style = MaterialTheme.typography.labelSmall,
-                        color = colors.onSurfaceVariant, maxLines = 1)
+                    if (hint != null) DesktopShortcutHint(hint)
                 }
             }
             DesktopFieldClear(query.isNotEmpty() || copyOnly, active, "清空搜索", 40.dp) {
@@ -613,7 +630,21 @@ internal fun DesktopSearchField(
             }
             if (showScopeSelector) {
                 Box {
-                    MotionIconButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
+                    if (showScopeName) {
+                        val interaction = remember { MutableInteractionSource() }
+                        Row(Modifier.clip(RoundedCornerShape(9.dp))
+                            .background(if (scopeOpen) colors.primaryContainer else colors.surface)
+                            .clickable(enabled = active, role = Role.Button, interactionSource = interaction, indication = null) {
+                                scopeOpen = !scopeOpen
+                            }.motionPress(interaction, enabled = active)
+                            .semantics { contentDescription = "搜索范围，当前" + target.scopeTitle }
+                            .heightIn(min = 32.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                            if (copyOnly || target == SearchTarget.TRANSLATION_GROUP) BodySourceMark("copy", "拷贝", Modifier.size(10.dp))
+                            Text(target.scopeTitle, style = MaterialTheme.typography.labelMedium, color = colors.onSurface, maxLines = 1)
+                            DesktopMenuChevron(scopeOpen)
+                        }
+                    } else MotionIconButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
                         modifier = Modifier.size(44.dp).semantics { contentDescription = "搜索范围：" + target.scopeTitle },
                         tooltip = "搜索范围：" + target.scopeTitle) {
                         Box(Modifier.size(32.dp).background(
@@ -641,19 +672,53 @@ internal fun DesktopSearchField(
 
 @Composable
 internal fun DesktopPageHeading(title: String, modifier: Modifier = Modifier) {
+    val window = LocalMangaWindow.current
+    val compact = window.shortHeight || window.width < 560.dp
     Text(title, modifier.semantics { heading() }, style = MaterialTheme.typography.headlineSmall,
         fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface,
-        fontSize = 24.sp, lineHeight = 30.sp, letterSpacing = (-.5f).sp,
+        fontSize = if (compact) 23.sp else 28.sp, lineHeight = if (compact) 29.sp else 36.sp, letterSpacing = (-.35f).sp,
         maxLines = 1, overflow = TextOverflow.Ellipsis)
 }
 
 @Composable
+private fun desktopTabContentWidth(labels: List<String>): Dp {
+    val style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    val measure = rememberTextMeasurer()
+    val density = LocalDensity.current
+    return with(density) {
+        val longest = labels.maxOfOrNull { measure.measure(it, style, maxLines = 1).size.width } ?: 0
+        maxOf(48.dp, longest.toDp() + 22.dp) * labels.size
+    }
+}
+
+@Composable
 internal fun DesktopSectionTabs(selected: Int, labels: List<String>, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
+    if (labels.isEmpty()) return
     val colors = MaterialTheme.colorScheme
-    MotionTabs(selected, labels, onSelect, modifier, treatment = MotionTabTreatment.Underline,
-        controlHeight = 38.dp, fontSize = 14.sp, indicator = if (LocalPlatformAccessibilityPreferences.current.increaseContrast)
-            colors.onSurface else colors.primary, selectedFontWeight = FontWeight.SemiBold,
-        unselectedFontWeight = FontWeight.Normal)
+    val contrast = LocalPlatformAccessibilityPreferences.current.increaseContrast
+    val minimum = desktopTabContentWidth(labels)
+    val scroll = rememberScrollState()
+    val motion = LocalMotionEnabled.current
+    BoxWithConstraints(modifier) {
+        val viewport = if (constraints.hasBoundedWidth) maxWidth else minimum
+        val rail = maxOf(minimum, viewport)
+        val overflow = rail > viewport
+        val density = LocalDensity.current
+        if (overflow) LaunchedEffect(selected, viewport, rail, density, labels.size) {
+            val slot = rail / labels.size
+            val leading = with(density) { (slot * selected.coerceIn(labels.indices)).roundToPx() }
+            val trailing = with(density) { (slot * (selected.coerceIn(labels.indices) + 1) - viewport).roundToPx() }
+            val target = scroll.value.coerceIn(trailing.coerceAtMost(leading), leading).coerceAtLeast(0)
+            if (motion) scroll.animateScrollTo(target) else scroll.scrollTo(target)
+        }
+        Box(if (overflow) Modifier.fillMaxWidth().horizontalScroll(scroll) else Modifier) {
+            MotionTabs(selected, labels, onSelect, Modifier.width(rail), treatment = MotionTabTreatment.Soft,
+                fullWidthIndicator = true, controlHeight = 36.dp, fontSize = 14.sp,
+                track = colors.surfaceContainerLow, foreground = if (contrast) colors.onSurface else colors.primary,
+                indicator = if (contrast) colors.primaryContainer else colors.surfaceContainerHighest,
+                selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal)
+        }
+    }
 }
 
 @Composable
@@ -669,65 +734,54 @@ internal fun DesktopDiscoveryHeader(
     val displayed = if (searching) "搜索结果" else title
     BoxWithConstraints(modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
         .pointerInput(Unit) {}.semantics { paneTitle = displayed }) {
-        val scale = LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
-        val inset = if (maxWidth >= 540.dp) 20.dp else 12.dp
+        val window = LocalMangaWindow.current
+        val scale = window.fontScale.coerceAtLeast(1f)
+        val inset = MangaLayout.sidePadding(maxWidth)
         val available = (maxWidth - inset * 2).coerceAtLeast(1.dp)
-        val tabWidth = (tabLabels.size * (36f * scale + 19f)).dp
-        val wide = available >= 760.dp * scale
-        val inlineTabs = available >= (tabWidth + 148.dp * scale + 76.dp)
-        val fieldWidth = animateDpAsState(if (searching) (available * .60f).coerceAtMost(620.dp)
-            else (available * .38f).coerceIn(200.dp, 424.dp),
+        val tabWidth = (desktopTabContentWidth(tabLabels) + 8.dp).coerceAtMost(available)
+        val titleBudget = 132.dp * scale + 78.dp
+        val fieldBesideTitle = available >= titleBudget + 240.dp * scale
+        val inlineTabs = if (fieldBesideTitle) window.shortHeight && available >= titleBudget + tabWidth + 290.dp * scale
+            else available >= titleBudget + tabWidth
+        val fieldBudget = (available - titleBudget - if (inlineTabs && !searching) tabWidth else 0.dp).coerceAtLeast(1.dp)
+        val fieldWidth = animateDpAsState((if (searching) (available * .60f).coerceAtMost(620.dp)
+            else (available * .43f).coerceIn(220.dp, 470.dp)).coerceAtMost(fieldBudget),
             animationSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
             label = "workspace-search-width")
-        val switcher: @Composable (Modifier) -> Unit = { bounds ->
-            DesktopSectionTabs(selectedTab, tabLabels, onSelectTab, bounds.motionInputGate(!searching))
+        val tabs: @Composable () -> Unit = {
+            DesktopSectionTabs(selectedTab, tabLabels, onSelectTab, Modifier.width(tabWidth).motionInputGate(!searching))
         }
-        Column(Modifier.fillMaxWidth().padding(horizontal = inset, vertical = 6.dp)) {
-            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Column(Modifier.fillMaxWidth().padding(horizontal = inset, vertical = if (window.shortHeight) 5.dp else 9.dp)) {
+            Row(Modifier.fillMaxWidth().heightIn(min = if (window.shortHeight) 40.dp else 46.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 if (searching) MotionIconButton(onClick = onLeaveSearch, modifier = Modifier.size(34.dp),
                     tooltip = "返回发现，保留搜索") {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回发现", Modifier.size(19.dp))
                 } else navigation()
-                DesktopPageHeading(displayed, if (inlineTabs || wide) Modifier.widthIn(max = 180.dp * scale)
-                    else Modifier.weight(1f))
-                if (wide || inlineTabs) AnimatedVisibility(!searching,
-                    enter = expandHorizontally(if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
-                        expandFrom = Alignment.Start) + fadeIn(if (motion) tween(MangaMotion.Content) else snap()),
-                    exit = shrinkHorizontally(if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
-                        shrinkTowards = Alignment.Start) + fadeOut(if (motion) tween(MangaMotion.Quick) else snap())) {
-                    switcher(Modifier.width(tabWidth))
-                } else if (!searching) {
-                    DesktopBrowseMenu(selectedTab, tabLabels, onSelectTab)
-                }
-                if (wide || inlineTabs) Spacer(Modifier.weight(1f))
-                if (wide) field(Modifier.width(fieldWidth.value))
+                DesktopPageHeading(displayed, Modifier.weight(1f))
+                if (inlineTabs && !searching) tabs()
+                if (fieldBesideTitle) field(Modifier.width(fieldWidth.value.coerceAtMost(fieldBudget)))
                 recent()
             }
-            if (!wide) field(Modifier.fillMaxWidth())
-            if (!searching) ranking()
+            if (!fieldBesideTitle) field(Modifier.fillMaxWidth().padding(top = 3.dp))
+            if (!inlineTabs) AnimatedVisibility(!searching,
+                enter = expandVertically(if (motion) tween(MangaMotion.Content) else snap()) + fadeIn(if (motion) tween(MangaMotion.Quick) else snap()),
+                exit = shrinkVertically(if (motion) tween(MangaMotion.Quick) else snap()) + fadeOut(if (motion) tween(MangaMotion.Quick) else snap())) {
+                Column(Modifier.fillMaxWidth().padding(top = if (window.shortHeight) 3.dp else 7.dp)) {
+                    if (available >= tabWidth + 470.dp * scale) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            tabs()
+                            Box(Modifier.weight(1f).motionInputGate(!searching)) { ranking() }
+                        }
+                    } else {
+                        tabs()
+                        if (!searching) ranking()
+                    }
+                }
+            } else if (!searching) ranking()
         }
-    }
-}
-
-/** In the narrowest windows the selector has its own anchor next to the title. The input still has a full row. */
-@Composable
-private fun DesktopBrowseMenu(selected: Int, labels: List<String>, onSelect: (Int) -> Unit) {
-    val current = labels.getOrNull(selected) ?: return
-    var open by remember { mutableStateOf(false) }
-    val interaction = remember { MutableInteractionSource() }
-    val colors = MaterialTheme.colorScheme
-    Box {
-        Row(Modifier.clip(RoundedCornerShape(9.dp)).clickable(role = Role.Button, interactionSource = interaction,
-            indication = null) { open = true }.motionPress(interaction)
-            .semantics { contentDescription = "切换浏览方式，当前$current" }
-            .heightIn(min = 36.dp).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(current, style = MaterialTheme.typography.labelLarge, color = colors.primary, maxLines = 1)
-            DesktopMenuChevron(open)
-        }
-        DesktopActionPopup(open, labels.mapIndexed { index, label ->
-            DesktopMenuAction(label, selected = index == selected) { onSelect(index) }
-        }, onDismiss = { open = false })
     }
 }
 

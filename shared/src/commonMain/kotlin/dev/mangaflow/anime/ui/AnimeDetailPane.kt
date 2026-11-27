@@ -736,11 +736,14 @@ internal fun AnimeDetailPane(
                                 Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = horizontal)
                                     .motionInputGate(paneActive),
                                     verticalAlignment = Alignment.CenterVertically) {
-                                    if (main.isNotEmpty() && extra.isNotEmpty()) MotionTabs(selectedTab, listOf("正片", "特别篇"),
+                                    if (main.isNotEmpty() && extra.isNotEmpty()) MotionTabs(selectedTab,
+                                        if (desktop && wide) listOf("正片 · ${main.size}", "特别篇 · ${extra.size}") else listOf("正片", "特别篇"),
                                         onSelect = { episodeTab = it }, modifier = Modifier.weight(1f), compact = true,
                                         controlHeight = 44.dp, treatment = MotionTabTreatment.Soft)
-                                    else Text(if (selectedEpisodes.isEmpty()) "全部剧集" else "${selectedEpisodes.size} 集",
-                                        style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant,
+                                    else Text(if (selectedEpisodes.isEmpty()) "全部剧集" else if (desktop && wide) "共 ${selectedEpisodes.size} 集"
+                                        else "${selectedEpisodes.size} 集",
+                                        style = if (desktop && wide) MaterialTheme.typography.titleMedium else MaterialTheme.typography.labelLarge,
+                                        color = if (desktop && wide) colors.onSurface else colors.onSurfaceVariant,
                                         modifier = Modifier.weight(1f).semantics { heading() })
                                     if (detail.episodes.isNotEmpty() && state.detailError != null)
                                         AnimeDetailRefreshNotice(state.detailError, backdrop, paneActive, controller::retryCurrentDetail)
@@ -886,7 +889,7 @@ internal fun AnimeDetailPane(
         }
         if (wide) Row(Modifier.width(width).fillMaxHeight().padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            val workWidth = if (desktop) (width * .31f).coerceIn(242.dp * fontScale, 370.dp * fontScale)
+            val workWidth = if (desktop) (width * .32f).coerceIn(244.dp * fontScale, 382.dp * fontScale)
                 else (width * .36f).coerceIn(280.dp, 420.dp)
             Column(Modifier.width(workWidth).fillMaxHeight()) {
                 val summaryPosition = rememberScrollState()
@@ -908,9 +911,15 @@ internal fun AnimeDetailPane(
                     }
                     DesktopVerticalScrollbar(summaryPosition, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                 }
-                if (showDock) playDock(Modifier.fillMaxWidth().padding(top = 6.dp, end = 12.dp, bottom = bottomInset + 4.dp))
+                if (showDock && (!desktop || compactHero))
+                    playDock(Modifier.fillMaxWidth().padding(top = 6.dp, end = 12.dp, bottom = bottomInset + 4.dp))
             }
-            sectionPane(Modifier.weight(1f).fillMaxHeight().padding(top = contentTopPadding + 8.dp))
+            Column(Modifier.weight(1f).fillMaxHeight().padding(top = contentTopPadding + 8.dp)) {
+                if (desktop && !compactHero && showDock)
+                    playDock(Modifier.padding(start = horizontal, end = horizontal, bottom = 12.dp)
+                        .widthIn(max = 460.dp * fontScale).fillMaxWidth())
+                sectionPane(Modifier.fillMaxSize())
+            }
         } else Box(Modifier.widthIn(max = 1080.dp).fillMaxSize()) {
             // Like the manga detail, drags outside a tile share the current catalogue's scroll owner.
             val catalogueDrag = Modifier.scrollable(activeCatalogScroll, Orientation.Vertical, reverseDirection = true,
@@ -1120,12 +1129,15 @@ private fun AnimeDetailHero(
     val density = LocalDensity.current
     val ratings = LocalAnimeRatings.current
     val openRatings = { ratings.open(AnimeRatingRequest(subject.id, subject.title, subject, scores)) }
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val posterPanel = desktop && wide && !compact
     BoxWithConstraints(Modifier.fillMaxWidth().clip(if (wide) RoundedCornerShape(20.dp) else RoundedCornerShape(0.dp))) {
         val gutter = if (compact) 12.dp else 18.dp
         val bottomGutter = if (compact) 6.dp else 14.dp
         val innerWidth = (maxWidth - gutter * 2).coerceAtLeast(1.dp)
         val stacked = wide && !compact || innerWidth < 245.dp * density.fontScale.coerceAtLeast(1f)
         val posterWidth = when {
+            posterPanel -> minOf(innerWidth * .64f, 184.dp)
             stacked -> minOf(innerWidth * .58f, if (wide) 200.dp else 120.dp)
             compact -> minOf(innerWidth * .23f, 66.dp)
             else -> minOf(innerWidth * .34f, 128.dp)
@@ -1144,13 +1156,14 @@ private fun AnimeDetailHero(
             val x = gutter.toPx() + posterWidth.toPx() * .48f
             val origin = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - x else x, size.height * .36f)
             val radius = maxOf(size.width * .54f, size.height * .68f, 1f)
-            val wash = hue?.let { Brush.radialGradient(
+            val wash = hue?.takeUnless { posterPanel }?.let { Brush.radialGradient(
                 0f to lerp(surface, it, .48f), .58f to lerp(surface, it, .20f),
                 1f to surface.copy(alpha = 0f), center = origin, radius = radius) }
             onDrawBehind { if (wash != null) drawCircle(wash, radius, origin) }
         })
         val poster: @Composable () -> Unit = {
-            Box(Modifier.width(posterWidth).aspectRatio(2f / 3f).mangaCoverCard(12.dp, shadowRadius = 8.dp)
+            Box(Modifier.width(posterWidth).aspectRatio(2f / 3f).mangaCoverCard(
+                if (posterPanel) 7.dp else 12.dp, shadowRadius = if (posterPanel) 5.dp else 8.dp)
                 .background(hue?.let { lerp(surface, it, .22f) } ?: colors.surfaceContainerLow), contentAlignment = Alignment.Center) {
                 if (decoded == null) Icon(Icons.Outlined.Tv, null, Modifier.size(26.dp), tint = colors.onSurfaceVariant)
                 if (artwork.coverUrl.isNotBlank()) Image(painter, contentDescription = null,
@@ -1159,14 +1172,16 @@ private fun AnimeDetailHero(
         }
         val information: @Composable (Modifier) -> Unit = { infoModifier ->
             Column(infoModifier, verticalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 6.dp)) {
-                if (facts.isNotBlank()) Text(facts, style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
+                if (!desktop && facts.isNotBlank()) Text(facts, style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
                     color = colors.onSurfaceVariant)
                 Text(subject.title, Modifier.semantics { heading() },
-                    style = animeWorkTitleStyle(large = true).copy(fontSize = if (compact) 20.sp else 25.sp,
-                        lineHeight = if (compact) 25.sp else 31.sp),
+                    style = animeWorkTitleStyle(large = true).copy(fontSize = if (posterPanel) 30.sp else if (compact) 20.sp else 25.sp,
+                        lineHeight = if (posterPanel) 37.sp else if (compact) 25.sp else 31.sp),
                     maxLines = if (compact) 2 else 3, overflow = TextOverflow.Ellipsis)
                 if (alternateTitle != null && !compact) Text(alternateTitle, style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (desktop && facts.isNotBlank()) Text(facts, style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
+                    color = colors.onSurfaceVariant)
                 if (scores.isNotEmpty()) AnimeRatingBadges(subject.id, scores, Modifier.fillMaxWidth(),
                     onExpand = openRatings.takeIf { active && ratings.active })
                 else if (metadata != null || subject.canonicalDoubanId() != null) MotionTextButton(
@@ -1182,7 +1197,10 @@ private fun AnimeDetailHero(
             top = contentTopPadding + if (compact) 6.dp else 18.dp, bottom = bottomGutter),
             verticalArrangement = Arrangement.spacedBy(if (compact) 7.dp else 14.dp)) {
             if (stacked) {
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) { poster() }
+                if (posterPanel) Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+                    .background(hue?.let { lerp(colors.surfaceContainerLow, it, .10f) } ?: colors.surfaceContainerLow)
+                    .padding(vertical = 16.dp), contentAlignment = Alignment.Center) { poster() }
+                else Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) { poster() }
                 information(Modifier.fillMaxWidth())
             } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalAlignment = Alignment.CenterVertically) { poster(); information(Modifier.weight(1f)) }

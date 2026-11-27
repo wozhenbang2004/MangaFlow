@@ -85,6 +85,10 @@ internal fun AnimeEpisodeTile(
     val label = animeEpisodeLabel(episode)
     val showNumber = !listRow && episode.kind == AnimeEpisodeKind.MAIN && !episode.subjectId.startsWith("native:")
     val subtitle = animeEpisodeSubtitle(episode)
+    val desktopRow = listRow && platformKind == PlatformKind.DESKTOP
+    val ordinal = if (desktopRow && subtitle != null && episode.kind == AnimeEpisodeKind.MAIN &&
+        !episode.subjectId.startsWith("native:") && episode.number.isFinite() && episode.number > 0)
+        animeEpisodeNumber(episode.number) else null
     val sourceState = when (availability) {
         AnimeEpisodeAvailability.UPCOMING -> "尚未放送"
         AnimeEpisodeAvailability.RECENTLY_FAILED -> "线路未就绪"
@@ -92,8 +96,11 @@ internal fun AnimeEpisodeTile(
         AnimeEpisodeAvailability.UNMATCHED -> "暂无匹配线路"
         AnimeEpisodeAvailability.MATCHED -> null
     }
-    val headline = if (titleFirst) subtitle ?: label else if (showNumber) animeEpisodeNumber(episode.number) else label
-    val caption = if (titleFirst && subtitle != null) listOfNotNull(label, sourceState ?: selectionLabel).joinToString(" · ")
+    val headline = if (titleFirst || ordinal != null) subtitle ?: label else if (showNumber) animeEpisodeNumber(episode.number) else label
+    val caption = if (ordinal != null) {
+        val position = progress?.takeIf { !watched && !it.completed && it.positionMs > 0 }?.let { "看至 " + animeTime(it.positionMs) }
+        listOfNotNull(selectionLabel, sourceState, position).joinToString(" · ").takeIf(String::isNotEmpty)
+    } else if (titleFirst && subtitle != null) listOfNotNull(label, sourceState ?: selectionLabel).joinToString(" · ")
     else when (availability) {
         AnimeEpisodeAvailability.UPCOMING, AnimeEpisodeAvailability.RECENTLY_FAILED -> sourceState
         else -> subtitle ?: selectionLabel ?: sourceState.takeIf { listRow }
@@ -107,12 +114,13 @@ internal fun AnimeEpisodeTile(
         AnimeEpisodeAvailability.MATCHED -> "播放 $label"
     }
     val ink = when {
-        selectedEpisode -> colors.onPrimaryContainer
+        selectedEpisode -> if (desktopRow) colors.onSurface else colors.onPrimaryContainer
         watched -> colors.onSurfaceVariant
         else -> colors.onSurface
     }
     val shape = RoundedCornerShape(12.dp)
     val surface = if (listRow) Color.Transparent else lerp(colors.surface, colors.onSurface, .035f)
+    val selectedSurface = if (desktopRow) lerp(colors.surface, colors.primary, .105f) else colors.primaryContainer
     val playMark: @Composable (Dp) -> Unit = { side ->
         if (showPlayMark) Icon(Icons.Filled.PlayArrow, null, Modifier.size(side).graphicsLayer {
             val amount = selection.value.coerceIn(0f, 1f)
@@ -133,7 +141,7 @@ internal fun AnimeEpisodeTile(
                     val amount = selection.value.coerceIn(0f, 1f)
                     if (amount > 0f) {
                         val width = size.width * amount
-                        drawRoundRect(colors.primaryContainer,
+                        drawRoundRect(selectedSurface,
                             topLeft = Offset(if (layoutDirection == LayoutDirection.Ltr) size.width - width else 0f, 0f),
                             size = Size(width, size.height), cornerRadius = CornerRadius(12.dp.toPx()), alpha = amount)
                     }
@@ -149,33 +157,44 @@ internal fun AnimeEpisodeTile(
                         sourceState).joinToString("，")
                     if (enabled) customActions = listOf(CustomAccessibilityAction(sourcesLabel) { onSources(); true })
                 }
-                .heightIn(min = if (listRow) 52.dp else 48.dp)
+                .heightIn(min = if (desktopRow) 58.dp else if (listRow) 52.dp else 48.dp)
                 .padding(horizontal = if (listRow) 12.dp else 8.dp, vertical = 6.dp),
                 contentAlignment = Alignment.CenterStart) {
                 val hasProgress = watched || progress != null
-                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(headline, Modifier.weight(1f),
-                            style = if (showNumber) mangaMetricValueStyle(19.sp, 24.sp) else MaterialTheme.typography.labelLarge,
-                            fontWeight = if (selectedEpisode) FontWeight.SemiBold else FontWeight.Medium,
-                            maxLines = if (titleFirst || episode.subjectId.startsWith("native:")) 2 else 1,
-                            color = ink, overflow = TextOverflow.Ellipsis)
-                        if (listRow) playMark(12.dp)
-                        if (listRow && hasProgress) AnimeWatchProgressMark(progress, watched,
-                            Modifier.clearAndSetSemantics { }, size = 12.dp)
-                    }
-                    if (caption != null || !listRow && hasProgress) Row(Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        if (caption != null) Text(caption, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
-                            color = if (selectedEpisode) colors.onPrimaryContainer else colors.onSurfaceVariant,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        else Spacer(Modifier.weight(1f))
-                        if (!listRow) playMark(10.dp)
-                        if (!listRow && hasProgress) AnimeWatchProgressMark(progress, watched,
-                            Modifier.clearAndSetSemantics { }, size = 11.dp)
+                val details: @Composable (Modifier) -> Unit = { textArea ->
+                    Column(textArea, verticalArrangement = Arrangement.spacedBy(if (desktopRow) 4.dp else 2.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(headline, Modifier.weight(1f),
+                                style = if (showNumber) mangaMetricValueStyle(19.sp, 24.sp)
+                                    else if (desktopRow) MaterialTheme.typography.titleSmall else MaterialTheme.typography.labelLarge,
+                                fontWeight = if (selectedEpisode) FontWeight.SemiBold else FontWeight.Medium,
+                                maxLines = if (titleFirst || ordinal != null || episode.subjectId.startsWith("native:")) 2 else 1,
+                                color = ink, overflow = TextOverflow.Ellipsis)
+                            if (listRow) playMark(12.dp)
+                            if (listRow && hasProgress) AnimeWatchProgressMark(progress, watched,
+                                Modifier.clearAndSetSemantics { }, size = 12.dp)
+                        }
+                        if (caption != null || !listRow && hasProgress) Row(Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                            if (caption != null) Text(caption, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
+                                color = if (selectedEpisode) colors.onPrimaryContainer else colors.onSurfaceVariant,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            else Spacer(Modifier.weight(1f))
+                            if (!listRow) playMark(10.dp)
+                            if (!listRow && hasProgress) AnimeWatchProgressMark(progress, watched,
+                                Modifier.clearAndSetSemantics { }, size = 11.dp)
+                        }
                     }
                 }
+                if (ordinal != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Text(ordinal, Modifier.widthIn(min = 35.dp, max = 66.dp).clearAndSetSemantics { },
+                        style = mangaMetricValueStyle(20.sp, 26.sp), fontWeight = FontWeight.Medium,
+                        color = if (selectedEpisode) colors.primary else colors.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    details(Modifier.weight(1f))
+                } else details(Modifier.fillMaxWidth())
             }
         }
     }

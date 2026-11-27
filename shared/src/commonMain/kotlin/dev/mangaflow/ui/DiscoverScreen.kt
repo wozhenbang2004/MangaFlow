@@ -26,7 +26,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
@@ -139,6 +138,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.LineBreak
@@ -489,11 +491,11 @@ internal fun DiscoverySearchResults(
         val resultSurface = if (platformKind == PlatformKind.ANDROID && !adultProfile && scopeInToolbar)
             Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = .62f)) else Modifier
         Column(Modifier.then(if (desktopMainContent)
-                Modifier.align(Alignment.TopCenter).widthIn(max = if (index) 1380.dp else 1040.dp).fillMaxHeight()
+                Modifier.align(Alignment.TopCenter).fillMaxHeight()
                     .semantics { paneTitle = "搜索结果" }.focusGroup()
                 else Modifier)
             .fillMaxWidth().heightIn(max = this.maxHeight).then(resultSurface)
-            .padding(horizontal = if (index) 20.dp else if (tagsOnly) 0.dp else 8.dp,
+            .padding(horizontal = if (desktopMainContent) MangaLayout.sidePadding(maxWidth) else if (tagsOnly) 0.dp else 8.dp,
                 vertical = if (tagsOnly) 0.dp else 8.dp)
             .motionInputGate(active && expanded && sourceChoices == null)) {
             // Chrome receives a finite share before the result list is measured. Even the
@@ -509,11 +511,12 @@ internal fun DiscoverySearchResults(
                         SearchTarget.TRANSLATION_GROUP -> "汉化组搜索"
                         SearchTarget.TITLE -> "作品搜索"
                     }
-                    Column(Modifier.padding(start = 8.dp, top = 3.dp, bottom = 2.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        DesktopIndexNote(scope)
-                        Text(term, Modifier.semantics { heading() }, style = browseTitleStyle(25.sp, 32.sp),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(term, Modifier.weight(1f, fill = false).alignByBaseline().semantics { heading() },
+                            style = browseTitleStyle(30.sp, 38.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(scope, Modifier.alignByBaseline(), style = MaterialTheme.typography.labelMedium,
+                            color = browseNoteColor(), maxLines = 1)
                     }
                 }
                 // The toolbar keeps its owner's active state while its retained overlays
@@ -624,24 +627,8 @@ internal fun DiscoverySearchResults(
                                     val direct = if (federated) search.sourceMatches[manga.id].orEmpty().ifEmpty { listOf(manga) }
                                         else emptyList()
                                     val aligned = if (adultProfile) emptyList() else search.alignedTagSources[manga.id].orEmpty()
-                                    if (index) {
-                                        val subtitle = remember(manga, search.query) {
-                                            val alias = manga.alternativeTitles.firstOrNull { search.query.isNotBlank() &&
-                                                !manga.title.contains(search.query, ignoreCase = true) &&
-                                                it.contains(search.query, ignoreCase = true) }
-                                            listOfNotNull(alias, manga.authors.take(3).joinToString(" / ").takeIf { it.isNotBlank() })
-                                                .joinToString("  ·  ")
-                                        }
-                                        DesktopBrowseIndexRow(manga, repository, "search-$searchKey", subtitle, modifier = rowFocus,
-                                            detail = {
-                                                if (direct.isNotEmpty()) SearchSourceMarks(direct, Modifier.fillMaxWidth(),
-                                                    openSource, aligned, search.searchTarget == SearchTarget.TAG, showNames = true)
-                                                else MangaBrowseSource(manga)
-                                            }, figure = if (adultProfile) null else ({
-                                                MangaMetricBadges(manga, foreground = browseNoteColor(), compact = true,
-                                                    plain = true, showMore = false)
-                                            })) { openResult(manga) }
-                                    } else SearchResultRow(manga, repository, "search-$searchKey", modifier = rowFocus,
+                                    SearchResultRow(manga, repository, "search-$searchKey", modifier = rowFocus,
+                                        desktop = desktopMainContent, index = index, query = search.query,
                                         horizontalInset = if (tagsOnly) 0.dp else 6.dp,
                                         adultProfile = adultProfile,
                                         bodySources = direct, alignedSources = aligned,
@@ -703,8 +690,7 @@ private fun DesktopSearchFeedback(search: BrowseState, index: Boolean, adult: Bo
             verticalArrangement = Arrangement.spacedBy(2.dp)) {
             if (loading) {
                 if (showSkeleton) repeat(4) {
-                    if (index) DesktopBrowsePlaceholder(0.dp, !adult, null)
-                    else SearchResultPlaceholder()
+                    SearchResultPlaceholder(index, adult)
                 }
             } else {
                 val tag = search.selectedTags.lastOrNull().takeIf { search.searchTarget == SearchTarget.TAG }
@@ -1009,7 +995,7 @@ private fun DiscoveryPane(
     val sidePadding = MangaLayout.sidePadding(maxWidth)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val indexed = fitsDesktopIndex(maxWidth)
-    val gap = if (desktop) 12.dp else if (columns == 4) 8.dp else 10.dp
+    val gap = if (desktop && indexed) 18.dp else if (desktop) 12.dp else if (columns == 4) 8.dp else 10.dp
     // A saved count is a maximum. Desktop artwork keeps a readable target size,
     // and sparse/list modes get their own line width instead of enlarging posters.
     val visibleColumns = when {
@@ -1038,8 +1024,8 @@ private fun DiscoveryPane(
                     info.totalItemsCount - visibleColumns * 2 - 1
         }, onMore = onMore)
     val sectionWidth = (maxWidth - inset * 2).coerceAtLeast(0.dp)
-    val wideCards = indexed && !ranking && columns != 1 &&
-        (sectionWidth - gap * (visibleColumns - 1)) / visibleColumns >= 292.dp * fontScale
+    val wideCards = desktop && !ranking && columns != 1 &&
+        (sectionWidth - gap * (visibleColumns - 1)) / visibleColumns >= maxOf(292.dp, 112.dp + 122.dp * fontScale)
     val showCategoryLabel = indexed || androidManga && sectionWidth >= 330.dp && fontScale <= 1.3f
     // Put the larger gap below each book's caption, keeping the section heading close to its first row.
     val afterCover = when {
@@ -1062,25 +1048,23 @@ private fun DiscoveryPane(
         }
         val provider = state.items.firstOrNull()?.takeIf { aggregateAdult && !mixedSources }
         if (indexed) {
-            val counts = remember(columns) { (listOf(0, 1, 2, 3, 4, 6, 8) + columns).distinct().sorted() }
-            val labels = remember(counts) { counts.map { if (it == 0) "自动" else if (it == 1) "列表" else "${it}列" } }
-            Row(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 3.dp), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(title, Modifier.semantics { heading() }, style = browseTitleStyle(24.sp, 31.sp))
+            Row(Modifier.fillMaxWidth().padding(top = if (showFeatured) 16.dp else 5.dp, bottom = 7.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(13.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(title, Modifier.alignByBaseline().semantics { heading() }, style = browseTitleStyle(24.sp, 31.sp),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (provider != null) MangaBrowseSource(provider, foreground = browseNoteColor())
-                    else if (state.items.isNotEmpty()) DesktopIndexNote("已载入 ${state.items.size} 部")
+                    else if (state.items.isNotEmpty()) Text("已载入 ${state.items.size} 部", Modifier.alignByBaseline(),
+                        style = MaterialTheme.typography.labelMedium, color = browseNoteColor(), maxLines = 1)
                 }
                 if (onExplore != null) TextButton(onClick = onExplore, enabled = active,
                     contentPadding = PaddingValues(horizontal = 8.dp)) {
                     Icon(Icons.Outlined.Explore, null, Modifier.size(16.dp))
                     Text("分类与专题", Modifier.padding(start = 5.dp), style = MaterialTheme.typography.labelMedium)
                 }
-                MotionTabs(counts.indexOf(columns), labels, onSelect = { if (active) onColumnsChange(counts[it]) },
-                    modifier = Modifier.width(41.dp * counts.size * fontScale).motionInputGate(active),
-                    role = Role.RadioButton, treatment = MotionTabTreatment.Soft, controlHeight = 36.dp,
-                    fontSize = 12.sp, fullWidthIndicator = true, indicatorHeight = 30.dp,
-                    tooltips = counts.map { when (it) { 0 -> "按窗口自动排列封面"; 1 -> "作品列表"; else -> "最多 ${it} 列封面" } })
+                DiscoveryLayoutControl(columns, visibleColumns, backdrop, active, onColumnsChange,
+                    showFullChoice = true, onPresenceChange = { layoutPresent = it })
                 BrowseCacheStatus(state, backdrop, active)
                 DiscoveryRefresh(state, onRefresh, active)
             }
@@ -1228,7 +1212,7 @@ private fun DiscoveryPane(
                 Box(Modifier.padding(bottom = afterCover)) {
                     if (wideCards) DesktopShelfPlaceholder()
                     else DiscoveryCoverPlaceholder(narrow = visibleColumns >= 4, showMetrics = !adultProfile,
-                        showSource = aggregateAdult, showChapter = state.mode == DiscoveryMode.LATEST)
+                        showSource = aggregateAdult, showChapter = state.mode == DiscoveryMode.LATEST, desktopCatalogue = desktop)
                 }
             }
             else if (!showFeatured) item(span = { GridItemSpan(maxLineSpan) }, key = "loading") {
@@ -1325,7 +1309,7 @@ private fun DiscoveryPane(
                                     showSource = mixedSources, showMetrics = !adultProfile,
                                     onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
                                 else CoverTile(manga, repository, dense = true, narrow = visibleColumns >= 4,
-                                    showSource = mixedSources, showMetrics = !adultProfile,
+                                    desktopCatalogue = desktop, showSource = mixedSources, showMetrics = !adultProfile,
                                     showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
                                     onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
                             }
@@ -1449,11 +1433,17 @@ private fun DiscoveryListPlaceholder(ranked: Boolean, rankGutter: Dp, loadingLab
 }
 
 @Composable
-internal fun DiscoveryCoverPlaceholder(narrow: Boolean, showMetrics: Boolean, showSource: Boolean, showChapter: Boolean) {
+internal fun DiscoveryCoverPlaceholder(narrow: Boolean, showMetrics: Boolean, showSource: Boolean, showChapter: Boolean,
+    desktopCatalogue: Boolean = false) {
     val ink = MaterialTheme.colorScheme.onSurface
     val detailInk = ink.copy(alpha = .045f)
     Column(Modifier.fillMaxWidth().clearAndSetSemantics {}) {
-        Spacer(BrowseTileCoverFrame.background(ink.copy(alpha = .055f), RoundedCornerShape(BrowseTileCoverRadius)))
+        Spacer(BrowseTileCoverFrame.background(ink.copy(alpha = .055f),
+            RoundedCornerShape(if (desktopCatalogue) 6.dp else BrowseTileCoverRadius)))
+        if (desktopCatalogue) {
+            DesktopCoverCaption(null, narrow, showChapter, showSource, showMetrics)
+            return@Column
+        }
         Column(BrowseTileCaption) {
             CoverTileTitle(null, dense = true, narrow = narrow)
             if (showChapter) BrowseChapterLine("", Modifier.padding(top = 2.dp).placeholderLines(detailInk, .60f))
@@ -1557,41 +1547,105 @@ internal fun DesktopBrowseActions(
 }
 
 @Composable
-private fun SearchResultPlaceholder() {
-    val ink = MaterialTheme.colorScheme.onSurface
-    Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 7.dp).clearAndSetSemantics {}) {
-        Spacer(SearchResultCoverFrame.background(ink.copy(alpha = .065f), RoundedCornerShape(8.dp)))
-        Column(Modifier.weight(1f).padding(start = 13.dp, end = 44.dp).heightIn(min = SearchResultCoverHeight),
-            verticalArrangement = Arrangement.SpaceBetween) {
-            Spacer(Modifier.height(34.dp).placeholderLines(ink.copy(alpha = .075f), .70f, .45f))
-            Spacer(Modifier.height(16.dp).placeholderLines(ink.copy(alpha = .045f), .32f))
+private fun SearchResultPlaceholder(index: Boolean, adult: Boolean) {
+    val ink = MaterialTheme.colorScheme.onSurface.copy(alpha = .065f)
+    val work: @Composable () -> Unit = {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Spacer(SearchResultCoverFrame.background(ink, RoundedCornerShape(5.dp)))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Spacer(Modifier.height(25.dp).placeholderLines(ink, .72f))
+                Spacer(Modifier.height(18.dp).placeholderLines(ink, .41f))
+            }
         }
     }
+    val geometry = Modifier.fillMaxWidth().padding(vertical = 8.dp).clearAndSetSemantics {}
+    if (index) DesktopIndexColumns(geometry, work = work,
+        detail = { Spacer(Modifier.height(18.dp).placeholderLines(ink, .54f)) },
+        figure = if (adult) null else ({ Spacer(Modifier.height(18.dp).placeholderLines(ink, .40f)) }))
+    else Box(geometry.padding(start = 2.dp, end = 40.dp)) { work() }
 }
+
+@Composable
+private fun searchMatchText(value: String, term: String, accent: Color): AnnotatedString =
+    remember(value, term, accent) {
+        buildAnnotatedString {
+            append(value)
+            if (term.isNotEmpty()) {
+                val first = value.indexOf(term, ignoreCase = true)
+                if (first >= 0) addStyle(SpanStyle(color = accent, fontWeight = FontWeight.Bold), first, first + term.length)
+            }
+        }
+    }
 
 @Composable
 private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement: String,
     horizontalInset: Dp = 6.dp, bodySources: List<Manga> = emptyList(),
     alignedSources: List<Manga> = emptyList(), tagSearch: Boolean = false,
     adultProfile: Boolean = false, onSource: ((List<Manga>) -> Unit)? = null,
+    desktop: Boolean = false, index: Boolean = false, query: String = "",
     modifier: Modifier = Modifier, onOpen: () -> Unit) {
     val transition = LocalMangaCoverTransition.current
     val interaction = remember { MutableInteractionSource() }
-    Row(
-        modifier.fillMaxWidth()
-            .browseIntentWarmup(manga, repository, interaction)
-            .clickable(interactionSource = interaction, indication = null, role = Role.Button,
-                onClickLabel = "查看${manga.title}", onClick = {
+    val target = modifier.fillMaxWidth()
+        .browseIntentWarmup(manga, repository, interaction)
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button,
+            onClickLabel = "查看${manga.title}", onClick = {
                 transition?.select?.invoke(MangaCoverKey(manga.id, placement))
                 onOpen()
             })
-            .motionPress(interaction, pressedScale = .985f)
-            .padding(horizontal = horizontalInset, vertical = 7.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
+        .motionPress(interaction, pressedScale = if (desktop) .996f else .985f)
+    val secondary = browseNoteColor()
+    val cover: @Composable () -> Unit = {
         MangaCover(manga, repository, SearchResultCoverFrame.mangaSharedCover(manga.id, placement)
-            .mangaCoverCard(8.dp, shadowRadius = 6.dp))
-        val secondary = browseNoteColor()
+            .mangaCoverCard(if (desktop) 5.dp else 8.dp, shadowRadius = if (desktop) 3.dp else 6.dp))
+    }
+    if (desktop) {
+        val accent = MaterialTheme.colorScheme.primary
+        val term = query.trim()
+        val alias = remember(manga, term) {
+            if (term.isEmpty() || manga.title.contains(term, ignoreCase = true)) null
+            else manga.alternativeTitles.firstOrNull { it.contains(term, ignoreCase = true) }
+        }
+        val authors = remember(manga.authors) { manga.authors.filter(String::isNotBlank).distinct().take(3).joinToString(" / ") }
+        val identity: @Composable () -> Unit = {
+            Text(searchMatchText(manga.title, term, accent), style = browseTitleStyle(18.sp, 24.sp),
+                color = MaterialTheme.colorScheme.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (alias != null) Text(searchMatchText(alias, term, accent), style = MaterialTheme.typography.bodySmall,
+                color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (authors.isNotEmpty()) Text(searchMatchText(authors, term, accent), style = MaterialTheme.typography.bodySmall,
+                color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        val sources: @Composable () -> Unit = {
+            if (!index && adultProfile && bodySources.size <= 1) MangaBrowseSource(manga, foreground = secondary)
+            else if (bodySources.isNotEmpty()) SearchSourceMarks(bodySources, Modifier.fillMaxWidth(), onSource,
+                alignedSources, tagSearch, showNames = index)
+            else if (index) MangaBrowseSource(manga, foreground = secondary)
+        }
+        val metrics: @Composable () -> Unit = {
+            MangaMetricBadges(manga, foreground = secondary, compact = true, plain = true, showMore = false)
+        }
+        val geometry = target.padding(vertical = 8.dp)
+        if (index) DesktopIndexColumns(geometry, work = {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                cover()
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) { identity() }
+            }
+        }, detail = sources, figure = if (adultProfile) null else metrics)
+        else Row(geometry.padding(start = 2.dp, end = 40.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            cover()
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                identity()
+                sources()
+                if (!adultProfile) metrics()
+            }
+        }
+        return
+    }
+    Row(target.padding(horizontal = horizontalInset, vertical = 7.dp), verticalAlignment = Alignment.Top) {
+        cover()
         Column(Modifier.weight(1f).heightIn(min = SearchResultCoverHeight).padding(start = 13.dp,
             end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp),
             verticalArrangement = Arrangement.SpaceBetween) {
@@ -1685,6 +1739,9 @@ private fun BrowseListRow(
     }
 }
 
+private enum class LayoutMenuSide { LEFT, RIGHT, ABOVE, BELOW }
+private data class LayoutMenuPlacement(val side: LayoutMenuSide, val width: Int)
+
 @Composable
 internal fun DiscoveryLayoutControl(
     columns: Int,
@@ -1692,6 +1749,7 @@ internal fun DiscoveryLayoutControl(
     backdrop: HazeState,
     enabled: Boolean,
     onChange: (Int) -> Unit,
+    showFullChoice: Boolean = false,
     onPresenceChange: (Boolean) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -1701,7 +1759,6 @@ internal fun DiscoveryLayoutControl(
     val direction = LocalLayoutDirection.current
     val motion = LocalMotionEnabled.current
     val desktop = platformKind == PlatformKind.DESKTOP
-    val window = LocalMangaWindow.current
     val choices = remember(desktop, columns) {
         if (desktop) (listOf(0, 1, 2, 3, 4, 6, 8) + columns).distinct().sorted()
         else listOf(1, 2, 3, 4)
@@ -1730,9 +1787,10 @@ internal fun DiscoveryLayoutControl(
     val reportPresence by rememberUpdatedState(onPresenceChange)
     SideEffect { reportPresence(present) }
     DisposableEffect(Unit) { onDispose { reportPresence(false) } }
-    var availableWidth by remember { mutableStateOf(0.dp) }
     val cellWidth = 44.dp * density.fontScale.coerceIn(1f, 1.35f)
-    val panelWidth = minOf(cellWidth * choices.size + 8.dp, availableWidth)
+    val fullWidth = with(density) { (cellWidth * choices.size + 8.dp).roundToPx() }
+    val minimumWidth = with(density) { (cellWidth + 8.dp).roundToPx() }
+    var placement by remember { mutableStateOf<LayoutMenuPlacement?>(null) }
     val scroll = rememberScrollState()
     LaunchedEffect(expanded, scroll.maxValue) {
         // Selection moves inside the retained strip; it must not jump its
@@ -1740,41 +1798,65 @@ internal fun DiscoveryLayoutControl(
         if (expanded) scroll.scrollTo(with(density) { (cellWidth * selected).roundToPx() }
             .coerceIn(0, scroll.maxValue))
     }
-    val position = remember(density) {
+    val position = remember(density, fullWidth, minimumWidth, desktop) {
         val gap = with(density) { 4.dp.roundToPx() }
         val margin = with(density) { 12.dp.roundToPx() }
         object : PopupPositionProvider {
             override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize,
                 layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
-                val x = if (layoutDirection == LayoutDirection.Ltr)
-                    anchorBounds.left - gap - popupContentSize.width else anchorBounds.right + gap
-                return IntOffset(x.coerceIn(margin,
-                    (windowSize.width - margin - popupContentSize.width).coerceAtLeast(margin)),
-                    (anchorBounds.top + (anchorBounds.height - popupContentSize.height) / 2)
-                        .coerceIn(margin, (windowSize.height - margin - popupContentSize.height).coerceAtLeast(margin)))
+                val marginX = minOf(margin, ((windowSize.width - minimumWidth) / 2).coerceAtLeast(0))
+                val available = (windowSize.width - 2 * marginX).coerceAtLeast(1)
+                val left = (anchorBounds.left - gap - marginX).coerceIn(0, available)
+                val right = (windowSize.width - marginX - anchorBounds.right - gap).coerceIn(0, available)
+                val ltr = layoutDirection == LayoutDirection.Ltr
+                val start = if (ltr) left else right
+                val end = if (ltr) right else left
+                val below = windowSize.height - margin - anchorBounds.bottom - gap
+                val above = anchorBounds.top - gap - margin
+                val side = if (maxOf(start, end) < minimumWidth) {
+                    if (below >= popupContentSize.height || below >= above) LayoutMenuSide.BELOW else LayoutMenuSide.ABOVE
+                } else {
+                    val preferStart = start >= fullWidth || start >= end || !desktop && start >= minimumWidth
+                    if (preferStart == ltr) LayoutMenuSide.LEFT else LayoutMenuSide.RIGHT
+                }
+                val room = when (side) {
+                    LayoutMenuSide.LEFT -> left
+                    LayoutMenuSide.RIGHT -> right
+                    else -> available
+                }
+                placement = LayoutMenuPlacement(side, minOf(fullWidth, room))
+                val x = when (side) {
+                    LayoutMenuSide.LEFT -> anchorBounds.left - gap - popupContentSize.width
+                    LayoutMenuSide.RIGHT -> anchorBounds.right + gap
+                    else -> anchorBounds.center.x - popupContentSize.width / 2
+                }
+                val y = when (side) {
+                    LayoutMenuSide.BELOW -> anchorBounds.bottom + gap
+                    LayoutMenuSide.ABOVE -> anchorBounds.top - gap - popupContentSize.height
+                    else -> anchorBounds.center.y - popupContentSize.height / 2
+                }
+                val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
+                val maxY = (windowSize.height - popupContentSize.height).coerceAtLeast(0)
+                val insetX = minOf(marginX, maxX / 2)
+                val insetY = minOf(margin, maxY / 2)
+                return IntOffset(x.coerceIn(insetX, maxX - insetX), y.coerceIn(insetY, maxY - insetY))
             }
         }
     }
-    // The real trigger never leaves its row. Only a fixed-size sibling window
-    // reveals the final-size choices horizontally, following the beUI search shell.
-    Box(Modifier.size(44.dp).onGloballyPositioned { coordinates ->
-        val origin = coordinates.localToWindow(Offset.Zero)
-        if (origin.x.isFinite()) with(density) {
-            val room = if (direction == LayoutDirection.Ltr) origin.x
-                else window.width.toPx() - origin.x - coordinates.size.width
-            availableWidth = (room.toDp() - 16.dp).coerceAtLeast(0.dp)
-        }
-    }) {
+    // Keep the trigger in its row while the choices unfold beside it.
+    val triggerWidth = if (showFullChoice) 66.dp * density.fontScale.coerceAtLeast(1f) else 44.dp
+    val triggerBounds = Modifier.width(triggerWidth).height(44.dp)
+    Box(triggerBounds) {
         MotionIconButton(
             onClick = { closeAfterChoice = null; expanded = !expanded },
-            modifier = Modifier.size(44.dp).semantics {
+            modifier = triggerBounds.semantics {
                 contentDescription = "浏览布局"
                 stateDescription = labels[selected] + "，当前${actualColumns}列" +
                     if (expanded) "，已展开" else "，已收起"
             },
-            enabled = enabled,
+            enabled = enabled, tooltip = if (showFullChoice) "浏览布局" else null,
         ) {
-            MotionTabContent(selected = columns to actualColumns, modifier = Modifier.width(42.dp).height(32.dp),
+            MotionTabContent(selected = columns to actualColumns, modifier = Modifier.width(triggerWidth - 2.dp).height(32.dp),
                 contentKey = { it }, order = { it.first }, fillContent = false) { (preferred, actual) ->
                 val colors = MaterialTheme.colorScheme
                 val ink = if (LocalPlatformAccessibilityPreferences.current.increaseContrast) colors.onSurface
@@ -1784,25 +1866,32 @@ internal fun DiscoveryLayoutControl(
                     horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally)) {
                     Icon(if (preferred == 1) Icons.Outlined.ViewList else Icons.Outlined.GridView,
                         null, Modifier.size(16.dp), tint = ink)
-                    Text(if (automatic) "自" else actual.toString(), color = ink,
+                    Text(if (showFullChoice) labels[choices.indexOf(preferred).coerceAtLeast(0)]
+                        else if (automatic) "自" else actual.toString(), color = ink,
                         style = if (automatic) MaterialTheme.typography.labelMedium else mangaMetricValueStyle(),
                         maxLines = 1, softWrap = false)
                 }
             }
         }
-        if (present && panelWidth > 0.dp) Popup(popupPositionProvider = position,
+        if (present) Popup(popupPositionProvider = position,
             onDismissRequest = { closeAfterChoice = null; expanded = false },
             properties = PopupProperties(focusable = expanded && enabled)) {
-            // Popup geometry stays final-sized throughout; animated optical width
-            // never re-enters the position provider or moves the trigger.
-            Box(Modifier.width(panelWidth).height(44.dp)) {
+            val bounds = placement
+            val panelWidth = with(density) { (bounds?.width ?: fullWidth).toDp() }
+            // Only the inner lens animates; the popup keeps its measured width for positioning.
+            Box(Modifier.width(panelWidth).height(44.dp)) rail@{
+                if (bounds == null) return@rail
+                val horizontal = bounds.side == LayoutMenuSide.LEFT || bounds.side == LayoutMenuSide.RIGHT
+                val opensToStart = (bounds.side == LayoutMenuSide.LEFT) == (direction == LayoutDirection.Ltr)
                 val progress = reveal.value.coerceIn(0f, 1f)
                 LiquidGlassSurface(backdrop,
-                    Modifier.align(if (direction == LayoutDirection.Ltr) Alignment.CenterEnd else Alignment.CenterStart)
-                        .width((panelWidth * progress).coerceAtLeast(1.dp)).height(44.dp)
+                    Modifier.align(if (horizontal && opensToStart) Alignment.CenterEnd else Alignment.CenterStart)
+                        .width(if (horizontal) (panelWidth * progress).coerceAtLeast(1.dp) else panelWidth).height(44.dp)
                         .motionInputGate(enabled && expanded && progress >= .85f)
                         .graphicsLayer {
                             alpha = progress
+                            if (!horizontal) translationY = (if (bounds.side == LayoutMenuSide.BELOW) -4.dp.toPx()
+                                else 4.dp.toPx()) * (1f - progress)
                             // Keep the soft shadow's outset visible throughout alpha < 1,
                             // rather than revealing it only after offscreen clipping ends.
                             compositingStrategy = CompositingStrategy.ModulateAlpha
@@ -1810,10 +1899,10 @@ internal fun DiscoveryLayoutControl(
                     cornerRadius = 22.dp, role = GlassSurfaceRole.CONTROL, softCard = true,
                     elevation = 16.dp * progress, materialExpansion = { progress }) {
                     Row(Modifier.layout { measurable, constraints ->
-                        val fullWidth = panelWidth.roundToPx()
-                        val placeable = measurable.measure(constraints.copy(minWidth = fullWidth, maxWidth = fullWidth))
+                        val railWidth = panelWidth.roundToPx()
+                        val placeable = measurable.measure(constraints.copy(minWidth = railWidth, maxWidth = railWidth))
                         layout(constraints.maxWidth, constraints.maxHeight) {
-                            placeable.placeRelative(constraints.maxWidth - fullWidth, 0)
+                            placeable.placeRelative(if (horizontal && opensToStart) constraints.maxWidth - railWidth else 0, 0)
                         }
                     }.width(panelWidth).height(44.dp).horizontalScroll(scroll).padding(horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically) {
@@ -2132,6 +2221,7 @@ internal fun CoverTile(
     showSource: Boolean = false,
     showMetrics: Boolean = true,
     onCoverReady: (() -> Unit)? = null,
+    desktopCatalogue: Boolean = false,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -2146,8 +2236,13 @@ internal fun CoverTile(
         .motionPress(interaction)) {
         MangaCover(manga, repository, BrowseTileCoverFrame
             .then(if (placement != null) Modifier.mangaSharedCover(manga.id, placement) else Modifier)
-            .mangaCoverCard(BrowseTileCoverRadius, shadowRadius = if (narrow) 7.dp else 9.dp),
+            .mangaCoverCard(if (desktopCatalogue) 6.dp else BrowseTileCoverRadius,
+                shadowRadius = if (desktopCatalogue) 4.dp else if (narrow) 7.dp else 9.dp),
             onReady = onCoverReady)
+        if (desktopCatalogue) {
+            DesktopCoverCaption(manga, narrow, showChapter, showSource, showMetrics, bodySources, onRatings)
+            return@Column
+        }
         Column(BrowseTileCaption) {
             val note = browseNoteColor()
             CoverTileTitle(manga.title, dense, narrow)
@@ -2161,6 +2256,46 @@ internal fun CoverTile(
             if (showSource) MangaBrowseSource(manga, BrowseTileFootnote, foreground = note)
             else if (showMetrics) MangaMetricBadges(manga, BrowseTileFootnote, foreground = note,
                 compact = true, showMore = false, plain = true, onExpand = onRatings)
+        }
+    }
+}
+
+/** Titles and credits stay together; comparable values align across a shelf. */
+@Composable
+private fun DesktopCoverCaption(manga: Manga?, narrow: Boolean, showChapter: Boolean, showSource: Boolean,
+    showMetrics: Boolean, bodySources: List<Manga> = emptyList(), onRatings: (() -> Unit)? = null) {
+    val colors = MaterialTheme.colorScheme
+    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val titleStyle = if (narrow) browseTitleStyle(16.sp, 21.sp) else browseTitleStyle(18.sp, 24.sp)
+    val note = browseNoteColor()
+    val credits = remember(manga, showChapter) {
+        if (manga == null) "" else listOfNotNull(
+            manga.latestChapter.takeIf { showChapter && it.isNotBlank() },
+            manga.authors.filter(String::isNotBlank).distinct().take(2).joinToString(" / ").takeIf(String::isNotEmpty),
+        ).joinToString(" · ")
+    }
+    Column(Modifier.fillMaxWidth().padding(top = 9.dp)) {
+        Column(Modifier.fillMaxWidth().heightIn(min = (if (narrow) 62.dp else 68.dp) * scale),
+            verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (manga == null) {
+                Text("", Modifier.placeholderLines(colors.onSurface.copy(alpha = .075f), .82f, .50f),
+                    style = titleStyle, minLines = 2, maxLines = 2)
+                Spacer(Modifier.height(17.dp * scale).placeholderLines(note.copy(alpha = .11f), .47f))
+            } else {
+                Text(manga.title, style = titleStyle, color = colors.onSurface,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (credits.isNotEmpty()) Text(credits, style = MaterialTheme.typography.bodySmall, color = note,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        if (manga == null) {
+            if (showSource || showMetrics) Spacer(Modifier.height(22.dp * scale)
+                .placeholderLines(note.copy(alpha = .09f), .37f))
+        } else {
+            SearchSourceMarks(bodySources, Modifier.fillMaxWidth())
+            if (showSource) MangaBrowseSource(manga, foreground = note)
+            else if (showMetrics) MangaMetricBadges(manga, foreground = note, compact = true,
+                maxScores = 1, showMore = false, plain = true, onExpand = onRatings)
         }
     }
 }

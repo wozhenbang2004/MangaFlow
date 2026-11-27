@@ -226,11 +226,10 @@ internal fun DetailCatalog(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 val single = searchResults.singleOrNull()?.takeUnless { downloadMode }
-                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                     ChapterSearchField(chapterQuery, { chapterQuery = it }, desktopFindRequest,
-                        active && !sourcePresent, Modifier.fillMaxWidth(), onOpenMatch = single?.let { match -> { onRead(match) } })
-                    if (roomy && chapterQuery.isEmpty()) Text("Ctrl+F", Modifier.padding(end = 12.dp),
-                        color = DetailMuted, style = mangaMetricValueStyle(10.sp, 16.sp))
+                        active && !sourcePresent, Modifier.widthIn(max = 440.dp * fontScale).fillMaxWidth(),
+                        onOpenMatch = single?.let { match -> { onRead(match) } }, showFindShortcut = roomy)
                 }
                 if (searching) Text("${searchResults.size} 章", color = DetailMuted,
                     style = MaterialTheme.typography.labelSmall)
@@ -425,10 +424,10 @@ internal fun DetailCatalog(
                     // remaining pane width, including the actual scrollbar gutter.
                     val gridWidth = (maxWidth - (if (desktop) 12.dp else 0.dp)).coerceAtLeast(1.dp)
                     val chapterColumns = if (desktop)
-                        MangaLayout.columns(gridWidth, 4, 173.dp * fontScale, 8.dp, 16.dp)
+                        MangaLayout.columns(gridWidth, 3, 235.dp * fontScale, 16.dp, 16.dp)
                     else MangaLayout.columns(gridWidth, 4, 64.dp * fontScale, 6.dp, 16.dp)
                     val volumeColumns = if (desktop)
-                        MangaLayout.columns(gridWidth, 6, 132.dp * fontScale, 8.dp, 16.dp)
+                        MangaLayout.columns(gridWidth, 6, 132.dp * fontScale, 16.dp, 16.dp)
                     else chapterColumns
                     // Separate book/text densities share one scroll state and full-width group breaks.
                     val gridUnits = detailCatalogGridUnits(chapterColumns, volumeColumns)
@@ -437,7 +436,7 @@ internal fun DetailCatalog(
                         state = grid, userScrollEnabled = paneActive,
                         modifier = Modifier.fillMaxSize().padding(end = if (desktop) 12.dp else 0.dp),
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
-                        horizontalArrangement = Arrangement.spacedBy(if (desktop) 8.dp else 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (desktop) 16.dp else 6.dp),
                         // Reading and source marks share the compact secondary line.
                         verticalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
@@ -446,12 +445,11 @@ internal fun DetailCatalog(
                                 span = { GridItemSpan(maxLineSpan) }, contentType = "group") {
                                 val heading = chapterGroupLabel(run.first().group)
                                 if (desktop) Row(Modifier.fillMaxWidth().padding(top = if (runIndex == 0) 4.dp else 14.dp,
-                                    bottom = 6.dp), verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Text(heading, Modifier.weight(1f), color = DetailForeground,
-                                        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                                    bottom = 7.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(heading, Modifier.weight(1f, fill = false).alignByBaseline(), color = DetailForeground,
+                                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                                     Text(run.size.toString() + if (isVolumeChapter(run.first())) " 册" else " 章",
-                                        style = MaterialTheme.typography.labelSmall, color = DetailMuted)
+                                        Modifier.alignByBaseline(), style = mangaMetricValueStyle(12.sp, 16.sp), color = DetailMuted)
                                 } else Text(heading, color = DetailSecondary,
                                     style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
                                     modifier = Modifier.padding(top = if (runIndex == 0) 3.dp else 14.dp, bottom = 5.dp))
@@ -816,7 +814,7 @@ private fun isDefaultChapterGroup(name: String): Boolean =
 
 internal fun chapterGroupLabel(name: String): String = if (isDefaultChapterGroup(name)) "章节" else name
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun ChapterTile(
     chapter: Chapter,
@@ -850,10 +848,10 @@ private fun ChapterTile(
         val hovered by interaction.collectIsHoveredAsState()
         val focused by interaction.collectIsFocusedAsState()
         val colors = MaterialTheme.colorScheme
-        val fill by animateColorAsState(when {
-            current -> readingColor.copy(alpha = if (hovered || focused) .15f else .095f)
-            hovered || focused -> colors.onSurface.copy(alpha = .085f)
-            else -> colors.onSurface.copy(alpha = .032f)
+        val fill = animateColorAsState(when {
+            current -> readingColor.copy(alpha = if (hovered || focused) .14f else .085f)
+            hovered || focused -> colors.onSurface.copy(alpha = .065f)
+            else -> Color.Transparent
         }, if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "chapter-row")
         val reading = when {
             complete -> "已读完"
@@ -862,8 +860,16 @@ private fun ChapterTile(
             else -> null
         }
         DesktopContextMenuArea(desktopActions) {
-            Row(modifier.fillMaxWidth().height(height).padding(vertical = 3.dp)
-                .clip(RoundedCornerShape(9.dp)).background(fill)
+            Row(modifier.fillMaxWidth().padding(vertical = 2.dp).heightIn(min = height)
+                .clip(RoundedCornerShape(9.dp)).drawBehind {
+                    drawRect(fill.value)
+                    if (current) {
+                        val w = 3.dp.toPx()
+                        val h = minOf(25.dp.toPx(), size.height)
+                        val x = if (layoutDirection == LayoutDirection.Ltr) 0f else size.width - w
+                        drawRoundRect(readingColor, Offset(x, (size.height - h) / 2f), Size(w, h), CornerRadius(w / 2f))
+                    }
+                }
                 .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
                     onClickLabel = if (downloadMode) "选择来源下载章节" else "阅读章节",
                     onClick = if (downloadMode) onDownload else onRead)
@@ -872,22 +878,26 @@ private fun ChapterTile(
                     stateDescription = listOf(if (current) "当前阅读章节" else "",
                         chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
                         .filter(String::isNotBlank).joinToString("，")
-                }.padding(start = 10.dp, end = 3.dp),
+                }.padding(start = 12.dp, end = 3.dp, top = 5.dp, bottom = 5.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(mangaNumberText(chapter.title), color = if (current) readingColor else DetailForeground,
-                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = if (current) FontWeight.SemiBold
-                            else FontWeight.Medium), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        CatalogSourceEntry(chapter, enabled = sourceEnabled,
-                            onOpen = { anchor -> if (downloadMode) onDownload() else onSources(anchor) })
-                        if (reading != null) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(mangaNumberText(chapter.title), color = when {
+                        current -> readingColor
+                        complete -> DetailSecondary
+                        else -> DetailForeground
+                    }, style = MaterialTheme.typography.titleSmall.copy(fontWeight = if (current) FontWeight.SemiBold
+                        else FontWeight.Medium), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        if (reading != null) Row(Modifier.align(Alignment.CenterVertically),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                             ChapterReadMark(progress, progressKnown, size = 11.dp)
-                            Text(reading, Modifier.weight(1f, fill = false), color = DetailSecondary,
-                                style = mangaMetricValueStyle(11.sp, 15.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(reading, color = DetailSecondary, style = mangaMetricValueStyle(11.sp, 15.sp))
                         }
-                        if (hasDownloadMark) ChapterDownloadMark(entry, downloadMode, size = 12.dp)
+                        CatalogSourceEntry(chapter, Modifier.align(Alignment.CenterVertically), enabled = sourceEnabled,
+                            onOpen = { anchor -> if (downloadMode) onDownload() else onSources(anchor) })
+                        if (hasDownloadMark) Box(Modifier.align(Alignment.CenterVertically)) {
+                            ChapterDownloadMark(entry, downloadMode, size = 12.dp)
+                        }
                     }
                 }
                 Box(Modifier.size(32.dp)) { DesktopMoreButton(desktopActions, label = chapter.title + "的操作") }

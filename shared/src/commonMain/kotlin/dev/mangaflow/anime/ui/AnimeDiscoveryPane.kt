@@ -310,9 +310,10 @@ private fun AnimeDiscoveryWatchShelf(entries: List<AnimeLibraryEntry>, scroll: L
         AnimeDiscoverySectionHeading("最近观看", "", onMore = onOpenHistory.takeIf { active },
             moreLabel = "全部观看历史")
         if (besideGallery) {
-            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                entries.take(2).forEach { entry -> key(entry.subject.id) {
-                    AnimeDiscoveryResumeRow(entry, continuationLabel(entry), active, Modifier.fillMaxWidth(), onResume)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                entries.take(2).forEachIndexed { index, entry -> key(entry.subject.id) {
+                    AnimeDiscoveryResumeRow(entry, continuationLabel(entry), active, Modifier.fillMaxWidth(), onResume,
+                        leading = index == 0, compact = index > 0)
                 } }
             }
             return@Column
@@ -334,21 +335,24 @@ private fun AnimeDiscoveryWatchShelf(entries: List<AnimeLibraryEntry>, scroll: L
 
 @Composable
 private fun AnimeDiscoveryResumeRow(entry: AnimeLibraryEntry, action: String, active: Boolean,
-    modifier: Modifier, onResume: (AnimeLibraryEntry) -> Unit) {
+    modifier: Modifier, onResume: (AnimeLibraryEntry) -> Unit, leading: Boolean = false, compact: Boolean = false) {
     val progress = entry.resume ?: return
     val colors = MaterialTheme.colorScheme
     val shape = remember { RoundedCornerShape(16.dp) }
     val interaction = remember(entry.subject.id) { MutableInteractionSource() }
     Row(modifier
         .motionPress(interaction, enabled = active, pressedScale = .99f)
-        .clip(shape).background(colors.surfaceContainerLow)
+        .clip(shape).background(if (compact) Color.Transparent else colors.surfaceContainerLow)
         .clickable(interactionSource = interaction, indication = null, enabled = active,
             role = Role.Button, onClickLabel = action, onClick = { onResume(entry) })
-        .heightIn(min = 84.dp).padding(start = 6.dp, end = 9.dp, top = 6.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-        AnimePoster(entry.subject, Modifier.size(44.dp, 66.dp).clearAndSetSemantics { })
+        .heightIn(min = if (leading) 116.dp else if (compact) 68.dp else 84.dp)
+        .padding(start = if (leading) 10.dp else 6.dp, end = 9.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(if (leading) 13.dp else 9.dp)) {
+        val cover = if (leading) 62.dp else if (compact) 36.dp else 44.dp
+        AnimePoster(entry.subject, Modifier.size(cover, cover * 1.5f).clearAndSetSemantics { })
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(entry.subject.title, style = animeWorkTitleStyle().copy(fontSize = 15.sp, lineHeight = 20.sp),
+            Text(entry.subject.title, style = animeWorkTitleStyle().copy(fontSize = if (leading) 18.sp else 15.sp,
+                lineHeight = if (leading) 23.sp else 20.sp),
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(animeWatchedEpisodeName(entry, progress), color = colors.onSurfaceVariant,
                 style = MaterialTheme.typography.labelSmall,
@@ -362,8 +366,14 @@ private fun AnimeDiscoveryResumeRow(entry: AnimeLibraryEntry, action: String, ac
                     AnimeWatchProgressLine(fraction, Modifier.widthIn(max = 164.dp).padding(top = 2.dp))
                 }
             }
+            if (leading) Row(Modifier.padding(top = 4.dp).clearAndSetSemantics { },
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp), tint = colors.primary)
+                Text(action, color = colors.primary, style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
-        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = colors.primary)
+        if (!leading) Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = colors.primary)
     }
 }
 

@@ -17,6 +17,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.TextUnit
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
 
 /** Native score, scale and heat digits share the selected numeric scene and a readable minimum. */
@@ -64,6 +66,18 @@ internal val MangaDarkColorScheme = darkColorScheme(
     inversePrimary = Color(0xFF44677C), scrim = Color(0xFF080D0F),
     error = Color(0xFFFFB3AC), onError = Color(0xFF591E1C),
     errorContainer = Color(0xFF542B2A), onErrorContainer = Color(0xFFFFDBD5),
+)
+
+// Large desktop surfaces sit beside full-colour covers for long periods. Give paper and
+// secondary controls neutral grounds; keep the existing accent and all source/status colours.
+private val desktopLightColors = LightColors.copy(
+    background = Color(0xFFF7F8FA), onBackground = Color(0xFF22272C),
+    surface = Color(0xFFFCFCFD), onSurface = Color(0xFF22272C),
+    surfaceBright = Color.White, surfaceDim = Color(0xFFDBDEE2),
+    surfaceVariant = Color(0xFFEBEEF0), onSurfaceVariant = Color(0xFF525B64),
+    surfaceContainerLow = Color(0xFFF4F5F7), surfaceContainer = Color(0xFFEEF0F2),
+    surfaceContainerHigh = Color(0xFFE8EBEE), surfaceContainerHighest = Color(0xFFE1E5E8),
+    outlineVariant = Color(0xFFD9DEE3),
 )
 
 @Composable
@@ -131,7 +145,11 @@ fun MangaFlowTheme(content: @Composable () -> Unit) {
         val dark = isSystemInDarkTheme()
         val highContrast = LocalPlatformAccessibilityPreferences.current.increaseContrast
         val colors = remember(dark, highContrast) {
-            val base = if (dark) MangaDarkColorScheme else LightColors
+            val base = when {
+                dark -> MangaDarkColorScheme
+                platformKind == PlatformKind.DESKTOP -> desktopLightColors
+                else -> LightColors
+            }
             if (!highContrast) base else base.copy(
                 onSurface = if (dark) Color.White else Color(0xFF11191C),
                 onSurfaceVariant = if (dark) Color(0xFFDBE6E3) else Color(0xFF364449),

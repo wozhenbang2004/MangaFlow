@@ -26,6 +26,7 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
@@ -104,6 +105,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -321,17 +323,19 @@ private fun DesktopFeaturedRecommendations(
         manga.getOrNull(index + step)?.let { selectedId = it.id; true } ?: false
     }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val split = manga.size > 1 && maxWidth >= 720.dp * scale.coerceAtMost(1.5f)
-        val narrow = maxWidth < 430.dp * scale
         val short = window.shortHeight
-        val height = (if (short) 178.dp else (window.height * .32f).coerceIn(218.dp, 292.dp)) +
-            64.dp * (scale - 1f).coerceIn(0f, 1.6f)
-        val railWidth = (maxWidth * .265f).coerceIn(192.dp * scale.coerceAtMost(1.3f), 310.dp)
+        val split = manga.size > 1 && maxWidth >= 868.dp * scale
+        val narrow = maxWidth < 470.dp * scale
+        val height = (if (short) 172.dp else (window.height * .34f).coerceIn(230.dp, 308.dp)) +
+            68.dp * (scale - 1f).coerceAtMost(2f)
         val previewCount = when {
-            split && !short -> 3
+            split && !short && maxWidth >= 1240.dp * scale -> 3
             split || !narrow -> 2
+            short || maxWidth < 310.dp * scale -> 0
             else -> 1
         }.coerceAtMost((manga.size - 1).coerceAtLeast(0))
+        val railWidth = if (short) (maxWidth * .26f).coerceAtMost(300.dp * scale)
+            else minOf(maxWidth * .36f, (148.dp * scale + 16.dp) * previewCount)
         val previews = List(previewCount) { manga[(index + it + 1) % manga.size] }
         Column(Modifier.fillMaxWidth().semantics { paneTitle = "精选推荐" }
             .onPreviewKeyEvent { event ->
@@ -343,18 +347,19 @@ private fun DesktopFeaturedRecommendations(
                     else -> false
                 }
             }.focusGroup(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("精选推荐", modifier = Modifier.weight(1f), style = browseTitleStyle(20.sp, 27.sp),
+            Row(Modifier.fillMaxWidth().heightIn(min = 34.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("精选推荐", modifier = Modifier.weight(1f).semantics { heading() },
+                    style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (manga.size > 1) {
                     Text("${index + 1} / ${manga.size}", color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = mangaMetricValueStyle(12.sp, 16.sp), modifier = Modifier.padding(end = 6.dp))
                     MotionIconButton(onClick = { move(-1) }, enabled = visible && index > 0,
-                        modifier = Modifier.size(44.dp), tooltip = "上一部推荐") {
+                        modifier = Modifier.size(36.dp), tooltip = "上一部推荐") {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, "上一部推荐", Modifier.size(18.dp))
                     }
                     MotionIconButton(onClick = { move(1) }, enabled = visible && index < manga.lastIndex,
-                        modifier = Modifier.size(44.dp), tooltip = "下一部推荐") {
+                        modifier = Modifier.size(36.dp), tooltip = "下一部推荐") {
                         Icon(Icons.AutoMirrored.Outlined.ArrowForward, "下一部推荐", Modifier.size(18.dp))
                     }
                 }
@@ -375,22 +380,28 @@ private fun DesktopFeaturedRecommendations(
                     }
                 }
                 if (split) Row(Modifier.fillMaxWidth().height(height),
-                    horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                    horizontalArrangement = Arrangement.spacedBy(22.dp)) {
                     spotlight(Modifier.weight(1f).fillMaxHeight())
-                    Column(Modifier.width(railWidth).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (short) Column(Modifier.width(railWidth).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         previews.forEach { entry -> key(entry.id) {
                             Box(Modifier.weight(1f).fillMaxWidth()) {
-                                DesktopFeaturedPreview(entry, repository, visible, showSource, onOpen, desktopActions)
+                                DesktopFeaturedPreview(entry, repository, visible, showSource, false, onOpen, desktopActions)
+                            }
+                        } }
+                    } else Row(Modifier.width(railWidth).fillMaxHeight(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        previews.forEach { entry -> key(entry.id) {
+                            Box(Modifier.weight(1f).fillMaxHeight()) {
+                                DesktopFeaturedPreview(entry, repository, visible, showSource, true, onOpen, desktopActions)
                             }
                         } }
                     }
                 } else {
                     spotlight(Modifier.fillMaxWidth().height(height))
-                    if (previews.isNotEmpty()) Row(Modifier.fillMaxWidth().height(64.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (previews.isNotEmpty()) Row(Modifier.fillMaxWidth()
+                        .height(64.dp + 32.dp * (scale - 1f)), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         previews.forEach { entry -> key(entry.id) {
                             Box(Modifier.weight(1f).fillMaxHeight()) {
-                                DesktopFeaturedPreview(entry, repository, visible, showSource, onOpen, desktopActions)
+                                DesktopFeaturedPreview(entry, repository, visible, showSource, false, onOpen, desktopActions)
                             }
                         } }
                     }
@@ -410,7 +421,6 @@ private fun DesktopFeaturedSpread(
     val scale = density.fontScale.coerceAtLeast(1f)
     val motion = LocalMotionEnabled.current
     val contrast = LocalGlassAccessibilitySettings.current.increaseContrast
-    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     val host = LocalMangaCoverTransition.current
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
@@ -419,73 +429,92 @@ private fun DesktopFeaturedSpread(
     val paper = colors.surface
     val pigment by animateColorAsState(swatch ?: colors.primary,
         if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap(), label = "featured-paper")
-    val field = lerp(paper, pigment, if (paper.luminance() > .5f) .19f else .24f)
-    val edge = lerp(paper, pigment, if (hovered || focused) .09f else .055f)
+    val field = lerp(paper, pigment, if (paper.luminance() > .5f) .17f else .22f)
+    val ground = if (hovered || focused) lerp(paper, colors.onSurface, .025f) else paper
     val placement = "discovery-featured"
-    BoxWithConstraints(Modifier.fillMaxSize().clip(RoundedCornerShape(18.dp))
-        .background(edge).browseIntentWarmup(manga, repository, interaction, enabled)
+    BoxWithConstraints(Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp))
+        .background(ground).browseIntentWarmup(manga, repository, interaction, enabled)
         .clickable(interactionSource = interaction, indication = null, role = Role.Button, enabled = enabled,
             onClickLabel = "查看作品详情") {
             host?.select?.invoke(MangaCoverKey(manga.id, placement))
             onOpen(manga)
         }.motionPress(interaction, enabled = enabled, pressedScale = .993f)) {
-        val artWidth = (maxWidth * if (maxWidth >= 600.dp) .42f else .36f).coerceAtMost(340.dp)
+        val artWidth = minOf(maxWidth * .38f, maxHeight * 1.12f, 340.dp)
         val copyWidth = maxWidth - artWidth
-        val tight = copyWidth < 240.dp * scale || short
-        val posterHeight = (maxHeight - if (short) 20.dp else 30.dp).coerceAtLeast(1.dp)
-        val artworkWidth = (artWidth - if (artWidth < 116.dp) 8.dp else 24.dp).coerceAtLeast(1.dp)
-        val decode = with(density) { ((posterHeight.roundToPx().coerceAtLeast(1) + 127) / 128 * 128) }
+        val compact = copyWidth < 270.dp * scale || short
+        val inset = if (copyWidth < 156.dp * scale) 10.dp else if (compact) 16.dp else 28.dp
+        val titleSize = when {
+            compact -> 22.sp
+            copyWidth < 360.dp * scale -> 29.sp
+            copyWidth < 480.dp * scale -> 35.sp
+            else -> 42.sp
+        }
+        val byline = remember(manga.authors, manga.status) {
+            (manga.authors.filter(String::isNotBlank).distinct().take(2) +
+                listOf(manga.status).filter(String::isNotBlank)).joinToString(" · ")
+        }
+        val padY = if (short) 8.dp else 14.dp
+        val titleStyle = browseTitleStyle(titleSize, (titleSize.value * 1.19f).sp, FontWeight.Bold)
+        val creditGap = if (compact) 4.dp else 8.dp
+        val bylineHeight = if (byline.isEmpty()) 0.dp else 20.dp * scale + creditGap
+        val sourceHeight = if (showSource) 18.dp * scale + 3.dp else 0.dp
+        val copyHeight = maxHeight - padY * 2 - 26.dp * scale - bylineHeight - sourceHeight
+        val leading = with(density) { titleStyle.lineHeight.toDp() }
+        val titleLines = (copyHeight / leading).toInt().coerceIn(1, if (compact) 2 else 3)
+        val descriptionLines = if (compact || manga.description.isBlank()) 0 else {
+            val measurer = rememberTextMeasurer()
+            val textWidth = with(density) { (copyWidth - inset * 2).roundToPx().coerceAtLeast(1) }
+            val titleHeight = remember(manga.title, titleStyle, titleLines, textWidth, measurer) {
+                measurer.measure(manga.title, titleStyle, maxLines = titleLines,
+                    constraints = Constraints(maxWidth = textWidth)).size.height
+            }
+            ((copyHeight - with(density) { titleHeight.toDp() } - 9.dp) / (20.dp * scale)).toInt().coerceIn(0, 2)
+        }
+        val posterHeight = (maxHeight - if (short) 12.dp else 22.dp).coerceAtLeast(1.dp)
+        val decode = with(density) { (posterHeight.roundToPx().coerceAtLeast(1) + 127) / 128 * 128 }
         val artwork = rememberFeaturedArtwork(manga, repository, decode, decode, onColor = { swatch = it }, onReady = {})
         Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(artWidth).fillMaxHeight().background(field), contentAlignment = Alignment.Center) {
-                if (artwork.ready && !contrast) Image(artwork.painter, null,
-                    Modifier.fillMaxSize().graphicsLayer { alpha = .115f }, contentScale = ContentScale.Crop)
-                val gradient = if (rtl) listOf(edge, Color.Transparent) else listOf(Color.Transparent, edge)
-                Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(gradient)))
-                val intrinsic = artwork.painter.intrinsicSize
-                val ratio = if (intrinsic.isSpecified && intrinsic.width.isFinite() && intrinsic.height > 0f)
-                    (intrinsic.width / intrinsic.height).coerceIn(.45f, 1.5f) else 2f / 3f
-                val w = minOf(artworkWidth, posterHeight * ratio)
-                Box(Modifier.size(w, w / ratio).mangaSharedCover(manga.id, placement)
-                    .mangaCoverCard(8.dp, shadowRadius = 10.dp).background(colors.surfaceVariant),
-                    contentAlignment = Alignment.Center) {
-                    if (!artwork.ready) Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(28.dp),
-                        tint = colors.onSurfaceVariant)
-                    Image(artwork.painter, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-                }
-            }
-            val inset = if (copyWidth < 180.dp * scale) 8.dp else if (tight) 14.dp else 24.dp
-            Column(Modifier.weight(1f).fillMaxHeight().padding(start = inset, end = inset,
-                top = if (short) 10.dp else 16.dp, bottom = if (short) 8.dp else 14.dp)) {
-                Column(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.Center) {
-                    if (showSource) MangaBrowseSource(manga, foreground = colors.onSurfaceVariant)
-                    val titleSize = if (tight) 21.sp else if (copyWidth >= 400.dp * scale) 32.sp else 27.sp
-                    Text(manga.title, Modifier.widthIn(max = 580.dp),
-                        style = browseTitleStyle(titleSize, (titleSize.value * 1.22f).sp),
-                        color = colors.onSurface, maxLines = if (tight || scale > 1.35f) 2 else 3, overflow = TextOverflow.Ellipsis)
-                    val byline = remember(manga.authors, manga.status) {
-                        (manga.authors.filter(String::isNotBlank).distinct().take(2) +
-                            listOf(manga.status).filter(String::isNotBlank)).joinToString(" · ")
-                    }
-                    if (byline.isNotBlank() && (scale < 1.5f || !tight)) Text(byline, Modifier.padding(top = 5.dp),
-                        color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall,
+            Column(Modifier.weight(1f).fillMaxHeight().padding(horizontal = inset, vertical = padY)) {
+                Column(Modifier.fillMaxWidth().weight(1f), verticalArrangement = Arrangement.Center) {
+                    Text(manga.title, Modifier.semantics { heading() }, style = titleStyle, color = colors.onSurface,
+                        maxLines = titleLines, overflow = TextOverflow.Ellipsis)
+                    if (byline.isNotBlank()) Text(byline, Modifier.padding(top = creditGap),
+                        color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (!tight && scale < 1.35f && manga.description.isNotBlank()) {
-                        Text(manga.description, Modifier.widthIn(max = 480.dp).padding(top = 8.dp),
+                    if (showSource) MangaBrowseSource(manga, Modifier.padding(top = 3.dp), foreground = colors.onSurfaceVariant)
+                    if (descriptionLines > 0)
+                        Text(manga.description, Modifier.widthIn(max = 480.dp).padding(top = 9.dp),
                             style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    }
+                            maxLines = descriptionLines, overflow = TextOverflow.Ellipsis)
                 }
-                Row(Modifier.fillMaxWidth().heightIn(min = if (tight) 26.dp else 34.dp),
+                Row(Modifier.fillMaxWidth().heightIn(min = 26.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("查看详情", style = MaterialTheme.typography.labelLarge, color = colors.onSurface, maxLines = 1)
-                    Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.size(15.dp), tint = colors.onSurface)
-                    if (!showSource && !tight && scale < 1.35f) {
-                        Spacer(Modifier.width(8.dp))
+                    Text("查看详情", style = MaterialTheme.typography.labelLarge, color = colors.primary,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.size(16.dp), tint = colors.primary)
+                    if (!showSource && !compact) {
+                        Spacer(Modifier.width(10.dp))
                         MangaMetricBadges(manga, Modifier.weight(1f), foreground = colors.onSurfaceVariant,
                             compact = true, maxScores = 1, plain = true,
                             onExpand = onRatings?.takeIf { enabled }?.let { { it(manga) } })
                     }
+                }
+            }
+            Box(Modifier.width(artWidth).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                // A single complete jacket stands on a flat swatch from the actual cover.
+                // Its printed title and art never compete with a second enlarged copy.
+                Spacer(Modifier.fillMaxSize().padding(top = if (short) 10.dp else 16.dp)
+                    .background(if (contrast) colors.surfaceVariant else field, RoundedCornerShape(topStart = 14.dp)))
+                val intrinsic = artwork.painter.intrinsicSize
+                val ratio = if (intrinsic.isSpecified && intrinsic.width.isFinite() && intrinsic.height.isFinite() &&
+                    intrinsic.height > 0f) (intrinsic.width / intrinsic.height).coerceIn(.45f, 1.5f) else 2f / 3f
+                val w = minOf((artWidth - if (compact) 12.dp else 28.dp).coerceAtLeast(1.dp), posterHeight * ratio)
+                Box(Modifier.size(w, w / ratio).mangaSharedCover(manga.id, placement)
+                    .mangaCoverCard(5.dp, shadowRadius = 7.dp).background(colors.surfaceVariant),
+                    contentAlignment = Alignment.Center) {
+                    if (!artwork.ready) Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(26.dp),
+                        tint = colors.onSurfaceVariant)
+                    Image(artwork.painter, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                 }
             }
         }
@@ -494,7 +523,8 @@ private fun DesktopFeaturedSpread(
 
 @Composable
 private fun DesktopFeaturedPreview(
-    manga: Manga, repository: MangaRepository, enabled: Boolean, showSource: Boolean, onOpen: (Manga) -> Unit,
+    manga: Manga, repository: MangaRepository, enabled: Boolean, showSource: Boolean, portrait: Boolean,
+    onOpen: (Manga) -> Unit,
     desktopActions: ((Manga) -> List<DesktopMenuAction>)?,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -506,24 +536,36 @@ private fun DesktopFeaturedPreview(
         else manga.authors.firstOrNull { it.isNotBlank() } ?: manga.latestChapter.ifBlank { manga.status }
     val placement = "discovery-featured-preview"
     DesktopBrowseActions(desktopActions?.invoke(manga).orEmpty(), enabled) {
-        Row(Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp))
-            .background(if (hovered || focused) colors.onSurface.copy(alpha = .065f) else Color.Transparent)
+        val target = Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp))
+            .background(if (hovered || focused) colors.onSurface.copy(alpha = .045f) else Color.Transparent)
             .browseIntentWarmup(manga, repository, interaction, enabled)
             .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button,
                 onClickLabel = "查看作品详情") {
                 host?.select?.invoke(MangaCoverKey(manga.id, placement))
                 onOpen(manga)
             }.motionPress(interaction, enabled = enabled, pressedScale = .986f)
-            .padding(start = 5.dp, end = 16.dp, top = 5.dp, bottom = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(11.dp), verticalAlignment = Alignment.CenterVertically) {
-            MangaCover(manga, repository, Modifier.heightIn(max = 86.dp).fillMaxHeight().aspectRatio(.7f)
-                .mangaSharedCover(manga.id, placement).mangaCoverCard(6.dp, shadowRadius = 4.dp), scale = ContentScale.Fit)
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(manga.title, color = colors.onSurface, style = browseTitleStyle(15.sp, 20.sp),
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (note.isNotBlank()) Text(note, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+        val cover: @Composable (Modifier) -> Unit = { bounds ->
+            MangaCover(manga, repository, bounds.mangaSharedCover(manga.id, placement)
+                .mangaCoverCard(4.dp, shadowRadius = 3.dp), scale = ContentScale.Fit)
+        }
+        val caption: @Composable () -> Unit = {
+            Text(manga.title, color = colors.onSurface, style = browseTitleStyle(15.sp, 20.sp),
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (note.isNotBlank()) Text(note, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (portrait) Column(target.padding(vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.BottomStart) {
+                val width = minOf(maxWidth, maxHeight * (2f / 3f))
+                cover(Modifier.size(width, width * 1.5f))
             }
+            Column(Modifier.fillMaxWidth().heightIn(min = 58.dp * LocalDensity.current.fontScale),
+                verticalArrangement = Arrangement.spacedBy(2.dp)) { caption() }
+        } else Row(target.padding(start = 3.dp, end = 18.dp, top = 4.dp, bottom = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            cover(Modifier.heightIn(max = 76.dp).fillMaxHeight().aspectRatio(2f / 3f))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) { caption() }
         }
     }
 }

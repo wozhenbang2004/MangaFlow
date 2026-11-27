@@ -4,14 +4,12 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ScrollState
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -20,9 +18,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
@@ -44,9 +44,11 @@ internal fun AccountWorkspace(
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     BoxWithConstraints(modifier, contentAlignment = Alignment.TopCenter) {
+        val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
         val wide = desktop && allowSplit && constraints.hasBoundedHeight &&
-            maxWidth >= 720.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
-        val width = if (wide) 936.dp else if (desktop) 540.dp else mobileWidth
+            maxWidth >= 768.dp * scale
+        val width = if (wide) 1024.dp * scale else if (desktop) 624.dp * scale else mobileWidth
+        val rule = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .44f)
         val scroll = key(if (desktop) detailKey else null) { rememberScrollState() }
         val overviewScroll = rememberScrollState()
         val detailScroll = key(detailKey) { rememberScrollState() }
@@ -56,13 +58,16 @@ internal fun AccountWorkspace(
                 start = sideInset, end = sideInset, top = if (wide) top + 12.dp else top, bottom = bottom),
                 content = {
                     AccountLane(wide, overviewScroll) {
-                        Box(if (wide) Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow,
-                            RoundedCornerShape(20.dp)).padding(18.dp) else Modifier) { overview(wide) }
+                        Box(if (wide) Modifier.fillMaxWidth().drawBehind {
+                            val x = if (layoutDirection == LayoutDirection.Ltr) size.width - .5.dp.toPx() else .5.dp.toPx()
+                            drawLine(rule, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
+                        }.padding(end = 20.dp, top = 4.dp, bottom = 8.dp) else Modifier) { overview(wide) }
                     }
                     AccountLane(wide, detailScroll, content)
                 }) { slots, bounds ->
-                val gap = if (wide) 32.dp.roundToPx() else 0
-                val overviewWidth = if (wide) ((bounds.maxWidth - gap) / 3) else bounds.maxWidth
+                val gap = if (wide) 26.dp.roundToPx() else 0
+                val overviewWidth = if (wide) ((bounds.maxWidth - gap) / 3).coerceAtMost((292.dp * scale).roundToPx())
+                    else bounds.maxWidth
                 val detailWidth = if (wide) bounds.maxWidth - gap - overviewWidth else bounds.maxWidth
                 val first = slots[0].measure(bounds.copy(minWidth = overviewWidth, maxWidth = overviewWidth, minHeight = 0))
                 val second = slots[1].measure(bounds.copy(minWidth = detailWidth, maxWidth = detailWidth, minHeight = 0))

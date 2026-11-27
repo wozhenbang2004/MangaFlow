@@ -94,6 +94,24 @@ import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.*
 import dev.mangaflow.ui.platform.*
 
+/** Give rankings, awards and the work record the same title and action alignment. */
+@Composable
+internal fun RankingCatalogueHeader(title: String, backdrop: HazeState, navigation: @Composable () -> Unit,
+    summary: (@Composable () -> Unit)?, actions: @Composable () -> Unit) {
+    val top = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
+    if (platformKind == PlatformKind.DESKTOP) {
+        val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        DesktopManagementToolbar(title, top.background(MaterialTheme.colorScheme.surface), navigation,
+            minimumToolsWidth = if (summary != null) 400.dp else 250.dp) {
+            if (summary != null) Box(Modifier.width(130.dp * scale)) { summary() }
+            Spacer(Modifier.weight(1f))
+            Row(verticalAlignment = Alignment.CenterVertically) { actions() }
+        }
+    } else PageTitleHeader(title, backdrop, navigation, top.padding(horizontal = 8.dp, vertical = 2.dp),
+        summary = summary ?: { Text(title, Modifier.padding(start = 4.dp), style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis) }, actions = actions)
+}
+
 /** One catalogue surface: visible source comparison, one retained filter workspace. */
 @Composable
 internal fun SiteRankingsScreen(
@@ -131,8 +149,13 @@ internal fun SiteRankingsScreen(
         filtersPresent = true
         filtersVisible = true
     }
-    val sectionTabs: @Composable () -> Unit = {
+    val sectionTabs: @Composable () -> Unit = tabs@{
         val enabled = active && !filtersPresent && !infoPresent
+        if (platformKind == PlatformKind.DESKTOP) {
+            DesktopSectionTabs(if (awards) 1 else 0, listOf("榜单", "获奖"), { if (enabled) awards = it == 1 },
+                Modifier.fillMaxWidth().motionInputGate(enabled))
+            return@tabs
+        }
         val density = LocalDensity.current
         val scroll = rememberScrollState()
         val minimumCell = with(density) { 13.sp.toDp() * 2 + 24.dp }.coerceAtLeast(44.dp)
@@ -170,10 +193,8 @@ internal fun SiteRankingsScreen(
     RankingPageFrame(Modifier.fillMaxSize().background(colors.background.copy(alpha = .97f))
         .semantics { paneTitle = "漫画榜单" }, header = {
         Column {
-            PageTitleHeader("漫画榜单", backdrop,
+            RankingCatalogueHeader("漫画榜单", backdrop,
                 navigation = { Box(Modifier.motionInputGate(contentReady)) { navigation() } },
-                modifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
                 summary = sectionTabs,
                 actions = {
                     MotionIconButton(onClick = {
@@ -766,7 +787,7 @@ internal fun RankedWorkDetailScreen(
         RankingPageFrame(Modifier.widthIn(max = 880.dp).fillMaxSize().align(Alignment.TopCenter)
             .background(colors.background.copy(alpha = .96f)).semantics { paneTitle = work.manga.title },
             header = {
-                PageTitleHeader("作品资料", backdrop, navigation = {
+                RankingCatalogueHeader("作品资料", backdrop, navigation = {
                     MotionIconButton(onClick = onBack, modifier = Modifier.size(44.dp)) {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回榜单", Modifier.size(21.dp))
                     }
@@ -799,8 +820,7 @@ internal fun RankedWorkDetailScreen(
                             }
                         }
                     }
-                }, modifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
-                    .padding(horizontal = 8.dp, vertical = 2.dp))
+                })
             }) {
             val scroll = rememberLazyListState()
             val previewIdentity = state.rankedSourcePreview?.selected?.let(::federatedMangaIdentity)

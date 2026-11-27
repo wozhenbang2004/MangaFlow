@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -35,6 +36,7 @@ import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.Role
@@ -67,12 +69,31 @@ internal fun DetailAppearanceSettings(headerModifier: Modifier = Modifier, openR
     androidx.compose.runtime.LaunchedEffect(openRequest) { if (openRequest > 0) expanded = true }
     val interaction = remember { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
+    val desktop = platformKind == PlatformKind.DESKTOP
     DisposableEffect(store) { onDispose { store.save() } }
-    Column(Modifier.fillMaxWidth()) {
-        Row(headerModifier.fillMaxWidth().heightIn(min = 48.dp)
+    Column(Modifier.fillMaxWidth().then(if (desktop && expanded)
+        Modifier.background(colors.surfaceContainerLow, RoundedCornerShape(16.dp)) else Modifier)) {
+        val header = headerModifier.fillMaxWidth().then(if (desktop) Modifier else Modifier.heightIn(min = 48.dp))
+            .preferencePointerSurface(interaction)
             .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = if (expanded) "收起封面氛围调节" else "调节详情封面氛围",
-                onClick = { expanded = !expanded }).motionPress(interaction),
+                onClick = { expanded = !expanded }).motionPress(interaction)
+        if (desktop) BoxWithConstraints(header.heightIn(min = 54.dp).padding(horizontal = 10.dp, vertical = 6.dp),
+            contentAlignment = Alignment.CenterStart) {
+            val inline = maxWidth >= 376.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+            val summary = if (modernPlatformBlur) "模糊 ${state.blur.roundToInt()} · 背景 ${(state.strength * 100).roundToInt()}%"
+                else "背景 ${(state.strength * 100).roundToInt()}%"
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                SettingsRowIcon(Icons.Outlined.BlurOn, selected = expanded)
+                Column(Modifier.weight(1f)) {
+                    Text("封面氛围", style = MaterialTheme.typography.titleSmall)
+                    if (!inline) Text(summary, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                }
+                if (inline) Text(summary, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
+                    Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            }
+        } else Row(header,
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Icon(Icons.Outlined.BlurOn, null, Modifier.size(20.dp), tint = colors.onSurfaceVariant)
             Text("封面氛围", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
@@ -104,13 +125,13 @@ internal fun DetailAppearanceSettings(headerModifier: Modifier = Modifier, openR
                     Text("封面背景", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     Text("${(state.strength * 100).roundToInt()}%", color = colors.onSurfaceVariant, fontSize = 11.sp)
                 }
-                Text("越低越淡，越高越明显", color = colors.onSurfaceVariant, fontSize = 11.sp)
+                if (!desktop) Text("越低越淡，越高越明显", color = colors.onSurfaceVariant, fontSize = 11.sp)
                 MotionSlider(state.strength, store::setStrength, onValueChangeFinished = store::save,
                     formatValue = { "${(it * 100).roundToInt()}%" },
                     modifier = Modifier.semantics { contentDescription = "封面背景显眼程度；越低越淡，越高越明显" })
               }
             }
-            if (platformKind == PlatformKind.DESKTOP) PreferenceWorkspace(preview = {
+            if (desktop) PreferenceWorkspace(Modifier.padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 16.dp), preview = {
                 CoverAtmospherePreview(manga, repository, state)
             }, controls = controls)
             else controls()

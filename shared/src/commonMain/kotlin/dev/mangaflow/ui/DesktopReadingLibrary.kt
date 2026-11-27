@@ -20,7 +20,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -33,7 +32,10 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
@@ -43,6 +45,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.ui.platform.formatUiDate
@@ -52,12 +55,14 @@ import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.motion.MotionButton
+import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.motionPress
 import kotlin.math.abs
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun DesktopResumeShelf(
     recent: List<ReadingProgress>, repository: MangaRepository, active: Boolean,
@@ -65,53 +70,108 @@ internal fun DesktopResumeShelf(
 ) {
     val latest = recent.firstOrNull() ?: return
     val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(18.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        Box((if (recent.size == 1) Modifier.widthIn(max = 680.dp).fillMaxWidth() else Modifier.weight(1.15f))
-            .clip(RoundedCornerShape(16.dp))
-            .background(colors.surfaceContainer).padding(16.dp)) {
-            DesktopContextMenuArea(if (active) listOf(DesktopMenuAction("章节记录", icon = Icons.Outlined.History) { onHistory(latest.manga) },
-                DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList) { onDetails(latest.manga) }) else emptyList()) {
-                DesktopReadingLead(latest, repository, active, onContinue, onDetails)
-            }
-        }
-        if (recent.size > 1) Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            recent.drop(1).forEach { progress -> key(progress.manga.sourceId, progress.manga.id) {
-                DesktopContextMenuArea(if (active) listOf(
-                    DesktopMenuAction("继续阅读", icon = Icons.Outlined.AutoStories) { onContinue(progress) },
-                    DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList) { onDetails(progress.manga) },
-                    DesktopMenuAction("章节记录", icon = Icons.Outlined.History) { onHistory(progress.manga) }) else emptyList()) {
-                    ContinueRow(progress, repository, { if (active) onContinue(it) },
-                        onHistory = { if (active) onHistory(progress.manga) })
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val density = LocalDensity.current
+        val split = recent.size > 1 && maxWidth >= 660.dp * density.fontScale.coerceAtLeast(1f)
+        val gap = 22.dp
+        val secondaryWidth = if (split) (maxWidth - gap) / 2.35f else maxWidth
+        val totalWidthPx = constraints.maxWidth
+        val leadWidth = if (split) with(density) {
+            (totalWidthPx - gap.roundToPx() - secondaryWidth.roundToPx()).toDp()
+        } else maxWidth
+        // Keep the same book and menu owners as the secondary list moves below the lead.
+        FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = if (split) 2 else 1,
+            horizontalArrangement = Arrangement.spacedBy(gap), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.width(leadWidth).align(Alignment.CenterVertically)
+                .background(Brush.horizontalGradient(listOf(lerp(colors.surface, colors.secondaryContainer, .43f),
+                    colors.surfaceContainerLow)), RoundedCornerShape(18.dp)).padding(16.dp)) {
+                key(latest.manga.sourceId, latest.manga.id) {
+                    DesktopContextMenuArea(if (active) listOf(
+                        DesktopMenuAction("章节记录", icon = Icons.Outlined.History) { onHistory(latest.manga) },
+                        DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList) { onDetails(latest.manga) })
+                        else emptyList()) {
+                        DesktopReadingLead(latest, repository, active, onContinue, onDetails, prominent = true,
+                            onHistory = { onHistory(latest.manga) })
+                    }
                 }
-            } }
+            }
+            if (recent.size > 1) Column(Modifier.width(secondaryWidth).align(Alignment.CenterVertically),
+                verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("最近还读过", Modifier.padding(start = 4.dp, bottom = 3.dp).semantics { heading() },
+                    style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                recent.drop(1).forEach { progress -> key(progress.manga.sourceId, progress.manga.id) {
+                    DesktopContextMenuArea(if (active) listOf(
+                        DesktopMenuAction("继续阅读", icon = Icons.Outlined.AutoStories) { onContinue(progress) },
+                        DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList) { onDetails(progress.manga) },
+                        DesktopMenuAction("章节记录", icon = Icons.Outlined.History) { onHistory(progress.manga) })
+                        else emptyList()) {
+                        ContinueRow(progress, repository, { if (active) onContinue(it) }, namedHistory = true,
+                            onHistory = { if (active) onHistory(progress.manga) })
+                    }
+                } }
+            }
         }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DesktopReadingLead(
     progress: ReadingProgress, repository: MangaRepository, active: Boolean,
-    onContinue: (ReadingProgress) -> Unit, onDetails: ((Manga) -> Unit)?,
+    onContinue: (ReadingProgress) -> Unit, onDetails: ((Manga) -> Unit)?, prominent: Boolean = false,
+    onHistory: (() -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        MangaCover(progress.manga, repository, Modifier.size(76.dp, 108.dp).mangaCoverCard(8.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(progress.manga.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val narrow = maxWidth < 318.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val coverWidth = when {
+            !prominent || narrow -> 68.dp
+            maxWidth < 440.dp -> 88.dp
+            else -> 108.dp
+        }.coerceAtMost(maxWidth * .27f)
+        val cover: @Composable () -> Unit = {
+            MangaCover(progress.manga, repository, Modifier.width(coverWidth).aspectRatio(.70f)
+                .mangaCoverCard(8.dp, shadowRadius = 5.dp))
+        }
+        val information: @Composable () -> Unit = {
+            Text(progress.manga.title, style = if (prominent) browseTitleStyle(24.sp, 30.sp)
+                else MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
                 fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(mangaNumberText(recentReadingLocation(progress)), style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                MotionButton(onClick = { onContinue(progress) }, enabled = active, shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
-                    Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp))
-                    Text("继续阅读", Modifier.padding(start = 4.dp), maxLines = 1)
+            val fraction = detailReadingFraction(progress)
+            if (prominent && fraction != null) Box(Modifier.widthIn(max = 160.dp).fillMaxWidth().height(3.dp)
+                .clip(RoundedCornerShape(50)).background(colors.onSurface.copy(alpha = .09f))) {
+                Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(colors.primary.copy(alpha = .8f)))
+            }
+        }
+        val actions: @Composable () -> Unit = {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                MotionButton(onClick = { onContinue(progress) }, enabled = active, shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 13.dp, vertical = 5.dp)) {
+                    Icon(Icons.Outlined.PlayArrow, null, Modifier.size(17.dp))
+                    Text("继续阅读", Modifier.padding(start = 5.dp), maxLines = 1)
                 }
                 if (onDetails != null) MotionTextButton(onClick = { onDetails(progress.manga) }, enabled = active,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) { Text("详情", maxLines = 1) }
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 5.dp)) { Text("详情", maxLines = 1) }
+                if (onHistory != null) MotionIconButton(onClick = onHistory, enabled = active,
+                    modifier = Modifier.size(36.dp), tooltip = "章节记录") {
+                    Icon(Icons.Outlined.History, "章节记录", Modifier.size(17.dp))
+                }
             }
+        }
+        val currentActions by rememberUpdatedState(actions)
+        val placeActions = remember { movableContentOf { currentActions() } }
+        Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(if (prominent) 18.dp else 12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                cover()
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (prominent) 7.dp else 3.dp)) {
+                    information()
+                    if (!narrow) placeActions()
+                }
+            }
+            if (narrow) placeActions()
         }
     }
 }
@@ -166,8 +226,9 @@ internal fun DesktopReadingHistory(
             arrival.animateTo(0f, tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
         }
     }
-    Row(modifier, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        Box(Modifier.weight(.43f).fillMaxHeight()) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+        Box(Modifier.weight(.38f).fillMaxHeight().background(colors.surfaceContainerLow.copy(alpha = .82f),
+            RoundedCornerShape(15.dp)).padding(horizontal = 8.dp, vertical = 5.dp)) {
             LazyColumn(Modifier.fillMaxSize().padding(end = 8.dp), state = listState,
                 contentPadding = PaddingValues(bottom = 16.dp)) {
                 if (header != null) item(key = "history-notice") { header() }
@@ -179,7 +240,7 @@ internal fun DesktopReadingHistory(
                             else -> formatUiDate(date, if (date.year != today.year) "yyyy/M/d" else "M/d")
                         }, Modifier.animateItem(fadeInSpec = null, placementSpec = placement, fadeOutSpec = null)
                             .padding(start = 10.dp, top = 10.dp, bottom = 7.dp).semantics { heading() },
-                            style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                            style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
                     }
                     items(records, key = { "work:" + bookKey(it) }) { record ->
                         val chosen = bookKey(record) == selectedKey
@@ -210,7 +271,7 @@ internal fun DesktopReadingHistory(
                                         onDoubleClick = { onContinue(record) }).motionPress(interaction, active, .99f)
                                     .padding(horizontal = 9.dp, vertical = 7.dp),
                                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    MangaCover(record.manga, repository, Modifier.size(34.dp, 46.dp).mangaCoverCard(5.dp))
+                                    MangaCover(record.manga, repository, Modifier.size(38.dp, 53.dp).mangaCoverCard(5.dp, shadowRadius = 2.dp))
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                         Text(record.manga.title, style = MaterialTheme.typography.titleSmall,
                                             color = if (chosen) colors.onPrimaryContainer else colors.onSurface,
@@ -227,9 +288,8 @@ internal fun DesktopReadingHistory(
             }
             DesktopVerticalScrollbar(listState, Modifier.align(Alignment.CenterEnd))
         }
-        Box(Modifier.width(1.dp).fillMaxHeight().background(colors.outlineVariant.copy(alpha = .45f)))
         // One chapter-history loader owns the visible work, including halfway through a direction change.
-        Box(Modifier.weight(.57f).fillMaxHeight().clipToBounds()) {
+        Box(Modifier.weight(.62f).fillMaxHeight().clipToBounds()) {
             key(selectedKey) {
                 Column(Modifier.fillMaxSize().graphicsLayer {
                     val displacement = if (motion) arrival.value else 0f
@@ -237,7 +297,7 @@ internal fun DesktopReadingHistory(
                     alpha = 1f - .16f * abs(displacement)
                 }) {
                     DesktopReadingLead(selectedRecord, repository, active, onContinue, onDetails)
-                    HorizontalDivider(Modifier.padding(vertical = 10.dp), color = colors.outlineVariant.copy(alpha = .45f))
+                    Spacer(Modifier.height(15.dp))
                     ChapterHistoryContent(selectedRecord.manga, library, onContinue = { if (active) onContinue(it) }, embedded = true)
                 }
             }

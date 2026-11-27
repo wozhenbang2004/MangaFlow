@@ -124,6 +124,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -511,6 +512,8 @@ fun DetailScreen(
             with(density) { measuredDockHeight.toDp() }) + 16.dp + bottomInset
         val statusInset = screenFitContentInsets().asPaddingValues().calculateTopPadding()
         val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
+        val desktopHeroHeight = if (desktopDetail && desktopWidth >= 920.dp * fontScale &&
+            availableHeight >= 610.dp * fontScale) (availableHeight * .31f).coerceIn(195.dp, 246.dp) else null
         val compactHero = desktopDetail || availableHeight < 600.dp
         val collapsedHero = !desktopDetail && availableHeight < 420.dp
         val seamHeight = if (collapsedHero) 0.dp else 6.dp
@@ -642,29 +645,38 @@ fun DetailScreen(
         Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(informationTone)) {
             val summaryScroll = rememberScrollState()
             if (desktopDetail) {
-                Row(Modifier.width(desktopWidth).fillMaxHeight().align(Alignment.TopCenter)
+                val book: @Composable () -> Unit = {
+                    HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
+                        compact = true, artworkHeadroom = 0.dp, adultProfile = adultProfile, desktopSummary = true,
+                        desktopHeroHeight = desktopHeroHeight, desktopReadAction = {
+                            dock(Modifier.widthIn(max = 350.dp).fillMaxWidth(), true)
+                        }, onPosterHeight = { posterHeightPx.intValue = it }, onIntroduction = { fullIntroduction = true },
+                        onRatings = if (adultProfile) null else ({ fullRatings = true }),
+                        onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
+                        onTag = onTag?.let { action -> { tag -> action(current, tag) } }, collapse = { 0f })
+                }
+                val frame = Modifier.width(desktopWidth).fillMaxHeight().align(Alignment.TopCenter)
                     .padding(start = desktopMargin, end = desktopMargin, top = toolbarClearance + 8.dp,
-                        bottom = 10.dp + bottomInset), horizontalArrangement = Arrangement.spacedBy(columnGap)) {
+                        bottom = 10.dp + bottomInset)
+                if (desktopHeroHeight != null) {
+                    Column(frame, verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                        book()
+                        sectionPane(Modifier.fillMaxWidth().weight(1f).background(informationTone,
+                            RoundedCornerShape(16.dp)).padding(top = 8.dp), 14.dp)
+                    }
+                } else Row(frame, horizontalArrangement = Arrangement.spacedBy(columnGap)) {
                     Column(Modifier.width(summaryWidth).fillMaxHeight()) {
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             Column(Modifier.fillMaxSize().verticalScroll(summaryScroll)
-                                .padding(end = 10.dp, bottom = 8.dp)) {
-                                HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
-                                    compact = true, artworkHeadroom = 0.dp, adultProfile = adultProfile, desktopSummary = true,
-                                    onPosterHeight = { posterHeightPx.intValue = it },
-                                    onIntroduction = { fullIntroduction = true },
-                                    onRatings = if (adultProfile) null else ({ fullRatings = true }),
-                                    onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
-                                    onTag = onTag?.let { action -> { tag -> action(current, tag) } }, collapse = { 0f })
-                            }
+                                .padding(end = 10.dp, bottom = 8.dp)) { book() }
                             DesktopVerticalScrollbar(summaryScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                         }
                         Box(Modifier.fillMaxWidth().padding(top = 8.dp, end = 8.dp)) {
                             dock(Modifier.fillMaxWidth(), true)
                         }
                     }
-                    sectionPane(Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(16.dp))
-                        .background(informationTone).padding(top = 8.dp), 12.dp)
+                    sectionPane(Modifier.weight(1f).fillMaxHeight().background(informationTone,
+                        RoundedCornerShape(16.dp)).padding(top = 8.dp), 12.dp)
                 }
             } else {
                 Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
@@ -832,7 +844,7 @@ fun DetailScreen(
         // Both overlays sample the artwork, poster and moving content; neither is part of its own source.
         Box(toolbarWidth.align(Alignment.TopCenter)) {
             ArtworkToolbar(header, compact = desktopDetail || collapsedHero, fixedArtwork = desktopDetail,
-                manga = current, backdrop = readingBackdrop, favorite = isFavorite,
+                hasDesktopHero = desktopHeroHeight != null, manga = current, backdrop = readingBackdrop, favorite = isFavorite,
                 coverFailed = coverFailed, active = active, coverLight = lightDetail,
                 comments = activeSection == 1, commentCount = commentCount,
                 onBack = onBack, onIntroduction = { fullIntroduction = true },
@@ -884,6 +896,7 @@ private fun ArtworkToolbar(
     header: TopAppBarState,
     compact: Boolean,
     fixedArtwork: Boolean,
+    hasDesktopHero: Boolean,
     manga: Manga,
     backdrop: HazeState,
     favorite: Boolean,
@@ -915,7 +928,10 @@ private fun ArtworkToolbar(
         .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
         .heightIn(min = 56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", backdrop, glassAlpha, tint, glassTone, onBack)
-        Column(Modifier.weight(1f).padding(horizontal = 8.dp).graphicsLayer { alpha = progress }
+        if (hasDesktopHero && !comments) {
+            Spacer(Modifier.weight(1f))
+            ArtworkAction(Icons.Outlined.Info, "完整作品资料", backdrop, glassAlpha, tint, glassTone, onIntroduction)
+        } else Column(Modifier.weight(1f).padding(horizontal = 8.dp).graphicsLayer { alpha = progress }
             .then(if (progress > .02f) Modifier else Modifier.clearAndSetSemantics { })
             .clickable(enabled = progress > .7f, role = Role.Button, onClickLabel = "查看作品信息", onClick = onIntroduction),
             verticalArrangement = Arrangement.Center) {
@@ -1014,6 +1030,8 @@ private fun HeroBookInformation(
     modifier: Modifier = Modifier,
     adultProfile: Boolean = false,
     desktopSummary: Boolean = false,
+    desktopHeroHeight: Dp? = null,
+    desktopReadAction: @Composable () -> Unit = {},
 ) {
     val infoVisible by remember(collapse) { derivedStateOf { collapse() < .98f } }
     val density = LocalDensity.current
@@ -1042,7 +1060,8 @@ private fun HeroBookInformation(
         label = "detail-poster-aspect")
     if (desktopSummary) {
         DesktopBookSummary(manga, cover, posterAspect, informationTone, adultProfile, onPosterHeight,
-            onIntroduction, onRatings, onAuthor, onTag, arrival = { copyArrival?.value ?: 1f })
+            onIntroduction, onRatings, onAuthor, onTag, desktopHeroHeight, desktopReadAction,
+            arrival = { copyArrival?.value ?: 1f })
         return
     }
     val ink = DetailForeground
@@ -1128,43 +1147,74 @@ private fun HeroBookInformation(
 private fun DesktopBookSummary(
     manga: Manga, cover: Painter, aspect: Float, paper: Color, adultProfile: Boolean, onPosterHeight: (Int) -> Unit,
     onIntroduction: () -> Unit, onRatings: (() -> Unit)?, onAuthor: ((String) -> Unit)?, onTag: ((String) -> Unit)?,
-    arrival: () -> Float,
+    heroHeight: Dp?, readAction: @Composable () -> Unit, arrival: () -> Float,
 ) {
     val window = LocalMangaWindow.current
     val colors = MaterialTheme.colorScheme
     val ink = DetailForeground
-    val stageHeight = if (window.shortHeight) 150.dp else (window.height * .29f).coerceIn(174.dp, 278.dp)
-    Column(Modifier.fillMaxWidth()) {
-        BoxWithConstraints(Modifier.fillMaxWidth().height(stageHeight).clip(RoundedCornerShape(15.dp))
-            .background(paper.copy(alpha = .34f)), contentAlignment = Alignment.Center) {
-            val h = (stageHeight - 18.dp).coerceAtLeast(1.dp)
-            val width = minOf((maxWidth - 20.dp).coerceAtLeast(1.dp), h * aspect)
+    val poster: @Composable (Modifier) -> Unit = { frame ->
+        BoxWithConstraints(frame, contentAlignment = Alignment.Center) {
+            val width = minOf(maxWidth, maxHeight * aspect)
             Box(Modifier.size(width, width / aspect).onSizeChanged { onPosterHeight(it.height) }
-                .mangaSharedCover(manga.id).mangaCoverCard(8.dp, shadowRadius = 10.dp)
+                .mangaSharedCover(manga.id).mangaCoverCard(8.dp, shadowRadius = 7.dp)
                 .background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
                 Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(32.dp), tint = colors.onSurfaceVariant)
                 Image(cover, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
             }
         }
-        Column(Modifier.fillMaxWidth().background(paper).padding(start = 7.dp, end = 7.dp, top = 14.dp, bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            if (adultProfile) MangaBrowseSource(manga, foreground = DetailSecondary)
-            Text(manga.title, style = browseTitleStyle(26.sp, 33.sp), color = ink,
-                modifier = Modifier.graphicsLayer {
-                    val rest = 1f - arrival()
-                    alpha = 1f - rest * .25f
-                    translationY = 6.dp.toPx() * rest
-                }.clickable(role = Role.Button, onClickLabel = "完整作品资料", onClick = onIntroduction))
-            if (manga.authors.any(String::isNotBlank)) AuthorNames(manga.authors, ink, onAuthor = onAuthor)
-            val publication = listOf(manga.status, manga.latestChapter.takeIf(String::isNotBlank)
-                ?.let { "更新 · " + mangaNumberText(it) }.orEmpty()).filter(String::isNotBlank).joinToString("　·　")
-            if (publication.isNotBlank()) Text(publication, style = MaterialTheme.typography.bodySmall,
-                color = DetailSecondary)
-            HeroSynopsis(manga, ink, true, onIntroduction, lines = 4)
-            DetailTags(manga, includeState = false, onTag = onTag, maximumVisible = 5,
-                largeTouchTarget = adultProfile, onMore = onIntroduction)
-            if (onRatings != null) DetailRatingStrip(manga, ink, compact = true, onExpand = onRatings)
-            else if (!adultProfile) MangaBrowseSource(manga, foreground = DetailSecondary)
+    }
+    val identity: @Composable () -> Unit = {
+        if (adultProfile) MangaBrowseSource(manga, foreground = DetailSecondary)
+        Text(manga.title, style = if (heroHeight != null) browseTitleStyle(33.sp, 40.sp) else browseTitleStyle(25.sp, 32.sp),
+            color = ink, modifier = Modifier.graphicsLayer {
+                val rest = 1f - arrival()
+                alpha = 1f - rest * .25f
+                translationY = 6.dp.toPx() * rest
+            }.semantics { heading() }.clickable(role = Role.Button, onClickLabel = "完整作品资料", onClick = onIntroduction))
+        if (manga.authors.any(String::isNotBlank)) AuthorNames(manga.authors, ink, onAuthor = onAuthor)
+        val publication = listOfNotNull(manga.status.takeIf(String::isNotBlank),
+            manga.latestChapter.takeIf(String::isNotBlank)?.let { "更新 · $it" }).joinToString("　·　")
+        if (publication.isNotBlank()) Text(mangaNumberText(publication), style = MaterialTheme.typography.bodySmall,
+            color = DetailSecondary)
+    }
+    val details: @Composable () -> Unit = {
+        HeroSynopsis(manga, ink, true, onIntroduction, lines = if (heroHeight != null) 3 else 4)
+        DetailTags(manga, includeState = false, onTag = onTag, maximumVisible = 5,
+            largeTouchTarget = adultProfile, onMore = onIntroduction)
+        if (onRatings != null) DetailRatingStrip(manga, ink, compact = true, onExpand = onRatings)
+        else if (!adultProfile) MangaBrowseSource(manga, foreground = DetailSecondary)
+    }
+    if (heroHeight != null) {
+        Row(Modifier.fillMaxWidth().height(heroHeight).background(Brush.horizontalGradient(listOf(
+            paper.copy(alpha = .26f), paper.copy(alpha = .94f), paper)), RoundedCornerShape(16.dp))
+            .padding(horizontal = 18.dp, vertical = 11.dp), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+            poster(Modifier.width(heroHeight * .71f).fillMaxHeight())
+            Column(Modifier.weight(1.15f).fillMaxHeight()) {
+                val identityScroll = rememberScrollState()
+                Box(Modifier.fillMaxWidth().weight(1f)) {
+                    Column(Modifier.fillMaxSize().verticalScroll(identityScroll).padding(end = 9.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) { identity() }
+                    DesktopVerticalScrollbar(identityScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                }
+                Spacer(Modifier.height(8.dp))
+                readAction()
+            }
+            val detailScroll = rememberScrollState()
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                Column(Modifier.fillMaxSize().verticalScroll(detailScroll).padding(start = 3.dp, end = 13.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)) { details() }
+                DesktopVerticalScrollbar(detailScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+            }
+        }
+    } else {
+        val height = if (window.shortHeight) 143.dp else (window.height * .25f).coerceIn(154.dp, 230.dp)
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            poster(Modifier.fillMaxWidth().height(height))
+            Column(Modifier.fillMaxWidth().background(paper, RoundedCornerShape(12.dp)).padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                identity()
+                details()
+            }
         }
     }
 }

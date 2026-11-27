@@ -69,7 +69,7 @@ internal enum class ContentProfile(val key: String, val label: String, val title
 internal fun ContentProfileSwitch(
     profile: ContentProfile,
     onSelect: (ContentProfile) -> Unit,
-    onManage: () -> Unit,
+    onManage: (() -> Unit)?,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
     enabled: Boolean = true,
@@ -82,7 +82,7 @@ internal fun ContentProfileSwitch(
     val selectedPaper = colors.surface
     val sourceAction = if (profile == ContentProfile.ANIME) "管理片源" else "当前分区来源"
     val manage: @Composable () -> Unit = {
-        MotionIconButton(onClick = onManage, enabled = enabled,
+        if (onManage != null) MotionIconButton(onClick = onManage, enabled = enabled,
             modifier = Modifier.size(44.dp), tooltip = sourceAction,
         ) {
             Icon(Icons.Outlined.Tune, sourceAction, Modifier.size(18.dp),

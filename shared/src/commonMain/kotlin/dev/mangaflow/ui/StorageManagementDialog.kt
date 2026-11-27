@@ -240,7 +240,8 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
             val font = LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
             val split = desktop && maxWidth >= 700.dp * font && maxHeight >= 320.dp * font
             val maximum = minOf(maxHeight, LocalMangaWindow.current.height * .9f, 680.dp)
-            val railWidth = (maxWidth * .25f).coerceIn(170.dp, 232.dp)
+            val railWidth = (maxWidth * .23f).coerceIn(174.dp * font, 226.dp * font)
+            val metricColumns = split && maxWidth - railWidth >= 500.dp * font
             val short = maximum < 390.dp * font
             ReaderDialogSurface(Modifier.fillMaxWidth(), backdrop) {
                 Row(Modifier.fillMaxWidth().then(if (split) Modifier.height(maximum) else Modifier.heightIn(max = maximum))) {
@@ -257,7 +258,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                         book = null
                         area = kind
                     }
-                    Box(Modifier.width(railWidth).fillMaxHeight().background(colors.surfaceContainerLow)) {
+                    Box(Modifier.width(railWidth).fillMaxHeight().background(colors.surfaceContainerLow.copy(alpha = .70f))) {
                         LazyColumn(Modifier.fillMaxWidth(), state = rail, contentPadding = PaddingValues(12.dp),
                             verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             item("heading") { Text("存储管理", Modifier.padding(start = 9.dp, top = 8.dp, bottom = 12.dp),
@@ -280,7 +281,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                         DesktopVerticalScrollbar(rail, Modifier.align(Alignment.CenterEnd))
                     }
                 }
-                Column(Modifier.weight(1f).padding(horizontal = if (split) 20.dp else 16.dp, vertical = 8.dp)) {
+                Column(Modifier.weight(1f).padding(horizontal = if (metricColumns) 26.dp else 16.dp, vertical = if (split) 12.dp else 8.dp)) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                         if ((!split && area != null) || book != null || plan != null) MotionIconButton(::back,
                             modifier = Modifier.size(44.dp), tooltip = "返回") {
@@ -322,22 +323,28 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                     }
                     if (!short) feedback()
                     val usage: @Composable () -> Unit = {
-                        Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 12.dp)
-                            .background(colors.surfaceContainerLow, RoundedCornerShape(16.dp))
-                            .padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        val scopeName = when {
+                            hasSelection -> scopeLabel
+                            area == null && book == null -> "本机已用"
+                            else -> "已用"
+                        }
+                        val free = if (snapshot != null) storageBytes(scopeBytes) else if (loading) "正在统计…" else "用量未就绪"
+                        Column(Modifier.fillMaxWidth().padding(top = if (metricColumns) 16.dp else 6.dp, bottom = if (metricColumns) 20.dp else 12.dp)
+                            .then(if (desktop) Modifier else Modifier.background(colors.surfaceContainerLow, RoundedCornerShape(16.dp))
+                                .padding(horizontal = 14.dp, vertical = 10.dp))) {
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                    Text(when {
-                                        hasSelection -> scopeLabel
-                                        area == null && book == null -> "本机已用"
-                                        else -> "已用"
-                                    }, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                                    Text(occupiedBytes?.let(::storageBytes) ?: "—", style = mangaMetricValueStyle(28.sp, 34.sp),
+                                    Text(scopeName, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                                    Text(occupiedBytes?.let(::storageBytes) ?: "—", style = mangaMetricValueStyle(if (metricColumns) 32.sp else 28.sp, if (metricColumns) 40.sp else 34.sp),
                                         color = colors.onSurface)
-                                    Text(if (snapshot == null) if (loading) "正在统计…" else "用量未就绪"
-                                        else "可释放 ${storageBytes(scopeBytes)}",
+                                    if (!metricColumns) Text(if (snapshot == null) free else "可释放 $free",
                                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                }
+                                if (metricColumns) Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text("可释放", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                                    Text(free, style = if (snapshot == null) MaterialTheme.typography.bodyMedium else mangaMetricValueStyle(28.sp, 40.sp),
+                                        color = colors.onSurface)
                                 }
                                 MotionButton(::previewClear, enabled = !busy && !loading && scopeBytes > 0L) {
                                     Text(if (hasSelection) "预览所选" else "预览清理")
@@ -379,10 +386,15 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                         if (paneReview != null) {
                             item("review") {
                                 Column(Modifier.padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(14.dp))
-                                        .padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    Column(Modifier.fillMaxWidth().then(if (desktop) Modifier.padding(vertical = 6.dp) else
+                                        Modifier.background(colors.surfaceContainerLow, RoundedCornerShape(14.dp)).padding(16.dp)),
+                                        verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                         Text(paneReview.label, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                                        Text("预计释放 ${storageBytes(paneReview.estimatedBytes)}", style = MaterialTheme.typography.headlineSmall)
+                                        if (metricColumns) Row(verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                            Text(storageBytes(paneReview.estimatedBytes), style = mangaMetricValueStyle(33.sp, 41.sp))
+                                            Text("预计释放", style = MaterialTheme.typography.titleSmall)
+                                        } else Text("预计释放 ${storageBytes(paneReview.estimatedBytes)}", style = MaterialTheme.typography.headlineSmall)
                                         val count = "${paneReview.items.size} 项缓存" + if (paneReview.legacy) " · 含旧版图片缓存" else ""
                                         Text(count, style = MaterialTheme.typography.bodySmall)
                                     }
@@ -588,7 +600,8 @@ private fun StorageNavigationRow(title: String, detail: String, size: String, ic
         indication = null, onClick = onClick).motionPress(interaction, enabled)
         .padding(vertical = 10.dp, horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        SettingsRowIcon(icon)
+        if (platformKind == PlatformKind.DESKTOP) Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        else SettingsRowIcon(icon)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(title, style = MaterialTheme.typography.titleSmall)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -613,7 +626,9 @@ private fun StorageLine(title: String, detail: String, size: String) {
 @Composable
 private fun StorageBookRow(manga: Manga?, repository: dev.mangaflow.data.UnifiedMangaRepository?, title: String, detail: String, size: String, selected: Boolean, protected: Boolean,
     onSelect: () -> Unit, onOpen: () -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().then(if (selected && platformKind == PlatformKind.DESKTOP)
+        Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = .09f), RoundedCornerShape(8.dp)) else Modifier),
+        verticalAlignment = Alignment.CenterVertically) {
         StorageSelect(selected, protected, onSelect)
         val interaction = remember { MutableInteractionSource() }
         Row(Modifier.weight(1f).clickable(interactionSource = interaction, indication = null, onClick = onOpen)
@@ -633,7 +648,9 @@ private fun StorageBookRow(manga: Manga?, repository: dev.mangaflow.data.Unified
 
 @Composable
 private fun StorageSelectionRow(title: String, detail: String, size: String, selected: Boolean, protected: Boolean, onSelect: () -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().then(if (selected && platformKind == PlatformKind.DESKTOP)
+        Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = .09f), RoundedCornerShape(8.dp)) else Modifier),
+        verticalAlignment = Alignment.CenterVertically) {
         StorageSelect(selected, protected, onSelect)
         Box(Modifier.weight(1f)) { StorageLine(title, if (protected) "$detail · 受保护" else detail, size) }
     }
@@ -643,7 +660,7 @@ private fun StorageSelectionRow(title: String, detail: String, size: String, sel
 private fun StorageSelect(selected: Boolean, protected: Boolean, onSelect: () -> Unit) {
     MotionIconButton(onSelect, enabled = !protected, modifier = Modifier.size(44.dp), tooltip = if (protected) "受保护，暂不能清理" else if (selected) "取消选择" else "选择清理") {
         Icon(if (protected) Icons.Outlined.Lock else if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-            if (protected) "受保护" else if (selected) "已选择" else "未选择", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (protected) "受保护" else if (selected) "已选择" else "未选择", Modifier.size(18.dp), tint = if (selected && !protected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

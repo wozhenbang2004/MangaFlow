@@ -9,6 +9,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.ButtonDefaults
@@ -157,9 +159,11 @@ fun AccountScreen(
         AccountWorkspace(Modifier.fillMaxSize().mangaHazeSource(backdrop).imePadding(), mobileWidth = Dp.Infinity,
             top = contentTopPadding + 18.dp, bottom = 16.dp + bottomInset, sideInset = 24.dp,
             overview = { wide ->
-                AccountIdentity("匿名阅读已启用", "连接账号可导入拷贝收藏。阅读进度可在漫画详情中选择采用。", wide)
+                if (desktop) DesktopAccountIdentity(state, wide)
+                else AccountIdentity("匿名阅读已启用", "连接账号可导入拷贝收藏。阅读进度可在漫画详情中选择采用。")
             }) {
             if (state.savedCredentialPresent) {
+                if (desktop) PreferenceSectionLabel("连接状态", Modifier.padding(bottom = 10.dp))
                 Text(if (state.autoRestorePending)
                     "账号凭据已安全保留，客户端会自动重试恢复连接，无需重复登录。"
                     else "旧凭据仍安全保留，请用密码登录确认身份；不会自动验证或同步。",
@@ -167,13 +171,14 @@ fun AccountScreen(
                     modifier = Modifier.padding(bottom = 12.dp))
                 if (state.autoRestorePending) Button(onClick = onRefresh, enabled = active && !busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                    shape = RoundedCornerShape(16.dp)) { Text("立即重试（可选）") }
+                    shape = RoundedCornerShape(16.dp)) { Text(if (desktop) "重试连接" else "立即重试（可选）") }
                 TextButton(onClick = { clearInputs(); onLogout() }, enabled = active && !busy) {
                     Text("退出并切换账号", style = MaterialTheme.typography.bodySmall)
                 }
             }
             if (!state.savedCredentialPresent || !state.autoRestorePending) Column(Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 val formActive = active
+                if (desktop) PreferenceSectionLabel("密码登录")
                 Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     OutlinedTextField(
                         value = username, onValueChange = { if (formActive) username = it },
@@ -211,7 +216,8 @@ fun AccountScreen(
                 Button(
                     onClick = submitPassword,
                     enabled = formActive && !busy && username.isNotBlank() && password.isNotEmpty(),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(16.dp),
+                    modifier = (if (desktop) Modifier.align(Alignment.End).widthIn(min = 136.dp) else Modifier.fillMaxWidth())
+                        .heightIn(min = 48.dp), shape = RoundedCornerShape(if (desktop) 12.dp else 16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = colors.primary, contentColor = colors.onPrimary,
                         disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant),
                 ) { Text("登录") }
@@ -234,11 +240,22 @@ fun AccountScreen(
             AccountWorkspace(Modifier.fillMaxSize().mangaHazeSource(backdrop), mobileWidth = 480.dp,
                 top = contentTopPadding + 18.dp, bottom = 16.dp + bottomInset, sideInset = 24.dp,
                 overview = { wide ->
-                    AccountIdentity(if (profile.locallyRestored) "本地会话已恢复" else "拷贝已连接",
+                    if (desktop) DesktopAccountIdentity(state, wide)
+                    else AccountIdentity(if (profile.locallyRestored) "本地会话已恢复" else "拷贝已连接",
                         if (profile.locallyRestored) "尚未联网确认有效性，收藏和历史请求会显示各自实际结果。"
-                        else "本机与拷贝收藏已汇入同一个书架。云端独有作品可直接查看，删除、同步与阅读进度仍分别管理。", wide)
+                        else "本机与拷贝收藏已汇入同一个书架。云端独有作品可直接查看，删除、同步与阅读进度仍分别管理。")
                 }) {
-                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (desktop) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    PreferenceSectionLabel("书架与同步", Modifier.padding(bottom = 6.dp))
+                    SettingsLinkRow("统一书架", "本机收藏 ${localFavorites.size} 本", Icons.AutoMirrored.Outlined.MenuBook,
+                        inlineDetail = true, enabled = active, onClick = onGoShelf)
+                    if (onOpenSync != null) SettingsLinkRow("拷贝同步差异",
+                        state.syncMessage.orEmpty().ifBlank { if (state.canRetrySync) "有待同步内容" else "比较本机与拷贝收藏" },
+                        Icons.Outlined.Sync, enabled = active, onClick = onOpenSync)
+                    if (state.favoritesError != null) TextButton(onClick = onRefreshFavorites, enabled = active && !state.favoritesLoading) {
+                        Text("拷贝收藏读取失败 · 重试", color = colors.error)
+                    }
+                } else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(onClick = onGoShelf, enabled = active,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         shape = RoundedCornerShape(16.dp)) { Text("打开统一书架") }
@@ -278,15 +295,42 @@ private fun SecretVisibility(visible: Boolean, enabled: Boolean, onClick: () -> 
 }
 
 @Composable
-private fun AccountIdentity(title: String, detail: String, wide: Boolean) {
-    if (wide) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            ChapterSourceLogo("copy", "拷贝", Modifier.size(44.dp))
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        return
+private fun DesktopAccountIdentity(state: AccountUiState, wide: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    val profile = state.profile
+    val name = profile?.let { it.nickname.ifBlank { it.username } } ?: "匿名读者"
+    val status = when {
+        profile?.locallyRestored == true -> "本地会话 · 等待验证"
+        profile != null -> "拷贝已连接"
+        state.savedCredentialPresent -> "本机凭据已保留"
+        else -> "未连接拷贝"
     }
+    val text: @Composable () -> Unit = {
+        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            SelectionContainer { PreferenceHeading(name, maxLines = Int.MAX_VALUE) }
+            profile?.username?.takeIf { it.isNotBlank() && it != name }?.let { handle ->
+                SelectionContainer { Text(handle, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant) }
+            }
+            Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                Box(Modifier.size(7.dp).background(if (profile != null && !profile.locallyRestored) mangaStatusColors().success
+                    else colors.onSurfaceVariant, androidx.compose.foundation.shape.CircleShape))
+                Text(status, style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
+            }
+        }
+    }
+    if (wide) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(15.dp)) {
+        ChapterSourceLogo("copy", "拷贝", Modifier.size(54.dp))
+        text()
+    } else Row(Modifier.fillMaxWidth().padding(bottom = 24.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        ChapterSourceLogo("copy", "拷贝", Modifier.size(48.dp))
+        Box(Modifier.weight(1f)) { text() }
+    }
+}
+
+@Composable
+private fun AccountIdentity(title: String, detail: String) {
     Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 18.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.Top) {
         ChapterSourceLogo("copy", "拷贝", Modifier.size(44.dp))

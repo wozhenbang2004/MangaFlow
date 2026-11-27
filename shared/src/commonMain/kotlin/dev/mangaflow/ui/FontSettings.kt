@@ -83,6 +83,8 @@ import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 /** One role at a time, using the settings' existing Ovio tabs and retained content transition. */
 @Composable
@@ -156,6 +158,32 @@ internal fun FontSettings(modifier: Modifier = Modifier) {
     }
 }
 
+private fun appliedFaceLabel(currentId: String, state: FontStoreState, store: FontStore): String {
+    val effectiveId = if (currentId == "inherit")
+        state.selections[MangaFontScene.INTERFACE] ?: MangaFontCatalog.defaultId(MangaFontScene.INTERFACE) else currentId
+    val option = MangaFontCatalog.find(effectiveId)
+    val fallback = option != null && option.assets.isNotEmpty() &&
+        (effectiveId !in state.installed || store.family(effectiveId) == null)
+    return when {
+        state.loading -> "正在读取字库…"
+        fallback -> "暂用系统字体"
+        currentId == "inherit" -> "跟随界面 · " + (option?.name ?: "系统字体")
+        else -> option?.name ?: "系统字体"
+    }
+}
+
+@Composable
+internal fun interfaceFontSettingValue(): String {
+    val context = LocalMangaContext.current
+    val store = remember(context) { FontStore.get(context) }
+    fun label(state: FontStoreState): String {
+        val id = state.selections[MangaFontScene.INTERFACE] ?: MangaFontCatalog.defaultId(MangaFontScene.INTERFACE)
+        return appliedFaceLabel(id, state, store)
+    }
+    val labels = remember(store) { store.state.map { label(it) }.distinctUntilChanged() }
+    return labels.collectAsStateWithLifecycle(initialValue = label(store.state.value)).value
+}
+
 @Composable
 private fun FontSpecimen(scene: MangaFontScene, currentId: String, state: FontStoreState, store: FontStore) {
     val colors = MaterialTheme.colorScheme
@@ -168,17 +196,7 @@ private fun FontSpecimen(scene: MangaFontScene, currentId: String, state: FontSt
     var text by rememberSaveable { mutableStateOf(sample) }
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val effectiveId = if (currentId == "inherit")
-        state.selections[MangaFontScene.INTERFACE] ?: MangaFontCatalog.defaultId(MangaFontScene.INTERFACE) else currentId
-    val option = MangaFontCatalog.find(effectiveId)
-    val fallback = option != null && option.assets.isNotEmpty() &&
-        (effectiveId !in state.installed || store.family(effectiveId) == null)
-    val face = when {
-        state.loading -> "正在读取字库…"
-        fallback -> "暂用系统字体"
-        currentId == "inherit" -> "跟随界面 · " + (option?.name ?: "系统字体")
-        else -> option?.name ?: "系统字体"
-    }
+    val face = appliedFaceLabel(currentId, state, store)
     Column(Modifier.fillMaxWidth().background(colors.surfaceContainerHigh, RoundedCornerShape(12.dp))
         .padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {

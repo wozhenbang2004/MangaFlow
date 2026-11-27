@@ -103,9 +103,10 @@ internal fun AnimePlaybackSurface(
         else colors
     }
     val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
-    val fallback = remember(base, compactVideo, overVideo, accessibility.reduceTransparency, accessibility.increaseContrast) {
+    val fallback = remember(base, compactVideo, overVideo, windowsVideoDock, accessibility.reduceTransparency, accessibility.increaseContrast) {
         val opacity = when {
             accessibility.reduceTransparency || accessibility.increaseContrast -> 1f
+            windowsVideoDock && compactVideo -> .72f
             compactVideo -> .79f
             overVideo -> .93f
             else -> .96f
@@ -114,8 +115,9 @@ internal fun AnimePlaybackSurface(
     }
     MaterialTheme(colorScheme = controls) {
         CompositionLocalProvider(LocalContentColor provides ink) {
-            Box(modifier.softSurfaceShadow(shape, base.luminance() > .5f, strength = .65f,
-                radius = if (panel) 12.dp else 7.dp).clip(shape), propagateMinConstraints = true) {
+            Box(modifier.softSurfaceShadow(shape, base.luminance() > .5f,
+                strength = if (windowsVideoDock && compactVideo) .42f else .65f,
+                radius = if (panel) 12.dp else if (windowsVideoDock) 5.dp else 7.dp).clip(shape), propagateMinConstraints = true) {
                 if (artwork != null && !accessibility.reduceTransparency && !accessibility.increaseContrast) {
                     LiquidGlassSurface(artwork, Modifier.matchParentSize(),
                         role = when {

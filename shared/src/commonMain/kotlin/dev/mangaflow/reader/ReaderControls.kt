@@ -11,6 +11,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -19,6 +20,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -29,6 +32,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -118,10 +122,11 @@ internal fun ReaderDialogSurface(
 ) {
     if (dialogWindow) {
         ConfigureReaderDialogWindow(.12f)
-        LiquidGlassSurface(backdrop, modifier, role = GlassSurfaceRole.PANEL, softCard = true) { content() }
+        if (platformKind == PlatformKind.DESKTOP) ReaderSurface(modifier, content = content)
+        else LiquidGlassSurface(backdrop, modifier, role = GlassSurfaceRole.PANEL, softCard = true) { content() }
     } else {
-        // A docked desktop inspector sits beside the page, outside its optical sample.
-        ReaderSurface(modifier, content = content)
+        // The workspace supplies one continuous matte surface behind all three inspector views.
+        Box(modifier) { content() }
     }
 }
 
@@ -183,7 +188,7 @@ internal fun ReaderWorkspace(
                 translationX = side * 18.dp.toPx() * (1f - amount)
                 alpha = amount
             }.padding(start = 6.dp, top = 8.dp, end = 8.dp, bottom = 8.dp).motionInputGate(panelVisible)) {
-                panel()
+                ReaderSurface(Modifier.fillMaxSize(), RoundedCornerShape(18.dp), content = panel)
             }
         }
     }
@@ -195,7 +200,7 @@ internal fun ReaderToolPresence(
     presence: Transition<Boolean>,
     top: Boolean,
     modifier: Modifier,
-    content: @Composable () -> Unit,
+    content: @Composable (interactive: Boolean) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
     val travel = presence.animateFloat(transitionSpec = {
@@ -215,26 +220,63 @@ internal fun ReaderToolPresence(
         scaleX = 1f - (if (top) .012f else .024f) * remaining
         scaleY = 1f - (if (top) .045f else .09f) * remaining
         alpha = 1f - remaining * remaining
-    }.motionInputGate(presence.targetState)) { content() }
+    }) { content(presence.targetState) }
 }
 
-/** Place the page ruler and chapter tools on the same baseline when the artwork pane has room. */
+/** Leave artwork visible between the desktop chapter identity and the workspace tools. */
 @Composable
-internal fun ReaderDockGroups(desktop: Boolean, progress: @Composable () -> Unit, actions: @Composable () -> Unit) {
-    val content = Modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 10.dp, vertical = 4.dp)
+internal fun ReaderHeadingBar(
+    desktop: Boolean, backdrop: HazeState, interactive: Boolean,
+    identityInteraction: MutableInteractionSource, toolsInteraction: MutableInteractionSource,
+    modifier: Modifier, identity: @Composable RowScope.() -> Unit, tools: @Composable RowScope.() -> Unit,
+) {
+    if (desktop) {
+        Row(modifier, horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+            ReaderHeadingCapsule(backdrop, desktop, interactive, identityInteraction,
+                Modifier.weight(1f, fill = false).widthIn(max = 468.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)), identity)
+            Spacer(Modifier.width(10.dp))
+            ReaderHeadingCapsule(backdrop, desktop, interactive, toolsInteraction, Modifier, tools)
+        }
+    } else Box(modifier) {
+        ReaderHeadingCapsule(backdrop, desktop, interactive, identityInteraction, Modifier.fillMaxWidth()) {
+            identity()
+            tools()
+        }
+    }
+}
+
+@Composable
+private fun ReaderHeadingCapsule(
+    backdrop: HazeState, desktop: Boolean, interactive: Boolean, interaction: MutableInteractionSource,
+    modifier: Modifier, content: @Composable RowScope.() -> Unit,
+) {
+    LiquidGlassSurface(backdrop, modifier, role = if (desktop) GlassSurfaceRole.READING_DOCK else GlassSurfaceRole.NAVIGATION,
+        cornerRadius = if (desktop) 22.dp else 28.dp, preferSource = true, trackPointer = true,
+        interactionSource = interaction, softCard = true) {
+        // Keep the hit target and its exit gate inside the rounded glass, including during a fade.
+        Row(Modifier.motionInputGate(interactive).hoverable(interaction, enabled = desktop && interactive)
+            .heightIn(min = 52.dp).pointerInput(Unit) {}.padding(horizontal = if (desktop) 6.dp else 4.dp),
+            verticalAlignment = Alignment.CenterVertically, content = content)
+    }
+}
+
+/** Give the ruler the flexible column; fold the secondary actions into a separate row only when needed. */
+@Composable
+internal fun ReaderDockGroups(desktop: Boolean, modifier: Modifier, progress: @Composable () -> Unit, actions: @Composable (stacked: Boolean) -> Unit) {
+    val content = modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 10.dp, vertical = 4.dp)
     if (!desktop) {
-        Column(content) { progress(); actions() }
+        Column(content) { progress(); actions(true) }
         return
     }
     BoxWithConstraints(content) {
-        if (maxWidth >= 620.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)) {
+        val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        if (maxWidth >= 530.dp * scale) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { progress() }
-                Spacer(Modifier.padding(horizontal = 8.dp).size(1.dp, 20.dp)
-                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .13f)))
-                Box(Modifier.width(272.dp)) { actions() }
+                Spacer(Modifier.width(10.dp))
+                Box(Modifier.width(132.dp)) { actions(false) }
             }
-        } else Column(Modifier.fillMaxWidth()) { progress(); actions() }
+        } else Column(Modifier.fillMaxWidth()) { progress(); actions(true) }
     }
 }
 

@@ -188,10 +188,13 @@ internal fun UnifiedSourceManager(
     MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop, desktopWidth = 980.dp,
         containerColor = colors.surface.copy(alpha = .97f)) { dismiss ->
         BackHandler(enabled = sourcePage != null && !state.connecting, onBack = showOverview)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
         val window = LocalMangaWindow.current
-        val railWidth = (window.width * .29f).coerceIn(220.dp, 280.dp)
-        val split = platformKind == PlatformKind.DESKTOP && window.width - railWidth >= 430.dp * window.fontScale &&
-            window.height >= 360.dp
+        val scale = window.fontScale.coerceAtLeast(1f)
+        val railWidth = (maxWidth * .26f).coerceIn(202.dp * scale, 258.dp * scale)
+        val split = platformKind == PlatformKind.DESKTOP && maxWidth - railWidth >= 430.dp * scale &&
+            maxHeight >= 340.dp * scale
+        val table = split && maxWidth - railWidth >= 510.dp * scale
         val height = if (split) Modifier.height(minOf(window.height * .88f, 760.dp))
             else Modifier.heightIn(max = window.height * .72f)
         Row(Modifier.fillMaxWidth().then(height)) {
@@ -258,7 +261,7 @@ internal fun UnifiedSourceManager(
                 }
                 Box(Modifier.fillMaxWidth()) {
                 LazyColumn(Modifier.fillMaxWidth(), state = list,
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 12.dp),
+                    contentPadding = PaddingValues(start = if (table) 24.dp else 20.dp, end = if (table) 24.dp else 20.dp, top = 4.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     if (page.startsWith("@align:")) {
                         if (alignmentWork == null) item(key = "alignment-unavailable") {
@@ -306,7 +309,8 @@ internal fun UnifiedSourceManager(
                         }
                     } else if (page == "overview") {
                         item(key = "summary") {
-                            Row(Modifier.fillMaxWidth().heightIn(min = 28.dp),
+                            Column {
+                            Row(Modifier.fillMaxWidth().heightIn(min = if (table) 34.dp else 28.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 if (checking) MotionBusyIndicator(Modifier.size(12.dp), strokeWidth = 1.2.dp)
                                 else Icon(Icons.Outlined.Schedule, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
@@ -318,6 +322,11 @@ internal fun UnifiedSourceManager(
                                 else if (checkPreferences.enabled) "${checkPreferences.intervalMinutes} 分钟自动检查" else "自动检查已关闭",
                                     fontSize = 12.sp,
                                     color = if (pendingCount > 0) colors.primary else colors.onSurfaceVariant)
+                            }
+                            if (table) Row(Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 12.dp, bottom = 5.dp)) {
+                                Text("来源", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                                Text("目录与状态", Modifier.width(168.dp * scale), style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                            }
                             }
                         }
                         items(overview, key = { "source:" + it.id }) { row ->
@@ -352,7 +361,7 @@ internal fun UnifiedSourceManager(
                                 Text(row.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
                                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 Spacer(Modifier.width(8.dp))
-                                Row(Modifier.widthIn(max = 140.dp).semantics(mergeDescendants = true) {
+                                Row((if (table) Modifier.width(168.dp * scale) else Modifier.widthIn(max = 140.dp)).semantics(mergeDescendants = true) {
                                     stateDescription = listOfNotNull(
                                         "${row.chapters}话".takeIf { row.chapters > 0 },
                                         "${row.candidates.size}个候选".takeIf { row.status == "NEEDS_CONFIRMATION" },
@@ -587,6 +596,7 @@ internal fun UnifiedSourceManager(
             }
             }
         }
+        }
     }
 }
 
@@ -597,7 +607,7 @@ private fun SourceWorkNavigation(work: Manga, associated: List<Manga>, overview:
     val colors = MaterialTheme.colorScheme
     val list = rememberLazyListState()
     val groups = remember(associated) { associated.groupBy { it.sourceId }.entries.toList() }
-    Box(Modifier.width(width).fillMaxHeight().background(colors.surfaceContainerLow)) {
+    Box(Modifier.width(width).fillMaxHeight().background(colors.surfaceContainerLow.copy(alpha = .70f))) {
         LazyColumn(Modifier.fillMaxSize(), state = list,
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 18.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp)) {

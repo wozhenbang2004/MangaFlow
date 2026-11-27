@@ -120,11 +120,11 @@ internal fun CloudAccountHeader(
             if (desktop) MotionTextButton(onClick = { pendingAction = null; info = true }, enabled = active,
                 modifier = Modifier.heightIn(min = 40.dp), contentPadding = PaddingValues(horizontal = 10.dp)) {
                 Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.PersonOutline, "账号与同步", Modifier.size(20.dp))
+                    Icon(Icons.Outlined.PersonOutline, null, Modifier.size(20.dp))
                     if (state.canRetrySync) Box(Modifier.align(Alignment.TopEnd).size(6.dp)
                         .background(colors.error, CircleShape).semantics { contentDescription = "有待同步内容" })
                 }
-                Text(accountName, Modifier.widthIn(max = 164.dp).padding(horizontal = 6.dp),
+                Text("账号与同步", Modifier.padding(horizontal = 6.dp),
                     style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(14.dp))
             } else Box {
@@ -143,7 +143,7 @@ internal fun CloudAccountHeader(
         }
     }
     if (desktop) {
-        DesktopManagementToolbar(title, modifier, navigation, minimumToolsWidth = if (profile == null) 270.dp else 500.dp) {
+        DesktopManagementToolbar(title, modifier, navigation, minimumToolsWidth = if (profile == null) 270.dp else 416.dp) {
             Spacer(Modifier.weight(1f))
             if (onSearch != null) MotionIconButton(onClick = onSearch, enabled = active,
                 modifier = Modifier.size(44.dp), tooltip = "搜索 · Ctrl+K") {

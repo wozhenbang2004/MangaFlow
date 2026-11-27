@@ -238,7 +238,7 @@ internal fun SourceImportSheet(
         activeJob?.cancel()
         onDismiss()
         completedName?.let(onImported)
-    }, backdrop = backdrop, containerColor = colors.surface.copy(alpha = .97f), desktopWidth = 920.dp) { dismiss ->
+    }, backdrop = backdrop, containerColor = colors.surface.copy(alpha = .97f), desktopWidth = if (prepared != null || entries.isNotEmpty() || catalog != null) 920.dp else 624.dp) { dismiss ->
         LaunchedEffect(installOperation?.id, installOperation?.phase) {
             val operation = installOperation ?: return@LaunchedEffect
             if (operation.active) return@LaunchedEffect
@@ -271,10 +271,13 @@ internal fun SourceImportSheet(
             .imePadding().navigationBarsPadding()) {
             val desktop = platformKind == PlatformKind.DESKTOP
             val font = LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
-            val split = desktop && maxWidth >= 710.dp * font && maxHeight >= 290.dp * font
+            val split = desktop && maxWidth >= 710.dp * font && maxHeight >= 290.dp * font &&
+                (prepared != null || entries.isNotEmpty() || catalog != null)
             val bodyHeight = minOf(maxHeight, 620.dp)
             val scrollActions = !split && bodyHeight < 285.dp * font
-            val setupWidth = (maxWidth * .41f).coerceIn(278.dp, 384.dp)
+            val setupWidth = (maxWidth * .35f).coerceIn(274.dp * font, 350.dp * font)
+            val catalogColumns = split && maxWidth - setupWidth >= 470.dp * font &&
+                entries.any { it.language.isNotBlank() || it.version.isNotBlank() }
             val bundle = prepared
             val setupList = rememberLazyListState()
             val catalogueList = rememberLazyListState()
@@ -398,7 +401,7 @@ internal fun SourceImportSheet(
                 if (entries.isNotEmpty()) item(key = "candidate-count") {
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(catalog?.repository?.name?.takeIf(String::isNotBlank) ?: "选择来源",
-                            style = MaterialTheme.typography.titleMedium)
+                            style = if (desktop) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleMedium)
                         Text("${entries.size} 项 · ${entries.count { it.candidate != null }} 项可预览",
                             style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                     }
@@ -424,6 +427,13 @@ internal fun SourceImportSheet(
                 if (entries.isNotEmpty() && visibleEntries.isEmpty()) item(key = "no-candidate-match") {
                     Text("没有匹配的来源", fontSize = 12.sp, color = colors.onSurfaceVariant)
                 }
+                if (catalogColumns && visibleEntries.isNotEmpty()) item("catalogue-columns") {
+                    Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 8.dp)) {
+                        Text("来源", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                        Text("语言 / 版本", Modifier.width(90.dp * font), style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                        Spacer(Modifier.width(48.dp * font))
+                    }
+                }
                 itemsIndexed(visibleEntries, key = { index, entry ->
                     "$index:${entry.candidate?.codeUrl.orEmpty()}:${entry.name}:${entry.language}"
                 }) { _, entry ->
@@ -436,30 +446,28 @@ internal fun SourceImportSheet(
                                 if (candidate != null) operate("正在准备所选来源…") { prepared = store.prepare(candidate) }
                             }).motionPress(interaction, enabled = selectable, pressedScale = .99f)
                         .padding(vertical = 10.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.Description, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-                        Column(Modifier.weight(1f).padding(start = 10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text(entry.name.ifBlank { "未命名来源" }, fontSize = 13.sp,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(listOf(entry.language, entry.version,
-                                displayImportOrigin(entry.siteUrl)).filter(String::isNotBlank).joinToString(" · "),
-                                fontSize = 11.sp, color = colors.onSurfaceVariant,
+                        if (!catalogColumns) Icon(Icons.Outlined.Description, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
+                        Column(Modifier.weight(1f).padding(start = if (catalogColumns) 0.dp else 10.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(entry.name.ifBlank { "未命名来源" }, style = MaterialTheme.typography.titleSmall,
+                                fontSize = if (desktop) 15.sp else 13.sp, maxLines = if (desktop) 2 else 1, overflow = TextOverflow.Ellipsis)
+                            val metadata = (if (catalogColumns) listOf(displayImportOrigin(entry.siteUrl)) else
+                                listOf(entry.language, entry.version, displayImportOrigin(entry.siteUrl))).filter(String::isNotBlank).joinToString(" · ")
+                            if (metadata.isNotBlank()) Text(metadata, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                             entry.unavailableReason?.let { reason ->
                                 Text(reason, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                             }
                         }
-                        if (candidate != null) Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp), tint = colors.primary)
-                        else Text("不兼容", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        if (catalogColumns) Text(listOf(entry.language, entry.version).filter(String::isNotBlank).joinToString(" · "),
+                            Modifier.width(90.dp * font), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        Box(if (catalogColumns) Modifier.width(48.dp * font) else Modifier, contentAlignment = Alignment.CenterEnd) {
+                            if (candidate != null) Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp), tint = colors.primary)
+                            else Text("不兼容", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        }
                     }
                 }
-                if (entries.isEmpty() && (split || catalog != null)) item("awaiting-catalog") {
-                    Column(Modifier.fillMaxWidth().padding(vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(Icons.Outlined.Description, null, Modifier.size(27.dp), tint = colors.onSurfaceVariant)
-                        Text(if (catalog != null) "仓库内没有来源" else "待选择来源", style = MaterialTheme.typography.titleMedium)
-                        Text(if (catalog != null) "可以刷新仓库，或打开其他仓库。"
-                            else if (repositoryMode) "打开已添加的仓库，或输入仓库地址以查看目录。" else "选择本地文件，或输入脚本地址以读取内容。",
-                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                    }
+                if (entries.isEmpty() && catalog != null) item("empty-catalog") {
+                    Text("仓库内没有来源", Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.titleMedium)
                 }
             }
             val review: LazyListScope.() -> Unit = {
@@ -578,7 +586,7 @@ internal fun SourceImportSheet(
                         onClick = { operations.cancel(activeInstall.id) }) { Text("取消") }
                 }
                 if (split) Row(Modifier.weight(1f).fillMaxWidth()) {
-                    Box(Modifier.width(setupWidth).fillMaxHeight().background(colors.surfaceContainerLow)) {
+                    Box(Modifier.width(setupWidth).fillMaxHeight().background(colors.surfaceContainerLow.copy(alpha = .68f))) {
                         if (bundle == null) SourceImportList(setupList, true, setup)
                         else SourceImportList(key(bundle.digest) { rememberLazyListState() }, true) {
                             item("identity") { SourceImportIdentity(bundle) }

@@ -125,16 +125,10 @@ internal fun MangaAwardsScreen(
     RankingPageFrame(Modifier.fillMaxSize().background(colors.background.copy(alpha = .97f))
         .semantics { paneTitle = pageTitle }, header = {
         Column {
-            PageTitleHeader(pageTitle, backdrop,
+            RankingCatalogueHeader(pageTitle, backdrop,
                 navigation = { Box(Modifier.motionInputGate(contentReady)) { navigation() } },
-                modifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                summary = {
-                    if (sectionTabs != null) Box(Modifier.motionInputGate(contentReady)) { sectionTabs() }
-                    else Text(pageTitle, Modifier.padding(start = 4.dp),
-                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }, actions = {
+                summary = if (sectionTabs == null) null else ({ Box(Modifier.motionInputGate(contentReady)) { sectionTabs() } }),
+                actions = {
                     if (sectionTabs == null) MotionIconButton(onClick = {
                         focus.clearFocus(force = true)
                         onBack()

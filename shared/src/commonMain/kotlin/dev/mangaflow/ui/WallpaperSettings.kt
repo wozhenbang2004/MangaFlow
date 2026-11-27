@@ -190,7 +190,8 @@ internal fun WallpaperSettings(
                 current == null -> 96.dp
                 else -> (maxWidth / 2.4f).coerceIn(100.dp, 184.dp)
             }
-            val previewModifier = Modifier.fillMaxWidth().height(previewHeight).clip(RoundedCornerShape(16.dp))
+            val previewModifier = Modifier.fillMaxWidth().then(if (desktop && current == null) Modifier.heightIn(min = 132.dp)
+                else Modifier.height(previewHeight)).clip(RoundedCornerShape(16.dp))
                 .background(if (desktop && current != null) colors.background else colors.onSurface.copy(alpha = .045f))
             Box(if (current == null && !desktop) previewModifier
                 .clickable(enabled = !importing, interactionSource = emptyInteraction, indication = null,
@@ -202,9 +203,10 @@ internal fun WallpaperSettings(
                 if (current == null) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Icon(Icons.Outlined.AddPhotoAlternate, null, Modifier.size(28.dp), tint = colors.onSurfaceVariant)
-                        Text(if (desktop) "当前使用默认背景" else "添加壁纸", style = MaterialTheme.typography.bodyMedium,
+                        Icon(Icons.Outlined.AddPhotoAlternate, null, Modifier.size(if (desktop) 24.dp else 28.dp), tint = colors.onSurfaceVariant)
+                        Text(if (desktop) "默认背景" else "添加壁纸", style = MaterialTheme.typography.bodyMedium,
                             color = colors.onSurfaceVariant)
+                        if (desktop) MotionTextButton(onClick = addLocal, enabled = !importing) { Text("选择本地壁纸") }
                     }
                 } else if (desktop && preview.isNullOrBlank()) {
                     Icon(Icons.Outlined.VideoFile, null, Modifier.align(Alignment.Center).size(28.dp),
@@ -230,7 +232,11 @@ internal fun WallpaperSettings(
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(if (importing) "正在添加…" else current?.name ?: "图片 · 静音视频",
                     style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (selected.items.isNotEmpty()) Text("${selected.items.size} 张",
+                if (selected.items.isNotEmpty()) Text(if (desktop && current != null) {
+                    val type = if (current.kind == WallpaperKind.VIDEO) "视频" else "图片"
+                    val index = selected.items.indexOfFirst { it.mediaPath == current.mediaPath }
+                    if (index < 0) type else "$type · ${index + 1} / ${selected.items.size}"
+                } else "${selected.items.size} 张",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
             if (desktop && current != null) Box {
@@ -297,8 +303,7 @@ internal fun WallpaperSettings(
     }, controls = {
       Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (desktop && current == null) {
-            SettingsLinkRow("本地文件", "选择图片或静音视频", Icons.Outlined.AddPhotoAlternate,
-                compact = true, enabled = !importing, onClick = addLocal)
+            PreferenceSectionLabel("更多来源")
             SettingsLinkRow("Steam 创意工坊", "浏览、收藏与订阅", Icons.Outlined.Storefront,
                 compact = true, enabled = !importing, onClick = addFromSteam)
             SettingsLinkRow("连接电脑", "从 Wallpaper Engine 接收", Icons.Outlined.Computer,

@@ -119,20 +119,22 @@ internal fun ReaderSettingsDialog(
         ReaderDialogSurface(surface, backdrop, dialogWindow = !embedded) {
             Column((if (embedded) Modifier.fillMaxSize() else Modifier.heightIn(max = availableHeight))
                 .padding(horizontal = if (embedded) 14.dp else 18.dp)) {
-                ReaderPanelHeading("阅读设置", "关闭设置", onDismiss)
+                if (!embedded) ReaderPanelHeading("阅读设置", "关闭设置", onDismiss)
                 if (desktop) {
                     MotionTabs(desktopPage.ordinal, DesktopReaderSettings.entries.map { it.title },
                         onSelect = { desktopPage = DesktopReaderSettings.entries[it] },
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), controlHeight = 40.dp,
-                        treatment = MotionTabTreatment.Underline)
+                        modifier = Modifier.fillMaxWidth().padding(bottom = if (embedded) 12.dp else 8.dp),
+                        controlHeight = 40.dp * LocalDensity.current.fontScale.coerceAtLeast(1f),
+                        foreground = colors.onSurface, muted = colors.onSurfaceVariant,
+                        treatment = MotionTabTreatment.Underline, selectedFontWeight = FontWeight.SemiBold)
                 }
                 val body: @Composable (DesktopReaderSettings) -> Unit = { page ->
                 val scroll = if (desktop) remember(page) { pageScrolls.getOrPut(page) { ScrollState(0) } }
                     else rememberScrollState()
                 Box(Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth().verticalScroll(scroll)
-                    .padding(end = if (desktop) 10.dp else 0.dp, bottom = 14.dp),
-                    verticalArrangement = Arrangement.spacedBy(22.dp)) {
+                    .padding(start = if (desktop) 2.dp else 0.dp, end = if (desktop) 10.dp else 0.dp, bottom = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (desktop) 20.dp else 22.dp)) {
                     if (!desktop || page == DesktopReaderSettings.READING) ReaderSettingsSection(if (desktop) "阅读布局" else "阅读顺序") {
                         if (desktop) DesktopReadingLayoutChoice(layout) { index ->
                             val pagedMode = if (vertical) preferences.lastPagedMode else preferences.mode

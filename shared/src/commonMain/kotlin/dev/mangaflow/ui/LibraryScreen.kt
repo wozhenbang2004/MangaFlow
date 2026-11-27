@@ -446,7 +446,9 @@ fun LibraryScreen(
                             CopyShelfImportHint(copyNotice, active, importCopy)
                         }
                         if (visibleHistory.isEmpty()) item(key = "empty-history") {
-                            EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
+                            if (desktop) CatalogueState("还没有阅读记录", "读过的作品和上次停下的页码会显示在这里。") {
+                                TextButton(onClick = onDiscover) { Text("去发现") }
+                            } else EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
                         }
                         dates.forEach { (date, books) ->
                             item(key = "reading-date:$date", contentType = "history-day") {
@@ -494,49 +496,51 @@ fun LibraryScreen(
                 } else {
                     BoxWithConstraints(Modifier.fillMaxSize()) {
                         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-                        val available = (maxWidth - 32.dp).coerceAtLeast(1.dp)
-                        val gap = 12.dp
+                        val shelfInset = if (desktop) maxOf((maxWidth - 1360.dp) / 2f, when {
+                            maxWidth >= 900.dp -> 32.dp
+                            maxWidth < 420.dp -> 14.dp
+                            else -> 22.dp
+                        }) else 16.dp
+                        val available = (maxWidth - shelfInset * 2).coerceAtLeast(1.dp)
+                        val gap = if (desktop && maxWidth >= 720.dp) 20.dp else 12.dp
                         val minimumWidth = 94.dp * fontScale
                         val maximum = if (maxWidth >= 840.dp) 6 else if (maxWidth >= 600.dp) 4 else 3
-                        val perShelf = if (desktop) MangaLayout.automaticDesktopColumns(maxWidth, fontScale, gap, 16.dp)
+                        val perShelf = if (desktop) MangaLayout.columns(maxWidth, 8, 150.dp * fontScale, gap, shelfInset)
                             else MangaLayout.columns(maxWidth, maximum, minimumWidth, gap, 16.dp)
                         val bookWidth = (available - gap * (perShelf - 1)) / perShelf
                         val bookHeight = bookWidth / .7f
-                        val wideResume = desktop && available >= 680.dp * fontScale
-                        val resumeColumns = if (wideResume) 3 else 1
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(perShelf),
                             state = favoritesPosition,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(start = 16.dp, end = 16.dp,
-                                top = headerPadding + 8.dp, bottom = 32.dp + bottomInset),
+                            contentPadding = PaddingValues(start = shelfInset, end = shelfInset,
+                                top = headerPadding + if (desktop) 16.dp else 8.dp, bottom = 32.dp + bottomInset),
                             horizontalArrangement = Arrangement.spacedBy(gap),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(if (desktop) 14.dp else 8.dp),
                         ) {
-                            val recent = visibleHistory.take(resumeColumns)
+                            val recent = visibleHistory.take(if (desktop) 3 else 1)
                             if (shelfScope == UnifiedShelfScope.LOCAL && recent.isNotEmpty()) item(
                                 key = "resume-reading", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
                                 Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                        Text("继续阅读", Modifier.weight(1f).semantics { heading() },
-                                            style = MaterialTheme.typography.titleLarge)
+                                        Text("继续阅读", Modifier.weight(1f).padding(bottom = if (desktop) 10.dp else 0.dp)
+                                            .semantics { heading() }, style = if (desktop) browseTitleStyle(24.sp, 31.sp)
+                                                else MaterialTheme.typography.titleLarge)
                                         if (!desktop) TextButton(onClick = { onCancelOpen(); showHistory = true },
                                             enabled = active,
                                             colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
                                             Text("阅读记录", style = MaterialTheme.typography.labelMedium)
                                         }
                                     }
-                                    if (wideResume) DesktopResumeShelf(recent, repository, active, onContinue, onDetails,
+                                    if (desktop) DesktopResumeShelf(recent, repository, active && !showHistory, onContinue, onDetails,
                                         onHistory = { chapterHistoryManga = it })
                                     else ContinueRow(recent.first(), repository, prominent = true,
-                                        onHistory = if (desktop) ({ if (active) chapterHistoryManga = recent.first().manga }) else null,
                                         onContinue = { if (active) onContinue(it) })
                                 }
                             }
-                            val showCollectionHeading = adultProfile || shelfScope == UnifiedShelfScope.LOCAL &&
-                                (androidManga || desktop && recent.isNotEmpty())
+                            val showCollectionHeading = desktop || adultProfile || shelfScope == UnifiedShelfScope.LOCAL && androidManga
                             if (showCollectionHeading && visibleFavorites.isNotEmpty()) item(
                                 key = if (adultProfile) "adult-shelf-section" else "shelf-collection-section", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
@@ -545,8 +549,12 @@ fun LibraryScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                                     if (siteSource != null) ChapterSourceLogo(siteSource.id, siteSource.name, Modifier.size(19.dp))
-                                    Text(if (siteSource == null) "我的收藏" else "${siteSource.name}收藏",
-                                        Modifier.weight(1f, fill = false).semantics { heading() }, style = MaterialTheme.typography.titleLarge,
+                                    Text(when {
+                                        siteSource != null -> "${siteSource.name}收藏"
+                                        desktop && shelfScope == UnifiedShelfScope.COPY -> "拷贝收藏"
+                                        else -> "我的收藏"
+                                    }, Modifier.weight(1f, fill = false).semantics { heading() },
+                                        style = if (desktop) browseTitleStyle(22.sp, 29.sp) else MaterialTheme.typography.titleLarge,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(visibleFavorites.size.toString() + if (siteShelf?.nextPage != null) "+" else "",
                                         style = mangaMetricValueStyle(),
@@ -623,6 +631,11 @@ fun LibraryScreen(
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
                                 when {
+                                    shelfScope == UnifiedShelfScope.LOCAL && desktop -> CatalogueState("还没有收藏的漫画",
+                                        "在作品详情点收藏，漫画就会加入书架。", Modifier.background(
+                                            MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(14.dp)).padding(10.dp)) {
+                                        TextButton(onClick = onDiscover) { Text("去发现") }
+                                    }
                                     shelfScope == UnifiedShelfScope.LOCAL -> EmptyBookshelf(onDiscover, androidManga)
                                     onAddCloudFavorite == null && onOpenAccount != null ->
                                         EmptyMessage("登录拷贝账号", "登录后，这里显示拷贝收藏。", "去登录", onOpenAccount)
@@ -731,7 +744,8 @@ fun LibraryScreen(
                                             .padding(start = 1.dp, end = 1.dp, top = 8.dp, bottom = 9.dp)) {
                                             Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                                                 style = MaterialTheme.typography.titleSmall.copy(lineBreak = LineBreak.Heading),
-                                                fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold,
+                                                fontSize = if (desktop) 16.sp else 15.sp, lineHeight = if (desktop) 22.sp else 20.sp,
+                                                fontWeight = FontWeight.SemiBold,
                                                 minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                             // An adopted cloud chapter has no observed local page cursor.
                                             val progressText = preferred?.chapterTitle?.ifBlank { "继续阅读" } ?: saved?.let {

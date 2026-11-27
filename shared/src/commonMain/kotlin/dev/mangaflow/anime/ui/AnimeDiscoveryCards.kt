@@ -221,7 +221,7 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
         }
     } else null
     val artworkProvider = item.coverProvider ?: provider
-    val gridCaption = if (!list && primaryScore != null && schedule == null &&
+    val gridCaption = if (platformKind != PlatformKind.DESKTOP && !list && primaryScore != null && schedule == null &&
         !query.calendar && query.season == null) "" else caption
     AnimeCompactCoverCard(item.key, item.title, item.coverUrl, gridCaption, animeDiscoverySourceId(artworkProvider),
         fallbackCover = item.subject?.coverUrl?.takeIf { artworkProvider == AnimeDiscoveryProvider.BANGUMI },
@@ -332,19 +332,36 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
             }
         }
     } else {
+        val desktop = platformKind == PlatformKind.DESKTOP
         Column(click) {
             if (showPoster) AnimePoster(cover, Modifier.fillMaxWidth().aspectRatio(2f / 3f).clearAndSetSemantics { },
                 sourceId, fallbackCover, title)
             Text(title, Modifier.padding(top = 9.dp, start = 1.dp, end = 1.dp).clearAndSetSemantics { },
                 fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp,
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = if (desktop) 16.sp else 15.sp,
+                    lineHeight = if (desktop) 22.sp else 20.sp,
                     lineBreak = LineBreak.Heading), fontWeight = FontWeight.Medium,
                 maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
-            if (ratings != null) Box(Modifier.fillMaxWidth().padding(start = 1.dp, end = 1.dp)) { ratings() }
-            if (caption.isNotBlank() || captionBadge != null)
-                Box(Modifier.fillMaxWidth().padding(top = 3.dp, start = 1.dp, end = 1.dp)) {
-                    AnimeCompactCardCaption(caption, captionBadge, captionLines)
+            if (desktop && ratings != null && caption.isNotBlank() && captionBadge == null) {
+                BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 1.dp)) {
+                    if (maxWidth >= 152.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Box(Modifier.weight(1f)) { AnimeCompactCardCaption(caption, null, captionLines) }
+                            ratings()
+                        }
+                    } else Column {
+                        AnimeCompactCardCaption(caption, null, captionLines)
+                        ratings()
+                    }
                 }
+            } else {
+                if (ratings != null) Box(Modifier.fillMaxWidth().padding(horizontal = 1.dp)) { ratings() }
+                if (caption.isNotBlank() || captionBadge != null)
+                    Box(Modifier.fillMaxWidth().padding(top = 3.dp, start = 1.dp, end = 1.dp)) {
+                        AnimeCompactCardCaption(caption, captionBadge, captionLines)
+                    }
+            }
         }
         }
     }

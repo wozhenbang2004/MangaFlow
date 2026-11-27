@@ -120,11 +120,11 @@ internal fun DownloadBookRow(
     val manga = entries.first().manga
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
-    val coverFrame = if (inspectMode) Modifier.size(38.dp, 54.dp).mangaCoverCard(7.dp, shadowRadius = 5.dp)
+    val coverFrame = if (inspectMode) Modifier.size(42.dp, 58.dp).mangaCoverCard(6.dp, shadowRadius = 2.dp)
         else Modifier.size(52.dp, 74.dp).mangaCoverCard(9.dp, shadowRadius = 6.dp)
     val chosen = if (managing) selected else expanded
     val directoryRow = if (!inspectMode) Modifier else Modifier.clip(RoundedCornerShape(9.dp))
-        .then(if (chosen) Modifier.background(colors.secondaryContainer) else Modifier)
+        .then(if (chosen) Modifier.background(colors.primary.copy(alpha = .105f)) else Modifier)
         .semantics { this.selected = chosen }
     val rotation by animateFloatAsState(if (expanded && !inspectMode) 180f else 0f,
         if (LocalMotionEnabled.current) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(),
@@ -160,7 +160,7 @@ internal fun DownloadBookRow(
                         downloadTransferPhaseLabel(it, downloadObservationTime(entries, active))
                     }
                     Text(mangaNumberText(listOfNotNull("$complete/${entries.size} 话已保存", phase).joinToString(" · ")),
-                        style = MaterialTheme.typography.labelSmall, color = if (observed?.status == DownloadStatus.FAILED)
+                        style = MaterialTheme.typography.bodySmall, color = if (observed?.status == DownloadStatus.FAILED)
                             colors.error else colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 } else DownloadInlineTransferSummary(entries, active, if (managing) null else onInspect)
                 DownloadProgressLine(entries)
@@ -206,6 +206,7 @@ internal fun DownloadChapterRow(
     active: Boolean = true,
     onInspect: ((DownloadEntry) -> Unit)? = null,
     enhancementTasks: List<ReaderChapterEnhancementTask> = emptyList(),
+    alignedStatus: Boolean = false,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val actions = buildList {
@@ -223,22 +224,50 @@ internal fun DownloadChapterRow(
         onLongClickLabel = "管理这一话", onLongClick = onManage)
         .motionPress(interaction, pressedScale = .99f)
         .clip(RoundedCornerShape(10.dp))
-        .background(if (selected) colors.primaryContainer else colors.surfaceContainerLow)
+        .then(when {
+            selected -> Modifier.background(if (desktop) colors.primary.copy(alpha = .11f) else colors.primaryContainer)
+            !desktop -> Modifier.background(colors.surfaceContainerLow)
+            else -> Modifier
+        })
         .padding(start = 13.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = if (alignedStatus) 48.dp else 44.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(if (alignedStatus) 1.1f else 1f).padding(end = if (alignedStatus) 16.dp else 0.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(entry.chapter.title, fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
-                    color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    color = colors.onSurface, maxLines = if (alignedStatus) 2 else 1, overflow = TextOverflow.Ellipsis)
                 val source = dev.mangaflow.data.sourceDisplayName(
                     dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id).sourceId)
-                DownloadInlineTransferSummary(listOf(entry), active, if (managing) null else onInspect, source)
-                DownloadProgressLine(listOf(entry))
-                DownloadEnhancementSummary(listOf(entry), enhancementTasks, if (managing) null else onInspect)
+                if (alignedStatus) Text(source, style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                else {
+                    DownloadInlineTransferSummary(listOf(entry), active, if (managing) null else onInspect, source)
+                    DownloadProgressLine(listOf(entry))
+                    DownloadEnhancementSummary(listOf(entry), enhancementTasks, if (managing) null else onInspect)
+                }
+            }
+            if (alignedStatus) {
+                val stats = listOf(entry)
+                val now = downloadObservationTime(stats, active)
+                val inspector = remember(entry.id) { MutableInteractionSource() }
+                Column(Modifier.weight(1f).heightIn(min = 44.dp).then(if (onInspect != null && !managing)
+                    Modifier.clickable(interactionSource = inspector, indication = null, role = Role.Button,
+                        onClickLabel = "查看下载状态与线路", onClick = { onInspect(entry) }).motionPress(inspector)
+                    else Modifier).padding(end = 12.dp), verticalArrangement = Arrangement.Center) {
+                    Text(downloadTransferPhaseLabel(entry, now), style = MaterialTheme.typography.labelLarge,
+                        color = if (entry.status == DownloadStatus.FAILED) colors.error else colors.onSurface,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    val bytes = if (entry.status == DownloadStatus.COMPLETED) downloadBytes(entry.downloadedBytes)
+                        else downloadTransferByteLabel(entry, now)
+                    Text(mangaNumberText(listOf(downloadPageProgress(stats), bytes).filter { it.isNotBlank() }.joinToString(" · ")),
+                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    DownloadProgressLine(stats)
+                }
             }
             if (managing) DownloadSelection(selected, onSelect)
             else DownloadTransferAction(listOf(entry), refreshingIds, { group -> group.forEach(onPause) }, { group -> group.forEach(onRetry) })
             if (desktop) DesktopMoreButton(actions, "章节下载操作")
         }
+        if (alignedStatus) DownloadEnhancementSummary(listOf(entry), enhancementTasks, if (managing) null else onInspect)
         if (!managing && onInspect == null && entry.error.isNotBlank()) DownloadFailureDetails(entry.error)
     }
     }

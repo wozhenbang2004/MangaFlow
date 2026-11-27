@@ -125,14 +125,17 @@ internal fun AnimeFeaturedCarousel(
         val indexWidth = if (indexVisible) (maxWidth * .32f).coerceIn(246.dp, 348.dp) else 0.dp
         val indexSpace = if (indexVisible) indexWidth + 22.dp else 0.dp
         val galleryWidth = maxWidth - indexSpace
-        val galleryInset = if (indexVisible || hasCompanion) 0.dp else ((galleryWidth - 700.dp) / 2f).coerceAtLeast(0.dp)
-        val peek = if (entries.size > 1 && !indexVisible) 18.dp else 0.dp
+        val galleryLimit = if (desktop) 1020.dp else 700.dp
+        val galleryInset = if (indexVisible || hasCompanion) 0.dp else ((galleryWidth - galleryLimit) / 2f).coerceAtLeast(0.dp)
+        val peek = if (!desktop && entries.size > 1 && !indexVisible) 18.dp else 0.dp
         val preferredWidth = (galleryWidth - galleryInset * 2 - peek).coerceAtLeast(1.dp)
         val compactLayout = preferredWidth < 272.dp * fontScale || fontScale > 1.35f
         val footerHeight = if (entries.size == 1) 0.dp else if (desktop) 44.dp else 10.dp
         val itemHeight = when {
             compactLayout -> 110.dp + 82.dp * fontScale
             window.shortHeight -> (window.height * .42f).coerceIn(136.dp, 192.dp)
+            desktop -> minOf((window.height * .39f).coerceIn(224.dp, 344.dp),
+                (preferredWidth * .57f).coerceAtLeast(206.dp))
             indexVisible || hasCompanion -> (window.height * .33f).coerceIn(194.dp, 316.dp)
             else -> (preferredWidth * .63f).coerceIn(174.dp, 270.dp)
         }
@@ -212,7 +215,7 @@ internal fun AnimeFeaturedCarousel(
                         val scale = if (motion) .978f + .022f * emphasis() else 1f
                         scaleX = scale
                         scaleY = scale
-                    }.mangaCoverCard(20.dp, shadowRadius = 11.dp),
+                    }.mangaCoverCard(if (desktop) 17.dp else 20.dp, shadowRadius = if (desktop) 4.dp else 11.dp),
                     offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
                         (if (rtl) -1f else 1f) else 0f },
                     useGlass = visible && acceptTap && settled && readyCovers[key] == true,
@@ -336,30 +339,35 @@ private fun AnimeFeaturedCard(
     LaunchedEffect(entry.key, hue) { hue?.let(reportTint) }
     val paper = hue?.let { lerp(colors.surface, it, if (colors.surface.luminance() > .5f) .085f else .12f) }
         ?: colors.surface
-    val imageGround = hue?.let { lerp(paper, it, .32f) } ?: paper
+    val desktopSpread = platformKind == PlatformKind.DESKTOP && !stacked
+    val imageGround = hue?.let { lerp(paper, it, if (desktopSpread) .15f else .32f) } ?: paper
     val coverGlass = rememberHazeState()
     val frame = painter.intrinsicSize
     val landscape = frame != Size.Unspecified && frame.width.isFinite() && frame.height > 0f &&
         frame.width / frame.height >= 1.18f
-    val panoramic = !stacked && landscape && !accessibility.reduceTransparency && !accessibility.increaseContrast
-    val seamAllowed = !panoramic && !accessibility.reduceTransparency && !accessibility.increaseContrast
+    val panoramic = !desktopSpread && !stacked && landscape && !accessibility.reduceTransparency && !accessibility.increaseContrast
+    val seamAllowed = !desktopSpread && !panoramic && !accessibility.reduceTransparency && !accessibility.increaseContrast
     val seamTransition = updateTransition(useGlass && seamAllowed, label = "anime-art-seam")
     val seamAlpha = seamTransition.animateFloat(transitionSpec = { if (motion) tween(MangaMotion.Quick) else snap() },
         label = "seam-opacity") { if (it) 1f else 0f }
     val fadingSeam by remember(seamAlpha) { derivedStateOf { seamAlpha.value > .003f } }
     val sampleSeam = seamAllowed && (useGlass || fadingSeam)
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-    Box(modifier.background(paper).clickable(interactionSource = interaction, indication = null, role = Role.Button,
+    BoxWithConstraints(modifier.background(paper).clickable(interactionSource = interaction, indication = null, role = Role.Button,
         enabled = enabled, onClickLabel = actionLabel, onClick = { onOpen(entry) })
         .semantics(mergeDescendants = true) {
             contentDescription = listOf(entry.title, entry.caption).filter(String::isNotBlank).joinToString("，")
         }.motionPress(interaction, enabled = enabled, pressedScale = .985f)) {
+        val textScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val spacious = desktopSpread && maxWidth >= 448.dp * textScale && maxHeight >= 220.dp * textScale
+        val tallSpread = spacious && maxHeight >= 260.dp * textScale
         val art: @Composable (Modifier) -> Unit = { area ->
             Box(area.clipToBounds().background(imageGround), contentAlignment = Alignment.Center) {
                 if (decoded == null) Icon(Icons.Outlined.Tv, null, Modifier.size(26.dp), tint = colors.onSurfaceVariant)
                 Image(painter, contentDescription = null, contentScale = if (landscape) ContentScale.Crop else ContentScale.Fit,
                     alignment = if (landscape) BiasAlignment(0f, -.35f) else Alignment.Center,
-                    modifier = Modifier.matchParentSize()
+                    modifier = (if (desktopSpread && !landscape) Modifier.fillMaxHeight(.86f)
+                        .aspectRatio(2f / 3f).mangaCoverCard(6.dp, shadowRadius = 4.dp) else Modifier.matchParentSize())
                         .then(if (sampleSeam) Modifier.mangaHazeSource(coverGlass) else Modifier)
                         .graphicsLayer {
                             if (motion && landscape) {
@@ -401,7 +409,8 @@ private fun AnimeFeaturedCard(
                     translationX = distance * (if (stacked) 6.dp else 10.dp).toPx()
                     alpha = if (accessibility.increaseContrast) 1f else 1f - .16f * abs(distance)
                 }
-            }.padding(horizontal = if (stacked) 14.dp else 17.dp, vertical = if (stacked) 8.dp else 14.dp),
+            }.padding(horizontal = if (spacious) 24.dp else if (stacked) 14.dp else 17.dp,
+                vertical = if (stacked) 8.dp else 14.dp),
                 verticalArrangement = if (stacked) Arrangement.spacedBy(3.dp) else Arrangement.Center) {
                 if (!stacked && entry.caption.isNotBlank()) {
                     Text(entry.caption, Modifier.clearAndSetSemantics { }, color = colors.onSurfaceVariant,
@@ -410,8 +419,9 @@ private fun AnimeFeaturedCard(
                     Spacer(Modifier.height(7.dp))
                 }
                 Text(entry.title, Modifier.fillMaxWidth().clearAndSetSemantics { }, color = colors.onSurface,
-                    style = animeWorkTitleStyle(large = true).copy(fontSize = if (stacked) 21.sp else 24.sp,
-                        lineHeight = if (stacked) 26.sp else 30.sp), maxLines = if (stacked) 2 else 3,
+                    style = animeWorkTitleStyle(large = true).copy(fontSize = if (spacious) 34.sp else if (stacked) 21.sp else 24.sp,
+                        lineHeight = if (spacious) 41.sp else if (stacked) 26.sp else 30.sp),
+                    maxLines = if (stacked || spacious && !tallSpread) 2 else 3,
                     overflow = TextOverflow.Ellipsis)
                 if (primaryScore != null || stacked && entry.caption.isNotBlank()) {
                     if (!stacked) Spacer(Modifier.height(8.dp))
@@ -424,11 +434,24 @@ private fun AnimeFeaturedCard(
                             onScores = ({ onOpenScores(entry.copy(discoveryItem = item.copy(sourceScores = scores))) }).takeIf { scoresEnabled })
                     }
                 }
+                if (tallSpread) {
+                    Spacer(Modifier.height(14.dp))
+                    Row(Modifier.clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(actionLabel, style = MaterialTheme.typography.labelLarge, color = colors.onSurface)
+                        Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.size(15.dp), tint = colors.onSurface)
+                    }
+                }
             }
         }
         if (stacked) Column(Modifier.fillMaxSize()) {
             art(Modifier.fillMaxWidth().weight(1f))
             information(Modifier.fillMaxWidth())
+        } else if (desktopSpread) {
+            Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+                art(Modifier.weight(if (landscape) 1.12f else .83f).fillMaxHeight())
+                information(Modifier.weight(1f).fillMaxHeight())
+            }
         } else {
             if (panoramic) {
                 art(Modifier.matchParentSize())
