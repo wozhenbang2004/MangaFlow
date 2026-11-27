@@ -62,6 +62,8 @@ internal data class AnimeLineHealth(
     val sustainedPlaybackSamples: Int = 0,
     val sustainedPlaybackStalls: Int = 0,
     val firstFrameSamples: Int = 0,
+    val nativeAdvanceP50Ms: Long? = null,
+    val nativeAdvanceSamples: Int = 0,
 ) {
     val hasPlaybackHistory get() = startupSucceeded + startupFailed + sustainedPlaybackSamples > 0
     val hasWorkingHistory get() = startupSucceeded > startupFailed || sustainedPlaybackSamples > 2 * sustainedPlaybackStalls
@@ -72,14 +74,13 @@ internal data class AnimeLineHealth(
 
     /** At comparable quality, displace the last working line only for a measured, stable advantage. */
     fun startsNoticeablyFasterThan(previous: AnimeLineHealth?): Boolean {
-        val frame = firstFrameP50Ms ?: return false
-        val previousFrame = previous?.firstFrameP50Ms ?: return false
-        if (firstFrameSamples < 2 || previous.firstFrameSamples < 2 || repeatedPlaybackTrouble ||
-            startupSucceeded <= startupFailed) return false
+        if (previous == null || repeatedPlaybackTrouble || startupSucceeded <= startupFailed) return false
+        val compareFrames = firstFrameSamples >= 2 && previous.firstFrameSamples >= 2
+        if (!compareFrames && (nativeAdvanceSamples < 2 || previous.nativeAdvanceSamples < 2)) return false
         val stable = sustainedPlaybackSamples > 2 * sustainedPlaybackStalls || earlyPlaybackSamples > earlyStallCount + earlyFailures
         if (!stable) return false
-        var ours = frame
-        var theirs = previousFrame
+        var ours = (if (compareFrames) firstFrameP50Ms else nativeAdvanceP50Ms) ?: return false
+        var theirs = (if (compareFrames) previous.firstFrameP50Ms else previous.nativeAdvanceP50Ms) ?: return false
         if (addressP50Ms != null && previous.addressP50Ms != null) {
             ours += addressP50Ms
             theirs += previous.addressP50Ms
@@ -170,7 +171,10 @@ internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineSc
 
     fun recordAddress(key: AnimeLineHealthKey, elapsedMs: Long) = record(key, Kind.ADDRESS, elapsedMs)
     fun recordFirstFrame(key: AnimeLineHealthKey, elapsedMs: Long) = record(key, Kind.FIRST_FRAME, elapsedMs)
-    fun recordPlayableOutput(key: AnimeLineHealthKey) = record(key, Kind.PLAYABLE_OUTPUT, 0L)
+    // Zero is the original success-only record. A positive duration times source-backed
+    // native video clock movement, independently of a presented FIRST_FRAME.
+    fun recordPlayableOutput(key: AnimeLineHealthKey, nativeAdvanceMs: Long?) =
+        record(key, Kind.PLAYABLE_OUTPUT, nativeAdvanceMs?.takeIf { it in 1L..HEALTH_MAX_SAMPLE_MS } ?: 0L)
     fun recordStartupFailure(key: AnimeLineHealthKey) = record(key, Kind.STARTUP_FAILURE, 0L)
     fun recordEarlyPlayback(key: AnimeLineHealthKey, rebufferMs: Long) = record(key, Kind.EARLY_REBUFFER, rebufferMs)
     fun recordEarlyFailure(key: AnimeLineHealthKey) = record(key, Kind.EARLY_FAILURE, 0L)
@@ -195,6 +199,7 @@ internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineSc
             window.filter { now - it.time < HEALTH_RECENT_AGE_MS }.takeIf { it.size >= 3 } ?: window
         }
         val starts = rows.filter { it.kind == Kind.FIRST_FRAME }.map { it.value }
+        val nativeAdvances = rows.filter { it.kind == Kind.PLAYABLE_OUTPUT && it.value > 0L }.map { it.value }
         val rebuffer = rows.filter { it.kind == Kind.EARLY_REBUFFER }.map { it.value }
         val heights = rows.filter { it.kind == Kind.DECODED_HEIGHT }.map { it.value }.sorted()
         val health = AnimeLineHealth(starts.size + rows.count { it.kind == Kind.PLAYABLE_OUTPUT },
@@ -203,7 +208,7 @@ internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineSc
             rebuffer.size, rebuffer.count { it > 0L }, median(rebuffer),
             heights.getOrNull((heights.size - 1) / 2)?.toInt(), rows.count { it.kind == Kind.EARLY_FAILURE },
             rows.count { it.kind.window == Window.SUSTAINED_PLAYBACK }, rows.count { it.kind == Kind.SUSTAINED_STALL },
-            firstFrameSamples = starts.size)
+            firstFrameSamples = starts.size, nativeAdvanceP50Ms = median(nativeAdvances), nativeAdvanceSamples = nativeAdvances.size)
         val expiresAt = observations.minOf { observation ->
             when {
                 observation.time > now -> observation.time
