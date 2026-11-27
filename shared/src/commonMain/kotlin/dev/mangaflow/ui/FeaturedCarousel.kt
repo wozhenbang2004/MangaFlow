@@ -75,14 +75,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
@@ -100,6 +98,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Constraints
@@ -148,15 +147,14 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
         val androidEditorial = platformKind == PlatformKind.ANDROID && !showSource
         val galleryHeight = when {
             window.shortHeight -> (window.height * .5f).coerceIn(164.dp, 220.dp)
-            androidEditorial -> (window.height * .28f).coerceIn(188.dp, 232.dp)
+            androidEditorial -> (window.height * .30f).coerceIn(192.dp, 232.dp)
             else -> (window.height / 3f).coerceIn(220.dp, 280.dp)
         }
-        val preferredWidth = minOf(galleryWidth, (galleryWidth * .82f).coerceAtMost(304.dp))
-        val inlineInformation = preferredWidth >= 224.dp && fontScale <= 1.3f
+        val preferredWidth = (galleryWidth * .85f).coerceAtMost(352.dp)
+        val inlineInformation = preferredWidth >= 224.dp * fontScale
         val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
-        val captionHeight = if (inlineInformation) 0.dp else
-            (10f + (17f * titleLines + 22f) * fontScale).dp.coerceAtMost(galleryHeight - 96.dp)
         val itemHeight = galleryHeight - 22.dp
+        val captionHeight = if (inlineInformation) 0.dp else featuredCaptionHeight(itemHeight, titleLines, fontScale)
         val artworkHeight = (itemHeight - captionHeight).coerceAtLeast(1.dp)
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
         if (manga.isEmpty()) {
@@ -239,7 +237,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                         val scale = if (motion) .92f + .08f * emphasis() else 1f
                         scaleX = scale; scaleY = scale
                         alpha = .72f + .28f * emphasis()
-                    }.mangaCoverCard(22.dp),
+                    }.mangaCoverCard(22.dp, shadowRadius = 16.dp),
                     emphasis = emphasis, settled = settled, scrolling = state.isScrollInProgress,
                     offset = { (index - position.value).coerceIn(-1f, 1f) },
                     onPreview = { scope.launch {
@@ -250,20 +248,23 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                     onRatings = onRatings, showSource = showSource)
             }
             Box(Modifier.fillMaxWidth().height(4.dp), contentAlignment = Alignment.Center) {
-                val color = MaterialTheme.colorScheme.onSurface
-                if (manga.size > 1) Canvas(Modifier.size(width = (manga.size * 16).dp, height = 4.dp).clearAndSetSemantics { }) {
+                val ink = MaterialTheme.colorScheme.onSurface
+                val strongContrast = LocalGlassAccessibilitySettings.current.increaseContrast
+                if (manga.size > 1) Canvas(Modifier.size(width = (manga.size * 14 + 4).dp, height = 4.dp).clearAndSetSemantics { }) {
                     val slot = size.width / manga.size
                     val page = position.value
                     val visualPage = if (rtl) manga.lastIndex - page else page
                     repeat(manga.size) { index ->
                         val distance = abs(index - visualPage).coerceAtMost(1f)
-                        drawCircle(color.copy(alpha = .15f * distance), radius = size.height / 2f,
+                        drawCircle(ink.copy(alpha = (if (strongContrast) .48f else .22f) * distance),
+                            radius = if (strongContrast) size.height / 2f else 1.4.dp.toPx(),
                             center = Offset((index + .5f) * slot, size.height / 2f))
                     }
                     val center = (visualPage + .5f) * slot
                     val fraction = page - floor(page)
                     val width = 14.dp.toPx() + if (motion) 4.dp.toPx() * (4f * fraction * (1f - fraction)) else 0f
-                    drawRoundRect(color.copy(alpha = .60f), topLeft = Offset(center - width / 2f, 0f),
+                    val activeInk = if (strongContrast) ink else lerp(ink, atmosphere.value, .24f)
+                    drawRoundRect(activeInk, topLeft = Offset(center - width / 2f, 0f),
                         size = Size(width, size.height), cornerRadius = CornerRadius(size.height / 2f))
                 }
             }
@@ -318,10 +319,9 @@ private fun DesktopFeaturedRecommendations(
         }
         val decodeWidth = decodePixels(cardWidth)
         val decodeHeight = decodePixels(cardHeight)
-        val inlineInformation = cardWidth >= 224.dp && fontScale <= 1.3f
+        val inlineInformation = cardWidth >= 224.dp * fontScale
         val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
-        val captionHeight = if (inlineInformation) 0.dp else
-            (10f + (17f * titleLines + 22f) * fontScale).dp.coerceAtMost(cardHeight - 96.dp)
+        val captionHeight = if (inlineInformation) 0.dp else featuredCaptionHeight(cardHeight, titleLines, fontScale)
         val inlinePages = maxWidth >= 480.dp
         Column(Modifier.fillMaxWidth().semantics { paneTitle = "精选推荐" }
             .onPreviewKeyEvent { event ->
@@ -369,7 +369,7 @@ private fun DesktopFeaturedRecommendations(
                                         decodeWidth, decodeHeight,
                                         color = color, atmosphere = color,
                                         onColor = { extracted[entry.coverUrl] = it }, onReady = {},
-                                        modifier = Modifier.fillMaxSize().mangaCoverCard(22.dp),
+                                        modifier = Modifier.fillMaxSize().mangaCoverCard(22.dp, shadowRadius = 16.dp),
                                         emphasis = { 1f }, settled = true, scrolling = false, offset = { 0f }, onPreview = {},
                                         enabled = visible, onOpen = onOpen, onRatings = onRatings, showSource = showSource)
                                 }
@@ -400,6 +400,9 @@ private fun DesktopRecommendationPages(count: Int, page: Int, enabled: Boolean, 
         }
     }
 }
+
+private fun featuredCaptionHeight(cardHeight: Dp, titleLines: Int, fontScale: Float): Dp =
+    (10f + (23f * titleLines + 22f) * fontScale).dp.coerceAtMost((cardHeight - 36.dp).coerceAtLeast(0.dp))
 
 @Composable
 private fun FeaturedManga(
@@ -456,14 +459,11 @@ private fun FeaturedManga(
     // The peek and fitted poster share one bounded Coil decode and the original request headers.
     val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit,
         onSuccess = { decoded = it.result.image; latestOnReady() })
-    val coverTone = color.value
-    val fieldAlpha = .32f
-    val pageTone = MaterialTheme.colorScheme.background
-    val fieldTone = coverTone.copy(alpha = fieldAlpha).compositeOver(pageTone)
-    val textBase = lerp(fieldTone, coverTone, .15f)
-    val lightInk = textBase.luminance() < .20f
-    val ink = if (lightInk) Color.White else Color(0xFF151717)
-    val captionTone = lerp(textBase, if (lightInk) Color.Black else Color.White, .08f)
+    val theme = MaterialTheme.colorScheme
+    val paper = lerp(theme.background, theme.surface, .65f)
+    val ink = theme.onSurface
+    val secondaryInk = if (accessibility.increaseContrast) ink else lerp(ink, paper, .23f)
+    val lightPaper = paper.luminance() > .5f
     val information = {
         val t = ((emphasis() - .16f) / .56f).coerceIn(0f, 1f)
         t * t * (3f - 2f * t)
@@ -479,15 +479,15 @@ private fun FeaturedManga(
         }.semantics(mergeDescendants = true) { contentDescription = manga.title }
         .motionPress(interaction, enabled = acceptsTap, pressedScale = .985f)) {
         BoxWithConstraints(Modifier.matchParentSize()) {
-            val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+            val density = LocalDensity.current
+            val fontScale = density.fontScale.coerceAtLeast(1f)
             val intrinsic = painter.intrinsicSize
             val aspect = if (intrinsic != Size.Unspecified && intrinsic.width.isFinite() && intrinsic.height.isFinite() &&
                 intrinsic.width > 0f && intrinsic.height > 0f)
                 intrinsic.width / intrinsic.height else 2f / 3f
-            val pictureHeight = (maxHeight - if (inlineInformation) 12.dp else captionHeight + 10.dp)
-                .coerceAtLeast(1.dp)
+            val pictureHeight = (maxHeight - if (inlineInformation) 12.dp else captionHeight + 8.dp).coerceAtLeast(1.dp)
             val pictureRoom = if (inlineInformation)
-                minOf(maxWidth * .52f, (maxWidth - 24.dp - 88.dp * fontScale).coerceAtLeast(1.dp))
+                minOf(maxWidth * .53f, (maxWidth - 30.dp - 102.dp * fontScale).coerceAtLeast(1.dp))
                 else (maxWidth - 12.dp).coerceAtLeast(1.dp)
             val posterWidth = minOf(pictureRoom, pictureHeight * aspect)
             val posterHeight = posterWidth / aspect
@@ -495,12 +495,32 @@ private fun FeaturedManga(
                 else (maxWidth - posterWidth) / 2f
             val posterTop = 6.dp + (pictureHeight - posterHeight) / 2f
             // Keep the text column stationary while the real aspect becomes known.
-            val infoLeft = if (inlineInformation) 6.dp + pictureRoom + 12.dp else 0.dp
+            val infoLeft = if (inlineInformation) 6.dp + pictureRoom + 11.dp else 12.dp
             val infoTop = if (inlineInformation) 6.dp else maxHeight - captionHeight
-            val infoWidth = (maxWidth - infoLeft - if (inlineInformation) 8.dp else 0.dp).coerceAtLeast(1.dp)
+            val infoWidth = (maxWidth - infoLeft - 12.dp).coerceAtLeast(1.dp)
             val infoHeight = if (inlineInformation) maxHeight - 12.dp else captionHeight
-            Box(Modifier.matchParentSize().drawBehind {
-                drawRect(if (solidCaption) captionTone else lerp(coverTone, atmosphere.value, .15f).copy(alpha = fieldAlpha))
+            Box(Modifier.matchParentSize().drawWithCache {
+                val rtl = layoutDirection == LayoutDirection.Rtl
+                val right = Offset(size.width, 0f)
+                val start = if (inlineInformation && rtl) right else Offset.Zero
+                val end = if (!inlineInformation) Offset(0f, size.height) else if (rtl) Offset.Zero else right
+                val ground = Brush.linearGradient(listOf(paper.copy(alpha = .56f), paper.copy(alpha = .95f)), start, end)
+                val pigment = lerp(color.value, atmosphere.value, .12f)
+                val seam = (6.dp + pictureRoom).toPx().coerceIn(0f, size.width)
+                val center = if (inlineInformation)
+                    Offset(if (rtl) size.width - seam else seam, size.height * .54f)
+                else Offset(size.width * .5f, infoTop.toPx())
+                val radius = (size.width * if (inlineInformation) .52f else .72f).coerceAtLeast(1f)
+                val reachY = size.height * if (inlineInformation) .94f else .34f
+                val glow = Brush.radialGradient(0f to pigment.copy(alpha = if (lightPaper) .42f else .31f),
+                    .48f to pigment.copy(alpha = if (lightPaper) .20f else .13f),
+                    1f to pigment.copy(alpha = 0f), center = center, radius = radius)
+                onDrawBehind {
+                    if (solidCaption || size.width <= 0f || size.height <= 0f) drawRect(paper) else {
+                        drawRect(ground)
+                        scale(1f, reachY / radius, center) { drawCircle(glow, radius, center) }
+                    }
+                }
             })
             // A single artwork window grows from a cropped edge preview to the complete poster.
             // Only this child remeasures as the finger moves. The decode and the caption stay fixed.
@@ -525,34 +545,60 @@ private fun FeaturedManga(
                 Image(painter, contentDescription = null, modifier = Modifier.matchParentSize(),
                     contentScale = if (settled && (!scrolling || !motion)) ContentScale.Fit else ContentScale.Crop)
             }
-            Box(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight),
-                contentAlignment = if (inlineInformation) Alignment.CenterStart else Alignment.BottomStart) {
-                Column(Modifier.fillMaxWidth().drawWithCache {
-                    // Feather around the measured title and metrics. Logical placement follows RTL;
-                    // the parent card clips the falloff when the artwork travels under the caption.
-                    val radiusX = size.width / 2f + 8.dp.toPx()
-                    val radiusY = size.height / 2f + (if (inlineInformation) 8.dp else 2.dp).toPx()
-                    val midpoint = Offset(size.width / 2f, size.height / 2f)
-                    val wash = Brush.radialGradient(0f to captionTone, .68f to captionTone.copy(alpha = .95f),
-                        1f to captionTone.copy(alpha = 0f), center = midpoint, radius = radiusX)
-                    onDrawBehind {
-                        if (solidCaption) drawRect(captionTone, alpha = information())
-                        else scale(1f, radiusY / radiusX, midpoint) {
-                            drawCircle(wash, radiusX, midpoint, alpha = information())
-                        }
-                    }
-                }.graphicsLayer {
+            val titleSize = when {
+                !inlineInformation -> 18.sp
+                infoWidth >= 148.dp * fontScale -> 25.sp
+                infoWidth >= 108.dp * fontScale -> 22.sp
+                else -> 19.sp
+            }
+            val lineHeight = if (inlineInformation) (titleSize.value * 1.25f).sp else 23.sp
+            val captionInset = if (inlineInformation) 8.dp else 4.dp
+            val author = remember(manga.authors) {
+                manga.authors.filter(String::isNotBlank).distinct().joinToString("、")
+            }
+            val showAuthor = inlineInformation && !showSource && author.isNotEmpty() &&
+                infoWidth >= 102.dp * fontScale && infoHeight >= 155.dp * fontScale
+            val footerRoom = 22.dp * fontScale + 2.dp
+            val authorRoom = if (showAuthor) 4.dp + 17.dp * fontScale else 0.dp
+            val titleRoom = (infoHeight - captionInset * 2 - footerRoom - authorRoom).coerceAtLeast(0.dp)
+            val lines = (titleRoom / with(density) { lineHeight.toDp() }).toInt()
+                .coerceIn(1, if (inlineInformation) 3 else titleLines)
+            Box(Modifier.matchParentSize().drawWithCache {
+                // When the poster travels under the copy, feather the page under its ink.
+                // The resting spread already has a clean text column.
+                val edge = if (inlineInformation) infoLeft.toPx() else infoTop.toPx()
+                val before = edge - 18.dp.toPx()
+                val after = edge + 7.dp.toPx()
+                fun point(distance: Float): Offset = when {
+                    !inlineInformation -> Offset(0f, distance)
+                    layoutDirection == LayoutDirection.Rtl -> Offset(size.width - distance, 0f)
+                    else -> Offset(distance, 0f)
+                }
+                val protection = Brush.linearGradient(listOf(paper.copy(alpha = 0f), paper), point(before), point(after))
+                onDrawBehind {
+                    val overlap = ((1f - emphasis()) * 4f).coerceIn(0f, 1f)
+                    val amount = overlap * information()
+                    if (amount > 0f) drawRect(protection, alpha = amount)
+                }
+            }) {
+                Column(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight).graphicsLayer {
                     alpha = information()
                     translationY = if (motion) (1f - information()) * 4.dp.toPx() else 0f
-                }.padding(horizontal = if (inlineInformation) 2.dp else 12.dp)
-                    .padding(vertical = if (inlineInformation) 6.dp else 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(if (inlineInformation) 8.dp else 2.dp)) {
+                }.padding(vertical = captionInset)) {
+                    if (inlineInformation) Spacer(Modifier.weight(.38f))
                     Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), modifier = Modifier.clearAndSetSemantics { }, color = ink,
-                        style = MaterialTheme.typography.titleSmall, fontSize = 14.sp, lineHeight = 20.sp,
-                        fontWeight = FontWeight.Medium, minLines = if (inlineInformation) 1 else titleLines,
-                        maxLines = if (inlineInformation) 3 else titleLines, overflow = TextOverflow.Ellipsis)
-                    if (showSource) MangaBrowseSource(manga, foreground = ink.copy(alpha = .80f))
-                    else MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,
+                        style = MaterialTheme.typography.titleMedium.copy(lineBreak = LineBreak.Heading),
+                        fontSize = titleSize, lineHeight = lineHeight,
+                        letterSpacing = (-.20f).sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = lines, overflow = TextOverflow.Ellipsis)
+                    if (showAuthor) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(author, color = secondaryInk, style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Normal, lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (inlineInformation) Spacer(Modifier.weight(.62f)) else Spacer(Modifier.height(2.dp))
+                    if (showSource) MangaBrowseSource(manga, foreground = secondaryInk)
+                    else MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = secondaryInk, compact = true, plain = true,
                         onExpand = if (acceptsTap && settled && onRatings != null) ({ onRatings(manga) }) else null)
                 }
             }
@@ -565,12 +611,31 @@ internal object FeaturedCoverColors {
     private val cache = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Color>>(emptyMap())
     fun get(url: String): Color? = cache.value[url]
 
+    private class Swatch {
+        var weight = 0f
+            private set
+        private var red = 0f
+        private var green = 0f
+        private var blue = 0f
+
+        fun add(r: Float, g: Float, b: Float, amount: Float) {
+            red += r * amount
+            green += g * amount
+            blue += b * amount
+            weight += amount
+        }
+
+        fun color() = Color(red / weight, green / weight, blue / weight)
+    }
+
     fun extract(url: String, bitmap: Image): Color? {
         get(url)?.let { return it }
         return runCatching {
             if (bitmap.width <= 0 || bitmap.height <= 0) return null
-            var red = 0f; var green = 0f; var blue = 0f; var total = 0f
-            // A small stratified grid favors the actual chromatic artwork over white margins.
+            val fullCover = Swatch()
+            val hues = Array(12) { Swatch() }
+            // Adjacent hue buckets share a sample so reds straddling the hue seam stay together.
+            // A monochrome cover or a tiny coloured logo retains the overall paper tone.
             repeat(20) { row -> repeat(20) { column ->
                 val x = ((column + .5f) * bitmap.width / 20f).toInt().coerceIn(0, bitmap.width - 1)
                 val y = ((row + .5f) * bitmap.height / 20f).toInt().coerceIn(0, bitmap.height - 1)
@@ -578,14 +643,32 @@ internal object FeaturedCoverColors {
                 val r = ((pixel shr 16) and 255) / 255f
                 val g = ((pixel shr 8) and 255) / 255f
                 val b = (pixel and 255) / 255f
-                val chroma = maxOf(r, g, b) - minOf(r, g, b)
-                val weight = ((pixel ushr 24) / 255f) * (.12f + .88f * chroma)
-                red += r * weight; green += g * weight; blue += b * weight; total += weight
+                val alpha = (pixel ushr 24) / 255f
+                fullCover.add(r, g, b, alpha)
+                val peak = maxOf(r, g, b)
+                val chroma = peak - minOf(r, g, b)
+                if (chroma >= .10f) {
+                    val sector = when (peak) {
+                        r -> (g - b) / chroma
+                        g -> (b - r) / chroma + 2f
+                        else -> (r - g) / chroma + 4f
+                    }
+                    val position = ((sector + 6f) % 6f) * 2f
+                    val index = position.toInt()
+                    val fraction = position - index
+                    val weight = alpha * (.35f + .65f * chroma)
+                    hues[index].add(r, g, b, weight * (1f - fraction))
+                    hues[(index + 1) % hues.size].add(r, g, b, weight * fraction)
+                }
             } }
-            if (total <= 0f) null else Color(red / total, green / total, blue / total)
-                .also { color -> cache.update { old ->
+            if (fullCover.weight <= 0f) return null
+            val strongest = hues.maxBy { it.weight }
+            val swatch = if (strongest.weight >= fullCover.weight * .065f) strongest else fullCover
+            swatch.color().also { color ->
+                cache.update { old ->
                     (old + (url to color)).let { if (it.size <= 96) it else it.entries.drop(it.size - 96).associate { e -> e.toPair() } }
-                } }
+                }
+            }
         }.getOrNull()
     }
 }

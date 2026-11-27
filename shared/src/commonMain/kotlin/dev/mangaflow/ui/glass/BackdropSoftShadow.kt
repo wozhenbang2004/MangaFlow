@@ -41,6 +41,15 @@ internal fun Modifier.softSurfaceShadow(shape: Shape, light: Boolean, strength: 
         .then(SoftShadowElement(shape, radius * (5f / 24f), radius / 12f, Color.Black.copy(alpha = (if (light) .025f else .12f) * strength), strengthScale))
 }
 
+/** A narrow contact shadow reads on pale paper and leaves space between the navigation groups. */
+internal fun Modifier.discoveryGlassShadow(shape: Shape, light: Boolean, strength: Float): Modifier {
+    if (strength <= 0f) return this
+    val ink = if (light) Color(0xFF22282D) else Color.Black
+    return this
+        .then(SoftShadowElement(shape, 10.dp, 3.dp, ink.copy(alpha = (if (light) .064f else .18f) * strength)) { 1f })
+        .then(SoftShadowElement(shape, 2.5.dp, 1.25.dp, ink.copy(alpha = (if (light) .072f else .16f) * strength)) { 1f })
+}
+
 private data class SoftShadowElement(
     val shape: Shape,
     val radius: Dp,

@@ -17,12 +17,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.HazeProgressive
@@ -45,6 +50,7 @@ import dev.chrisbanes.haze.glass.hazeGlass
 import dev.chrisbanes.haze.glass.hazeGlassContainer
 import dev.chrisbanes.haze.glass.material3.material3
 import dev.mangaflow.ui.glass.softSurfaceShadow
+import dev.mangaflow.ui.glass.discoveryGlassShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 
@@ -68,6 +74,9 @@ private val glassPressOut = spring<Float>(dampingRatio = MangaMotion.PressDampin
 private val glassSettle = spring<Float>(dampingRatio = MangaMotion.SwitchDamping, stiffness = MangaMotion.NavigationStiffness)
 private const val MaxTabLensOpacity = .76f
 
+/** The ink inside equal hit cells. Label bounds come from the same type size and weights as the tabs. */
+internal data class HeaderInkCells(val inset: Dp, val ink: List<DpSize>, val wraps: Boolean = false)
+
 /** Application role/layout glue; the complete Haze 2.1 runtime owns every material stage. */
 @Composable
 internal fun LiquidGlassSurface(
@@ -85,6 +94,7 @@ internal fun LiquidGlassSurface(
     surfaceShape: RoundedCornerShape? = null,
     preferSource: Boolean = false,
     contentColor: Color? = null,
+    headerInk: HeaderInkCells? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -94,9 +104,11 @@ internal fun LiquidGlassSurface(
     val foreground = contentColor ?: if (surfaceColor == null) colors.onSurface
         else if (light) Color(0xFF242426) else Color.White
     val toolbar = role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.READING_DOCK
+    val compactHeader = headerInk != null && role == GlassSurfaceRole.NAVIGATION
     val tabLens = role == GlassSurfaceRole.TAB_LENS
     val tintColor = when {
         surfaceColor != null -> surfaceColor
+        compactHeader -> surface
         toolbar || tabLens -> colors.surfaceContainerHigh
         softCard -> lerp(colors.background, surface, .70f)
         else -> surface
@@ -128,7 +140,7 @@ internal fun LiquidGlassSurface(
     }
     val material = if (liquid) {
         val themedGlass = (if (clear) GlassStyle.clear else GlassStyle.regular).material3(tintColor)
-        val glassStyle = remember(themedGlass, shape, role, interactive, light, accessibility, protectArtworkInk) {
+        val glassStyle = remember(themedGlass, shape, role, interactive, light, accessibility, protectArtworkInk, compactHeader) {
             themedGlass.then {
                 shape(shape)
                 val progress = expansion.value().coerceIn(0f, 1f)
@@ -154,7 +166,23 @@ internal fun LiquidGlassSurface(
                         chromaticAberrationStrength(0f)
                         contentNormalBlend(.08f)
                     }
-                    GlassSurfaceRole.NAVIGATION -> {
+                    GlassSurfaceRole.NAVIGATION -> if (compactHeader) {
+                        // The clear centre carries cover colour. The actual optical rim supplies
+                        // the glint on a short curved segment as the boundary turns toward the light.
+                        optics { copy(refractionStrength = .66f, refractionHeightFraction = .19f,
+                            refractionDisplacement = 8.dp, refractionProfile = RefractionProfile.Edge(3.5.dp),
+                            depth = OpticalSizeValue.Fixed(.52f), blurRadius = OpticalSizeValue.Fixed(2.5.dp),
+                            refractionDetailIntensity = 0f) }
+                        tint(tintColor.copy(alpha = if (light) .23f else .37f))
+                        whitePoint(0f)
+                        contrast(0f)
+                        edgeSoftness(.8.dp)
+                        specularIntensity(if (light) .43f else .32f)
+                        specularExponent(52f)
+                        ambientResponse(.035f)
+                        chromaticAberrationStrength(0f)
+                        contentNormalBlend(.025f)
+                    } else {
                         optics { copy(refractionStrength = .58f, refractionHeightFraction = .22f,
                             refractionDisplacement = 9.dp + 2.dp * progress,
                             refractionProfile = RefractionProfile.Edge(4.dp + 1.dp * progress),
@@ -231,6 +259,7 @@ internal fun LiquidGlassSurface(
                     else -> Unit
                 }
                 if (role == GlassSurfaceRole.VIDEO_DOCK) chromaMultiplier(.98f)
+                else if (compactHeader) chromaMultiplier(1.015f)
                 else if (role != GlassSurfaceRole.GALLERY) chromaMultiplier(1.05f)
                 if (role == GlassSurfaceRole.ARTWORK) {
                     // Keep the cover visible through a shallow Clear lens, rather than
@@ -316,7 +345,9 @@ internal fun LiquidGlassSurface(
         }
         Modifier.hazeBlur(input = input, style = blurStyle)
     }
-    val shadow = if (softCard) Modifier.softSurfaceShadow(shape, light,
+    val shadow = if (compactHeader) Modifier.discoveryGlassShadow(shape, light,
+        strength = elevation?.let { (it.value / 10f).coerceIn(0f, 1f) } ?: 1f)
+    else if (softCard) Modifier.softSurfaceShadow(shape, light,
         strength = elevation?.let { (it.value / 16f).coerceIn(0f, 1f) } ?: if (toolbar) .72f else 1f,
         radius = if (toolbar) 16.dp else 24.dp,
         strengthScale = { 1f + .28f * expansion.value().coerceIn(0f, 1f) })
@@ -329,7 +360,8 @@ internal fun LiquidGlassSurface(
         val darkInk = foreground.luminance() < .5f
         val tone = if (darkInk) Color(0xFFA0A0A0) else Color(0xFF56565A)
         val blend = if (darkInk) BlendMode.Lighten else BlendMode.Darken
-        Modifier.drawWithCache {
+        if (headerInk != null) Modifier.headerInkContrast(headerInk, tone, blend)
+        else Modifier.drawWithCache {
             val feather = (4.dp.toPx() / size.height.coerceAtLeast(1f)).coerceAtMost(.49f)
             val edge = tone.copy(alpha = 0f)
             val center = tone.copy(alpha = .85f)
@@ -346,5 +378,34 @@ internal fun LiquidGlassSurface(
     CompositionLocalProvider(LocalContentColor provides foreground) {
         // Haze draws the material below its content and transforms only that material.
         Box(modifier.then(shadow).clip(shape).then(lensContainer).then(material).then(inkContrast), content = content)
+    }
+}
+
+/** Each correction blends into the sampled pixels behind one label or glyph. The gaps stay clear. */
+private fun Modifier.headerInkContrast(cells: HeaderInkCells, tone: Color, blend: BlendMode) = drawWithCache {
+    val inset = cells.inset.toPx()
+    val slot = (size.width - 2f * inset) / cells.ink.size.coerceAtLeast(1)
+    if (slot <= 0f || size.height <= 0f) return@drawWithCache onDrawBehind { }
+    val spots = cells.ink.mapIndexed { index, ink ->
+        val width = ink.width.toPx().coerceAtMost(slot)
+        val lines = if (cells.wraps && ink.width.toPx() > slot) 2 else 1
+        val height = (ink.height.toPx() * lines).coerceAtMost(size.height)
+        val rx = minOf(slot / 2f, width * .67f + 7.dp.toPx())
+        val ry = minOf(size.height / 2f, height * .67f + 5.dp.toPx())
+        val visual = if (layoutDirection == LayoutDirection.Rtl) cells.ink.lastIndex - index else index
+        val x = inset + (visual + .5f) * slot
+        val y = size.height / 2f
+        Rect(x - rx, y - ry, x + rx, y + ry)
+    }
+    val centre = tone.copy(alpha = .94f)
+    val guard = Brush.radialGradient(0f to centre, .72f to centre, .87f to tone.copy(alpha = .52f),
+        1f to tone.copy(alpha = 0f), center = Offset.Zero, radius = 1f)
+    onDrawBehind {
+        for (spot in spots) withTransform({
+            translate(spot.center.x, spot.center.y)
+            scale(spot.width / 2f, spot.height / 2f, Offset.Zero)
+        }) {
+            drawCircle(guard, radius = 1f, center = Offset.Zero, blendMode = blend)
+        }
     }
 }

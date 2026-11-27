@@ -15,10 +15,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.ui.glass.softSurfaceShadow
 
-/** Reuse the header's diffuse shadow at the quieter scale of a cover, outside its image clip. */
+/** The cover edge clips the picture. Its shadow can sit closer to the page in a dense catalogue. */
 @Composable
-internal fun Modifier.mangaCoverCard(cornerRadius: Dp = 12.dp): Modifier {
+internal fun Modifier.mangaCoverCard(cornerRadius: Dp = 12.dp, shadowRadius: Dp = cornerRadius * 1.5f): Modifier {
     val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
     return softSurfaceShadow(shape, MaterialTheme.colorScheme.surface.luminance() > .5f,
-        strength = .65f, radius = cornerRadius * 1.5f).clip(shape)
+        strength = .65f, radius = shadowRadius).clip(shape)
 }

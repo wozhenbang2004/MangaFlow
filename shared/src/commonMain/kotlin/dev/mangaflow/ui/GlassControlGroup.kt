@@ -43,6 +43,8 @@ internal fun GlassControlGroup(
     actions: @Composable () -> Unit,
     content: @Composable ColumnScope.() -> Unit,
     quietShadow: Boolean = false,
+    tabInk: HeaderInkCells? = null,
+    actionInk: HeaderInkCells? = null,
 ) {
     val motion = LocalMotionEnabled.current
     // This source owns proximity only. Each SDK member observes its own pointer
@@ -65,11 +67,12 @@ internal fun GlassControlGroup(
     ), verticalAlignment = Alignment.Top) {
         BoxWithConstraints(Modifier.weight(1f)) {
             HeaderGlassSurface(backdrop, Modifier.width(controlsWidth.coerceAtMost(maxWidth))
-                .glassGroupPress(interaction), quietShadow) {
+                .glassGroupPress(interaction), quietShadow, ink = tabInk) {
                 Column(Modifier.fillMaxWidth(), content = content)
             }
         }
         Spacer(Modifier.width(6.dp))
-        HeaderGlassSurface(backdrop, Modifier.width(actionsWidth).glassGroupPress(interaction), quietShadow) { actions() }
+        HeaderGlassSurface(backdrop, Modifier.width(actionsWidth).glassGroupPress(interaction), quietShadow,
+            ink = actionInk) { actions() }
     }
 }

@@ -2058,6 +2058,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 SegmentedGlassHeader(searchBackdrop, navigation,
                                     controlsWidth = discoveryTabsWidth,
                                     actionsWidth = discoveryActionsWidth,
+                                    discoveryTabLabels = discoveryLabels,
                                     quietShadow = platformKind == PlatformKind.ANDROID && !restrictedMode,
                                     modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { chromeHeightPx = it.height }
                                         .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
