@@ -291,7 +291,7 @@ internal fun MotionTabs(
         }
     }
     GlassTabRail(frame, if (movingGroupFill) selectionBackdrop else null, labels, index, selectionVisible,
-        groupTint, selectionAlpha, pressed = groupPresses.any { it.value },
+        groupTint, selectionAlpha, pressed = selectionVisible && groupPresses.getOrNull(index)?.value == true,
         onSelect = { target -> feedback.perform(FeelEvent.Selection); onSelect(target) }) { rowFrame ->
         Row(rowFrame.then(selectionInk).padding(horizontal = if (compact) 10.dp else 0.dp).selectableGroup(),
             horizontalArrangement = if (compact) Arrangement.spacedBy(22.dp) else Arrangement.Start,
@@ -317,10 +317,18 @@ internal fun MotionTabs(
                     selected = isSelected, role = role, interactionSource = interaction, indication = null,
                     onClick = { if (!isSelected) feedback.perform(FeelEvent.Selection); onSelect(i) },
                 ).then(if (movingGroupFill) Modifier else Modifier.motionPress(interaction)).drawBehind {
-                    if (!movingGroupFill || !isSelected) drawRoundRect(foreground.copy(alpha = pressAlpha.value),
-                        cornerRadius = CornerRadius(10.dp.toPx()))
-                    if (focused) drawRoundRect(foreground.copy(alpha = .72f),
-                        cornerRadius = CornerRadius(size.height / 2f), style = Stroke(1.dp.toPx()))
+                    val touchAlpha = if (!movingGroupFill || !isSelected) pressAlpha.value else 0f
+                    if (touchAlpha > 0f || focused) {
+                        val x = if (movingGroupFill) GlassTabHorizontalInset.toPx() else 0f
+                        val y = if (movingGroupFill) GlassTabVerticalInset.toPx() else 0f
+                        val start = Offset(x, y)
+                        val area = Size((size.width - 2 * x).coerceAtLeast(0f), (size.height - 2 * y).coerceAtLeast(0f))
+                        val pill = CornerRadius(area.height / 2f)
+                        if (touchAlpha > 0f) drawRoundRect(foreground.copy(alpha = touchAlpha), start, area,
+                            cornerRadius = if (movingGroupFill) pill else CornerRadius(10.dp.toPx()))
+                        if (focused) drawRoundRect(foreground.copy(alpha = .72f), start, area,
+                            cornerRadius = pill, style = Stroke(1.dp.toPx()))
+                    }
                 }.then(if (compact) Modifier.widthIn(min = labelWidth + 6.dp).padding(horizontal = 3.dp) else Modifier),
                     contentAlignment = Alignment.Center) {
                     if (itemContent != null) itemContent(i, isSelected, labelColor)

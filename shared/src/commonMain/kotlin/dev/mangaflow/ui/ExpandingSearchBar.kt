@@ -17,6 +17,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
@@ -51,18 +52,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.RoundRect
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.drawscope.clipPath
-import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
@@ -77,6 +73,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
@@ -86,9 +83,9 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionInputGate
 import kotlinx.coroutines.flow.first
-import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.sin
+
+private val SearchShellShape = RoundedCornerShape(24.dp)
 
 /**
  * beUI Morphing Search: one root-level shell, with a separately revealed, full-size foreground.
@@ -124,13 +121,16 @@ internal fun ExpandingSearchBar(
     val requester = remember { FocusRequester() }
     val back = remember { MotionBackState() }
     val windowFocused = LocalWindowInfo.current.isWindowFocused
-    val foregroundClip = remember { Path() }
     val searchInteraction = remember { MutableInteractionSource() }
     var retainedQuery by remember { mutableStateOf(query) }
     var inputFocused by remember { mutableStateOf(false) }
     var inputPlaced by remember { mutableStateOf(false) }
     var foregroundHeight by remember { mutableStateOf(44.dp) }
     var scopeExpanded by remember { mutableStateOf(false) }
+    // A window resize or a return from another app must not reopen a dismissed keyboard.
+    var focusPending by remember(expanded, focusInputOnExpand) {
+        mutableStateOf(expanded && focusInputOnExpand && searchTarget != SearchTarget.TAG)
+    }
     val hasScope = searchTarget != null
     val inputEndInset = if (hasScope) 84.dp else 44.dp
     val displayedQuery = if (expanded) query else retainedQuery
@@ -152,8 +152,12 @@ internal fun ExpandingSearchBar(
         }, label = "search-icon",
     ) { if (it) 1f else 0f }
     val present = expanded || shell.currentState || shell.targetState || shell.isRunning
-    val visibleForeground = remember(foreground, back) {
-        derivedStateOf { foreground.value * (1f - back.progress.value.coerceIn(0f, 1f)) }
+    val backRemaining = remember(back) { derivedStateOf { 1f - back.progress.value.coerceIn(0f, 1f) } }
+    val visibleForeground = remember(foreground, backRemaining) {
+        derivedStateOf { foreground.value.coerceIn(0f, 1f) * backRemaining.value }
+    }
+    val progress = remember(reveal, backRemaining) {
+        derivedStateOf { (reveal.value * backRemaining.value).coerceIn(0f, 1f) }
     }
     SideEffect {
         if (expanded) retainedQuery = query
@@ -190,7 +194,10 @@ internal fun ExpandingSearchBar(
 
     // Only the overlay takes IME insets. The toolbar and browsing content keep their layout.
     BoxWithConstraints(modifier.imePadding()) {
-        val panelWidth = (maxWidth - 64.dp).coerceIn(44.dp, 448.dp)
+        val endInset = 8.dp
+        val availableWidth = (maxWidth - endInset).coerceAtLeast(44.dp)
+        val minPanelWidth = minOf(availableWidth, inputEndInset + 16.dp + 64.dp)
+        val panelWidth = (maxWidth - 64.dp).coerceIn(minPanelWidth, minOf(availableWidth, 448.dp))
         val resultsRoom = (maxHeight - 64.dp).coerceIn(0.dp, 360.dp)
         // An empty title/author query is exactly the toolbar height, without an empty result gutter.
         val inputOnly = expanded && query.isBlank() && searchTarget != SearchTarget.TAG && !scopeCopyOnly && !showEmptyResults
@@ -205,141 +212,143 @@ internal fun ExpandingSearchBar(
                 if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
             }, label = "search-shell-height",
         ) { if (it) panelHeight else 44.dp }
-        val backRemaining = 1f - back.progress.value.coerceIn(0f, 1f)
-        val visibleWidth = 44.dp + (width.value - 44.dp) * backRemaining
-        val visibleHeight = 44.dp + (height.value - 44.dp) * backRemaining
-        val progress = (reveal.value * backRemaining).coerceIn(0f, 1f)
-        val requiredTextWidth = minOf(96.dp, (panelWidth - inputEndInset - 16.dp).coerceAtLeast(0.dp))
-        LaunchedEffect(expanded, active, inputPlaced, windowFocused, panelWidth, scopeExpanded, searchTarget, focusInputOnExpand) {
-            if (focusInputOnExpand && expanded && active && inputPlaced && windowFocused &&
-                !scopeExpanded && searchTarget != SearchTarget.TAG) {
-                snapshotFlow {
-                    val remaining = 1f - back.progress.value.coerceIn(0f, 1f)
-                    val liveWidth = 44.dp + (width.value - 44.dp) * remaining
-                    val clipLeft = max((panelWidth - 44.dp).value * (1f - visibleForeground.value),
-                        (panelWidth - liveWidth).value).coerceAtLeast(16f)
-                    !back.gesturing && panelWidth.value - inputEndInset.value - clipLeft >= requiredTextWidth.value
-                }.first { it }
-                requester.requestFocus()
-                keyboard?.show()
+        val visibleWidth = remember(width, backRemaining) {
+            derivedStateOf { 44.dp + (width.value - 44.dp) * backRemaining.value }
+        }
+        val exposedWidth = remember(visibleWidth, visibleForeground, panelWidth) {
+            derivedStateOf {
+                minOf(visibleWidth.value, 44.dp + (panelWidth - 44.dp) * visibleForeground.value)
+                    .coerceIn(44.dp, panelWidth)
             }
         }
-        val endInset = 8.dp
-        val topInset = 0.dp
-
-        if (expanded && active) Box(Modifier.fillMaxSize().padding(top = 44.dp)
+        // Measure the glass and its clipped foreground from the same live dimensions.
+        val shellBounds = Modifier.layout { measurable, constraints ->
+            val w = visibleWidth.value.roundToPx().coerceIn(constraints.minWidth, constraints.maxWidth)
+            val h = (44.dp + (height.value - 44.dp) * backRemaining.value).roundToPx()
+                .coerceIn(constraints.minHeight, constraints.maxHeight)
+            val child = measurable.measure(Constraints.fixed(w, h))
+            layout(w, h) { child.place(0, 0) }
+        }
+        val requiredTextWidth = minOf(96.dp, (panelWidth - inputEndInset - 16.dp).coerceAtLeast(0.dp))
+        LaunchedEffect(focusPending, active, inputPlaced, windowFocused, scopeExpanded, searchTarget, exposedWidth,
+            inputEndInset, requiredTextWidth) {
+            if (focusPending && active && inputPlaced && windowFocused && !scopeExpanded &&
+                searchTarget != SearchTarget.TAG && requiredTextWidth > 0.dp) {
+                snapshotFlow {
+                    !back.gesturing && !back.completed && exposedWidth.value - inputEndInset >= requiredTextWidth
+                }.first { it }
+                if (requester.requestFocus()) {
+                    focusPending = false
+                    keyboard?.show()
+                }
+            }
+        }
+        val closeScope = { scopeExpanded = false }
+        if (expanded && active) Box(Modifier.fillMaxSize().padding(top = if (scopeExpanded) 0.dp else 44.dp)
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
-                onClickLabel = "关闭搜索", onClick = dismiss))
+                onClickLabel = if (scopeExpanded) "收起搜索范围" else "关闭搜索",
+                onClick = if (scopeExpanded) closeScope else dismiss))
 
         // This shell never belongs to the toolbar's measurement or to its own Haze source.
         LiquidGlassSurface(
             state = backdrop,
-            modifier = Modifier.align(Alignment.TopEnd).padding(top = topInset, end = endInset)
-                .width(visibleWidth.coerceAtLeast(44.dp)).height(visibleHeight.coerceAtLeast(44.dp))
+            modifier = Modifier.align(Alignment.TopEnd).padding(end = endInset).then(shellBounds)
                 .graphicsLayer {
-                    alpha = progress
+                    alpha = progress.value
                     compositingStrategy = CompositingStrategy.ModulateAlpha
                 },
-            cornerRadius = 22.dp + 2.dp * progress,
+            surfaceShape = SearchShellShape,
             role = GlassSurfaceRole.NAVIGATION,
-            interactionSource = searchInteraction,
+            interactionSource = if (expanded && active) searchInteraction else null,
             softCard = true,
-            materialExpansion = { progress },
+            materialExpansion = { progress.value },
         ) {}
 
-        // Keep the result-position owner composed while closed, but place no hidden hit region.
-        Column(Modifier.align(Alignment.TopEnd).padding(end = 8.dp)
-            // Actual pointer bounds shrink with the optical shell; a transparent final-width
-            // foreground must not keep swallowing taps on the restored tabs/history.
-            .clip(RoundedCornerShape(22.dp + 2.dp * progress))
-            .motionInputGate(expanded && active)
-            .layout { measurable, constraints ->
-                val fullWidth = panelWidth.roundToPx()
-                val placeable = measurable.measure(constraints.copy(minWidth = fullWidth, maxWidth = fullWidth,
-                    minHeight = 0, maxHeight = (44.dp + resultsRoom).roundToPx()))
-                val foregroundGone = !expanded && visibleForeground.value <= .02f
-                // Use the same threshold as the restored toolbar's input gate. The optical
-                // shell may settle longer, but the invisible foreground owns only its trigger.
-                val liveWidth = (if (foregroundGone) 44.dp else visibleWidth.coerceAtLeast(44.dp)).roundToPx()
-                val liveHeight = (if (foregroundGone) 44.dp else visibleHeight.coerceAtLeast(44.dp)).roundToPx()
-                layout(liveWidth, liveHeight) {
-                    if (present && !foregroundGone) placeable.placeRelative(liveWidth - placeable.width, 0)
+        val scopeInView by remember(exposedWidth, panelWidth) {
+            derivedStateOf { exposedWidth.value >= minOf(88.dp, panelWidth) && panelWidth > 44.dp }
+        }
+        Box(Modifier.align(Alignment.TopEnd).padding(end = endInset).then(shellBounds).clip(SearchShellShape)
+            .then(if (expanded && active && !scopeExpanded) Modifier.pointerInput(Unit) {} else Modifier)) {
+            // Keep the full results measured at their final width. A real end-aligned viewport
+            // reveals the text, rows and scope together and clips their pointer bounds in RTL too.
+            Box(Modifier.align(Alignment.TopEnd).clipToBounds()
+                .layout { measurable, constraints ->
+                    val fullWidth = panelWidth.roundToPx()
+                    val content = measurable.measure(Constraints(
+                        minWidth = fullWidth, maxWidth = fullWidth, maxHeight = (44.dp + resultsRoom).roundToPx()))
+                    val liveWidth = exposedWidth.value.roundToPx().coerceAtMost(constraints.maxWidth)
+                    layout(liveWidth, constraints.maxHeight) {
+                        // The optical shell may keep settling after the toolbar accepts taps again.
+                        if (present && (expanded || visibleForeground.value > .02f))
+                            content.placeRelative(liveWidth - content.width, 0)
+                    }
                 }
-            }
-            .width(panelWidth).heightIn(max = 44.dp + resultsRoom)
-            .onSizeChanged { foregroundHeight = with(density) { it.height.toDp() } }
-            .semantics { paneTitle = placeholder }
-            .pointerInput(Unit) {}
-            .graphicsLayer { alpha = visibleForeground.value.coerceIn(0f, 1f) }
-            .drawWithContent {
-                val p = visibleForeground.value.coerceIn(0f, 1f)
-                val shellWidth = visibleWidth.coerceAtLeast(44.dp).toPx()
-                val shellHeight = visibleHeight.coerceAtLeast(44.dp).toPx()
-                val left = max((size.width - 44.dp.toPx()).coerceAtLeast(0f) * (1f - p),
-                    size.width - shellWidth).coerceAtLeast(0f)
-                val top = topInset.toPx()
-                val radius = (22.dp + 2.dp * progress).toPx()
-                foregroundClip.reset()
-                foregroundClip.addRoundRect(RoundRect(size.width - shellWidth, top,
-                    size.width, top + shellHeight, CornerRadius(radius)))
-                // A moving bottom edge can cross any result row; it must keep the shell's corners.
-                clipPath(foregroundClip) {
-                    clipRect(left = left, top = top, right = size.width,
-                        bottom = min(size.height, top + shellHeight)) { this@drawWithContent.drawContent() }
+                .motionInputGate(expanded && active)
+                .graphicsLayer { alpha = visibleForeground.value }) {
+                Column(Modifier.width(panelWidth).heightIn(max = 44.dp + resultsRoom)
+                    .onSizeChanged { foregroundHeight = with(density) { it.height.toDp() } }
+                    .semantics { paneTitle = placeholder }.pointerInput(Unit) {}) {
+                    Row(Modifier.width(panelWidth).height(44.dp).padding(start = 16.dp, end = inputEndInset),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        BasicTextField(
+                            value = displayedQuery,
+                            onValueChange = { if (expanded && active) onQuery(it) },
+                            enabled = expanded && active && !scopeExpanded,
+                            interactionSource = searchInteraction,
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = {
+                                keyboard?.hide()
+                                focus.clearFocus(force = true)
+                                if (expanded && active && query.isNotBlank()) onSearch()
+                            }),
+                            modifier = Modifier.weight(1f).fillMaxHeight().focusRequester(requester)
+                                .onFocusChanged {
+                                    inputFocused = it.isFocused
+                                    if (it.isFocused) focusPending = false
+                                }
+                                .onPlaced { inputPlaced = true }
+                                .semantics { contentDescription = placeholder },
+                            decorationBox = { input ->
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                                    if (displayedQuery.isEmpty()) Text(placeholder,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    input()
+                                }
+                            },
+                        )
+                    }
+                    results(if (present) resultsRoom else 0.dp, expanded && active && !scopeExpanded)
                 }
-            }) {
-            Row(Modifier.width(panelWidth).height(44.dp).padding(start = 16.dp, end = inputEndInset),
-                verticalAlignment = Alignment.CenterVertically) {
-                BasicTextField(
-                    value = displayedQuery,
-                    onValueChange = { if (expanded && active) onQuery(it) },
-                    enabled = expanded && active && !scopeExpanded,
-                    interactionSource = searchInteraction,
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = {
-                        keyboard?.hide()
-                        focus.clearFocus(force = true)
-                        if (expanded && active && query.isNotBlank()) onSearch()
-                    }),
-                    modifier = Modifier.weight(1f).fillMaxHeight().focusRequester(requester)
-                        .onFocusChanged { inputFocused = it.isFocused }
-                        .onPlaced { inputPlaced = true }
-                        .semantics { contentDescription = placeholder },
-                    decorationBox = { input ->
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
-                            if (displayedQuery.isEmpty()) Text(placeholder,
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            input()
+                if (scopeExpanded && expanded && active) Box(Modifier.matchParentSize()
+                    .pointerInput(Unit) { detectTapGestures { closeScope() } })
+                if (searchTarget != null && present) SearchScopeControl(
+                    target = searchTarget, expanded = scopeExpanded,
+                    enabled = expanded && active && scopeInView, copyOnly = scopeCopyOnly,
+                    translationGroupAvailable = translationGroupAvailable,
+                    titleAndTagsOnly = titleAndTagsOnly,
+                    backdrop = backdrop, maxWidth = (panelWidth - 52.dp).coerceAtLeast(36.dp),
+                    onExpandedChange = {
+                        if (it) {
+                            if (inputFocused && imeVisible && focusInputOnExpand) focusPending = true
+                            keyboard?.hide()
+                            focus.clearFocus(force = true)
                         }
+                        scopeExpanded = it
                     },
+                    onTarget = { target ->
+                        if (target != searchTarget) focusPending = focusInputOnExpand && target != SearchTarget.TAG
+                        onSearchTarget(target)
+                    },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(end = 44.dp)
+                        .motionInputGate(expanded && active && scopeInView),
                 )
             }
-            results(if (present) resultsRoom else 0.dp, expanded && active && !scopeExpanded)
         }
-        // Choosing a range is transient chrome. It never changes the result viewport or its anchor.
-        if (scopeExpanded && expanded && active) Box(Modifier.fillMaxSize()
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
-                onClickLabel = "收起搜索范围", onClick = { scopeExpanded = false }))
-        if (searchTarget != null && present && (expanded || visibleForeground.value > .02f)) SearchScopeControl(
-            target = searchTarget, expanded = scopeExpanded,
-            enabled = expanded && active, copyOnly = scopeCopyOnly,
-            translationGroupAvailable = translationGroupAvailable,
-            titleAndTagsOnly = titleAndTagsOnly,
-            backdrop = backdrop, maxWidth = (panelWidth - 52.dp).coerceAtLeast(36.dp),
-            onExpandedChange = {
-                if (it) { keyboard?.hide(); focus.clearFocus(force = true) }
-                scopeExpanded = it
-            },
-            onTarget = onSearchTarget,
-            modifier = Modifier.align(Alignment.TopEnd).padding(end = 52.dp)
-                .graphicsLayer { alpha = visibleForeground.value.coerceIn(0f, 1f) }
-                .motionInputGate(expanded && active),
-        )
         MotionIconButton(
             onClick = { if (expanded) dismiss() else onExpandedChange(true) },
             enabled = active,
@@ -351,17 +360,17 @@ internal fun ExpandingSearchBar(
                 },
         ) {
             Box(Modifier.size(22.dp).graphicsLayer {
-                val response = sin((icon.value * backRemaining).coerceIn(0f, 1f) * kotlin.math.PI).toFloat()
+                val response = sin((icon.value * backRemaining.value).coerceIn(0f, 1f) * kotlin.math.PI).toFloat()
                 scaleX = 1f - .16f * response
                 scaleY = scaleX
             }) {
                 Icon(Icons.Outlined.Search, null, Modifier.fillMaxSize().graphicsLayer {
-                    alpha = 1f - icon.value * backRemaining
-                    rotationZ = -45f * icon.value * backRemaining
+                    alpha = 1f - icon.value * backRemaining.value
+                    rotationZ = -45f * icon.value * backRemaining.value
                 })
                 Icon(Icons.Outlined.Close, null, Modifier.fillMaxSize().graphicsLayer {
-                    alpha = icon.value * backRemaining
-                    rotationZ = 45f * (1f - icon.value * backRemaining)
+                    alpha = icon.value * backRemaining.value
+                    rotationZ = 45f * (1f - icon.value * backRemaining.value)
                 })
             }
         }

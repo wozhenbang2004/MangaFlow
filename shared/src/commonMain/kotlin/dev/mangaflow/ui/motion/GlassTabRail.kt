@@ -34,6 +34,9 @@ import kotlinx.coroutines.launch
 
 private class TabRelease(val position: Float, val velocity: Float)
 
+internal val GlassTabHorizontalInset = 3.dp
+internal val GlassTabVerticalInset = 4.dp
+
 /** The lens and its fill share a measured slot, behind the stationary input and text row. */
 @Composable
 internal fun GlassTabRail(
@@ -122,11 +125,11 @@ internal fun GlassTabRail(
     Box(modifier.then(gesture)) {
         Box(Modifier.matchParentSize().layout { measurable, bounds ->
             val slot = bounds.maxWidth.toFloat() / labels.size
-            val rest = (slot - 6.dp.toPx()).coerceAtLeast(0f)
+            val rest = (slot - 2 * GlassTabHorizontalInset.toPx()).coerceAtLeast(0f)
             val stretch = abs(travel.value)
             val width = (rest + slot * .53f * stretch + 3.dp.toPx() * pressure.value)
                 .roundToInt().coerceIn(0, bounds.maxWidth)
-            val height = ((bounds.maxHeight - 8.dp.toPx()) * (1f - .16f * stretch) - 2.dp.toPx() * pressure.value)
+            val height = ((bounds.maxHeight - 2 * GlassTabVerticalInset.toPx()) * (1f - .16f * stretch) - 2.dp.toPx() * pressure.value)
                 .roundToInt().coerceIn(0, bounds.maxHeight)
             val thumb = measurable.measure(Constraints.fixed(width, height))
             layout(bounds.maxWidth, bounds.maxHeight) {

@@ -17,8 +17,12 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.IntOffset
@@ -75,7 +79,6 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -126,6 +129,7 @@ import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
@@ -216,6 +220,7 @@ fun DiscoverScreen(
 ) {
     val browse = if (!state.isSearch) state else backgroundState
     val browseKey = browseContentKey(browse)
+    val featuredIds = rememberFeaturedIds(browse, adultProfile)
     val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
     var actionsManga by remember { mutableStateOf<Manga?>(null) }
     var ratingsManga by remember { mutableStateOf<Manga?>(null) }
@@ -267,6 +272,7 @@ fun DiscoverScreen(
             // Header clearance travels with the list; neither source controls nor
             // the outgoing ranking's last offset constrain the scroll viewport.
             DiscoveryPane(pane, positions, repository,
+                featuredIds = featuredIds,
                 columns = (if (pane.mode == DiscoveryMode.LATEST) updateColumns else discoverColumns).let {
                     if (platformKind == PlatformKind.DESKTOP) it.coerceIn(0, 8) else it.coerceIn(1, 4)
                 },
@@ -690,10 +696,41 @@ private fun RankingAudienceToggle(audience: RankAudience, onAudience: (RankAudie
 }
 
 @Composable
+private fun rememberFeaturedIds(state: BrowseState, adultProfile: Boolean): List<String> {
+    var savedEdition by rememberSaveable { mutableStateOf("") }
+    var savedIds by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
+    if (adultProfile) return emptyList()
+    if (state.mode != DiscoveryMode.RECOMMENDED || state.items.isEmpty()) return savedIds
+
+    val today = localToday()
+    val day = today.year * 366 + today.dayOfYear
+    val edition = "${browseContentKey(state)}:$day"
+    val picks = remember(state.items, edition, savedEdition, savedIds) {
+        val available = state.items.mapTo(LinkedHashSet(), Manga::id)
+        val retained = if (edition == savedEdition) savedIds.filter { it in available } else emptyList()
+        if (retained.size == 6) savedIds else {
+            val candidates = available.toList()
+            val daily = if (candidates.size <= 6) candidates else List(6) { index ->
+                candidates[(day % candidates.size + index) % candidates.size]
+            }
+            ArrayList((retained + daily).distinct().take(6))
+        }
+    }
+    // Persist identities only. Appending a grid page keeps the gallery order and refreshed
+    // records still supply the current cover, title and metrics for each surviving work.
+    SideEffect {
+        savedEdition = edition
+        savedIds = picks
+    }
+    return picks
+}
+
+@Composable
 private fun DiscoveryPane(
     state: BrowseState,
     positions: LinkedHashMap<String, LazyGridState>,
     repository: MangaRepository,
+    featuredIds: List<String>,
     columns: Int,
     onColumnsChange: (Int) -> Unit,
     backdrop: HazeState,
@@ -756,14 +793,8 @@ private fun DiscoveryPane(
             if (aggregateAdult) displayedBooks.asSequence().filter { it.coverUrl.isNotBlank() }
                 .distinctBy(Manga::id).take(6).toList() else emptyList()
         }
-        else -> {
-            val today = localToday()
-            val rotationDay = today.year * 366 + today.dayOfYear
-            remember(state.items, rotationDay) {
-                val candidates = state.items.distinctBy(Manga::id)
-                if (candidates.size <= 6) candidates
-                else List(6) { candidates[(rotationDay % candidates.size + it) % candidates.size] }
-            }
+        else -> remember(state.items, featuredIds) {
+            featuredIds.mapNotNull { id -> state.items.firstOrNull { it.id == id } }
         }
     }
     val showFeatured = recommended && (!adultProfile || aggregateAdult) &&
@@ -815,19 +846,20 @@ private fun DiscoveryPane(
                 (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >=
                     info.totalItemsCount - visibleColumns * 2 - 1
         }, onMore = onMore)
-    val showCategoryLabel = androidManga && maxWidth >= 360.dp && fontScale <= 1.3f
+    val sectionWidth = (maxWidth - inset * 2).coerceAtLeast(0.dp)
+    val showCategoryLabel = androidManga && sectionWidth >= 330.dp && fontScale <= 1.3f
     val sectionControls: @Composable () -> Unit = {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            val title = when {
-                state.mode == DiscoveryMode.LATEST -> "最近更新"
-                adultProfile && !aggregateAdult -> "作品"
-                adultProfile && showFeatured -> "继续发现"
-                else -> "为你发现"
-            }
-            val provider = state.items.firstOrNull()?.takeIf { aggregateAdult && !mixedSources }
-                ?.let { it.sourceName.ifBlank { sourceDisplayName(it.sourceId) } }
-            Text(listOfNotNull(title, provider).joinToString(" · "),
-                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+        val title = when {
+            state.mode == DiscoveryMode.LATEST -> "最近更新"
+            adultProfile && !aggregateAdult -> "作品"
+            adultProfile && showFeatured -> "继续发现"
+            else -> "为你发现"
+        }
+        val provider = state.items.firstOrNull()?.takeIf { aggregateAdult && !mixedSources }
+            ?.let { it.sourceName.ifBlank { sourceDisplayName(it.sourceId) } }
+        Layout(modifier = Modifier.fillMaxWidth(), content = {
+            Text(listOfNotNull(title, provider).joinToString(" · "), Modifier.semantics { heading() },
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
                 style = if (androidManga) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Medium)
             if (onExplore != null) {
@@ -843,10 +875,28 @@ private fun DiscoveryPane(
                     Icon(Icons.Outlined.Explore, "分类与专题", Modifier.size(19.dp))
                 }
             }
-            DiscoveryLayoutControl(columns, visibleColumns, backdrop, active, onColumnsChange,
-                onPresenceChange = { layoutPresent = it })
-            BrowseCacheStatus(state, backdrop, active)
-            DiscoveryRefresh(state, onRefresh, active)
+            Row(if (sectionWidth < 132.dp) Modifier.horizontalScroll(rememberScrollState()) else Modifier,
+                verticalAlignment = Alignment.CenterVertically) {
+                BrowseCacheStatus(state, backdrop, active)
+                DiscoveryLayoutControl(columns, visibleColumns, backdrop, active, onColumnsChange,
+                    onPresenceChange = { layoutPresent = it })
+                DiscoveryRefresh(state, onRefresh, active)
+            }
+        }) { children, bounds ->
+            val loose = bounds.copy(minWidth = 0, minHeight = 0)
+            val category = if (onExplore != null) children[1].measure(loose) else null
+            val categoryWidth = category?.width ?: 0
+            val heading = children.first().measure(loose.copy(maxWidth = bounds.maxWidth - categoryWidth))
+            val actions = children.last().measure(loose)
+            val stacked = heading.width + categoryWidth + 8.dp.roundToPx() + actions.width > bounds.maxWidth
+            val titleHeight = maxOf(heading.height, category?.height ?: 0)
+            val firstLine = if (stacked) titleHeight else maxOf(titleHeight, actions.height)
+            layout(bounds.maxWidth, firstLine + if (stacked) actions.height else 0) {
+                heading.placeRelative(0, (firstLine - heading.height) / 2)
+                category?.let { it.placeRelative(heading.width, (firstLine - it.height) / 2) }
+                actions.placeRelative(bounds.maxWidth - actions.width,
+                    if (stacked) firstLine else (firstLine - actions.height) / 2)
+            }
         }
     }
     val gallery: @Composable () -> Unit = {
@@ -855,6 +905,7 @@ private fun DiscoveryPane(
             onOpen = onOpen, onRatings = onRatings.takeUnless { adultProfile }, loading = state.loading,
             showSource = adultProfile, desktopActions = desktopActions)
     }
+    val loadingLabel = if (ranking) "正在加载${state.period.label}" else "正在加载漫画"
     LazyVerticalGrid(
         columns = GridCells.Fixed(visibleColumns), state = grid,
         contentPadding = PaddingValues(start = inset, end = inset, top = topPadding,
@@ -862,8 +913,10 @@ private fun DiscoveryPane(
         horizontalArrangement = Arrangement.spacedBy(gap),
         verticalArrangement = Arrangement.spacedBy(if (ranking) 6.dp else if (columns == 1) 12.dp else 10.dp),
         modifier = Modifier.fillMaxSize().then(if (desktop) Modifier else Modifier.bottomPullLoad(pull))
-            .then(if (androidManga && initialLoad && coverPlaceholders)
-                Modifier.semantics { stateDescription = "正在加载漫画" } else Modifier)
+            .then(if (initialLoad && (ranking || columns == 1 || coverPlaceholders)) Modifier.semantics {
+                stateDescription = loadingLabel
+                liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite
+            } else Modifier)
             .motionInputGate(active),
     ) {
         if (sourceHeader != null) item(span = { GridItemSpan(maxLineSpan) }, key = "source-controls",
@@ -908,18 +961,13 @@ private fun DiscoveryPane(
         }
         if (initialLoad) {
             if (ranking || columns == 1) {
-                if (!showFeatured) item(span = { GridItemSpan(maxLineSpan) }, key = "list-loading-status") {
-                    Text(if (ranking) "正在加载${state.period.label}" else "正在加载漫画",
-                        Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
-                            .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
-                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                items(4, key = { "loading-row:$it" }, contentType = { "list-placeholder" }) {
-                    DiscoveryListPlaceholder(ranking)
+                items(4, key = { "loading-row:$it" }, contentType = { "list-placeholder" }) { index ->
+                    DiscoveryListPlaceholder(ranking, loadingLabel.takeIf { index == 0 && !showFeatured })
                 }
             } else if (coverPlaceholders) items(visibleColumns * 2,
                 key = { "loading-cover:$it" }, contentType = { "cover-placeholder" }) {
-                DiscoveryCoverPlaceholder(androidManga)
+                DiscoveryCoverPlaceholder(narrow = visibleColumns >= 4, showMetrics = !adultProfile,
+                    showSource = aggregateAdult, showChapter = state.mode == DiscoveryMode.LATEST)
             }
             else if (!showFeatured) item(span = { GridItemSpan(maxLineSpan) }, key = "loading") {
                 QuietLoading("正在翻开书页…")
@@ -1035,32 +1083,63 @@ private fun DiscoveryPane(
     }
 }
 
+private val BrowseListCoverFrame = Modifier.size(width = 64.dp, height = 92.dp)
+private val BrowseTileCoverFrame = Modifier.fillMaxWidth().aspectRatio(2f / 3f)
+private val BrowseTileCoverRadius = 12.dp
+
+/** Draw the waiting marks inside the same line boxes that will receive the actual text. */
+private fun Modifier.placeholderLines(ink: Color, vararg fractions: Float): Modifier = fillMaxWidth().drawBehind {
+    val line = size.height / fractions.size
+    val stroke = minOf(6.dp.toPx(), line * .32f)
+    fractions.forEachIndexed { index, fraction ->
+        val width = size.width * fraction
+        val x = if (layoutDirection == LayoutDirection.Rtl) size.width - width else 0f
+        drawRoundRect(ink, Offset(x, line * (index + .5f) - stroke / 2f),
+            Size(width, stroke), CornerRadius(stroke / 2f))
+    }
+}
+
 @Composable
-private fun DiscoveryListPlaceholder(ranked: Boolean) {
+private fun DiscoveryListPlaceholder(ranked: Boolean, loadingLabel: String?) {
     val ink = MaterialTheme.colorScheme.onSurface
-    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp).clearAndSetSemantics {},
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (ranked) Spacer(Modifier.width(22.dp))
-        Spacer(Modifier.size(width = 68.dp, height = 98.dp)
+    Row(Modifier.fillMaxWidth().padding(vertical = if (ranked) 6.dp else 0.dp).clearAndSetSemantics {},
+        verticalAlignment = if (ranked) Alignment.Top else Alignment.CenterVertically) {
+        // Match the two-digit rank gutter even when the system font is enlarged.
+        if (ranked) Text("00", Modifier.widthIn(min = 34.dp).padding(end = 6.dp, top = 5.dp),
+            style = mangaMetricValueStyle(20.sp, 26.sp), color = Color.Transparent,
+            fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Spacer((if (ranked) Modifier.size(68.dp, 98.dp) else BrowseListCoverFrame)
             .background(ink.copy(alpha = .07f), RoundedCornerShape(9.dp)))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Spacer(Modifier.fillMaxWidth(.74f).height(12.dp).background(ink.copy(alpha = .09f), CircleShape))
-            Spacer(Modifier.fillMaxWidth(.46f).height(8.dp).background(ink.copy(alpha = .055f), CircleShape))
+        Column(Modifier.weight(1f).padding(start = 12.dp, end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp)
+            .then(if (ranked) Modifier.heightIn(min = 98.dp) else Modifier),
+            verticalArrangement = if (ranked) Arrangement.SpaceBetween else Arrangement.spacedBy(4.dp)) {
+            if (loadingLabel != null) Text(loadingLabel, style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, minLines = 2, maxLines = 2,
+                overflow = TextOverflow.Ellipsis)
+            else Text("", Modifier.placeholderLines(ink.copy(alpha = .075f), .74f, .46f),
+                fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontWeight = FontWeight.Medium,
+                style = if (ranked) MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 21.sp)
+                    else MaterialTheme.typography.bodyMedium, minLines = 2, maxLines = 2)
+            Spacer(Modifier.height(22.dp * LocalDensity.current.fontScale.coerceAtLeast(1f))
+                .placeholderLines(ink.copy(alpha = .045f), .34f))
         }
     }
 }
 
 @Composable
-private fun DiscoveryCoverPlaceholder(androidManga: Boolean) {
+private fun DiscoveryCoverPlaceholder(narrow: Boolean, showMetrics: Boolean, showSource: Boolean, showChapter: Boolean) {
     val ink = MaterialTheme.colorScheme.onSurface
-    val status = if (androidManga) Modifier else Modifier.semantics { contentDescription = "作品正在加载" }
-    Column(Modifier.fillMaxWidth().then(status), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        Box(Modifier.fillMaxWidth().aspectRatio(if (androidManga) 2f / 3f else .7f).clip(RoundedCornerShape(10.dp))
-            .background(ink.copy(alpha = .055f)))
-        Box(Modifier.fillMaxWidth(.86f).height(9.dp).clip(RoundedCornerShape(4.dp))
-            .background(ink.copy(alpha = .075f)))
-        Box(Modifier.fillMaxWidth(.54f).height(8.dp).clip(RoundedCornerShape(4.dp))
-            .background(ink.copy(alpha = .035f)))
+    val detailInk = ink.copy(alpha = .045f)
+    Column(Modifier.fillMaxWidth().clearAndSetSemantics {}) {
+        Spacer(BrowseTileCoverFrame.background(ink.copy(alpha = .055f), RoundedCornerShape(BrowseTileCoverRadius)))
+        CoverTileTitle(null, dense = true, narrow = narrow)
+        if (showChapter) Text("", Modifier.padding(start = 2.dp, end = 2.dp, top = 3.dp)
+            .placeholderLines(detailInk, .60f), style = MaterialTheme.typography.bodySmall, maxLines = 1)
+        if (showMetrics) Spacer(Modifier.padding(start = 2.dp, end = 2.dp, top = 4.dp)
+            .height(22.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)).placeholderLines(detailInk, .42f))
+        else if (showSource) Text("", Modifier.padding(start = 2.dp, end = 2.dp, top = 3.dp)
+            .heightIn(min = 18.dp).placeholderLines(detailInk, .50f),
+            style = MaterialTheme.typography.labelSmall, maxLines = 1)
     }
 }
 
@@ -1183,17 +1262,17 @@ private fun BrowseListRow(
             transition?.select?.invoke(MangaCoverKey(manga.id, placement))
             onClick()
         }).motionPress(interaction, pressedScale = .985f), verticalAlignment = Alignment.CenterVertically) {
-        MangaCover(manga, repository, Modifier.width(64.dp).height(92.dp)
+        MangaCover(manga, repository, BrowseListCoverFrame
             .mangaSharedCover(manga.id, placement).mangaCoverCard(9.dp), onReady = onCoverReady)
         Column(Modifier.weight(1f).padding(start = 12.dp,
             end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
+            if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter,
+            if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (showSource) MangaBrowseSource(manga)
@@ -1580,21 +1659,29 @@ internal fun CoverTile(
                 onClick()
             })
         .motionPress(interaction)) {
-        MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(2f / 3f)
-            .then(if (placement != null) Modifier.mangaSharedCover(manga.id, placement) else Modifier).mangaCoverCard(12.dp),
+        MangaCover(manga, repository, BrowseTileCoverFrame
+            .then(if (placement != null) Modifier.mangaSharedCover(manga.id, placement) else Modifier).mangaCoverCard(BrowseTileCoverRadius),
             onReady = onCoverReady)
-        Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), modifier = Modifier.padding(top = 7.dp, start = 2.dp, end = 2.dp),
-            style = if (narrow) MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 20.sp)
-                else if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        CoverTileTitle(manga.title, dense, narrow)
+        if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            minLines = 1, maxLines = 1, overflow = TextOverflow.Ellipsis)
         SearchSourceMarks(bodySources, Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp))
         if (showSource) MangaBrowseSource(manga, Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp))
         else if (showMetrics) MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 4.dp, start = 2.dp, end = 2.dp),
             compact = true, showMore = false, plain = true, onExpand = onRatings)
-        if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            minLines = 1, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
+}
+
+@Composable
+private fun CoverTileTitle(title: String?, dense: Boolean, narrow: Boolean) {
+    val placeholder = if (title == null) Modifier.placeholderLines(MaterialTheme.colorScheme.onSurface.copy(alpha = .075f),
+        .84f, .54f) else Modifier
+    Text(title.orEmpty(), modifier = Modifier.padding(top = 7.dp, start = 2.dp, end = 2.dp).then(placeholder),
+        fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontWeight = FontWeight.Medium,
+        style = if (narrow) MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 20.sp)
+            else if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
+        minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
 }
 
 @Composable

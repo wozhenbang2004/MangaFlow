@@ -88,6 +88,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
@@ -101,6 +102,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -121,6 +123,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.floor
+import kotlin.math.roundToInt
 
 /** Foundation Pager's equal edge padding keeps first, middle and last recommendations centered. */
 @OptIn(ExperimentalFoundationApi::class)
@@ -225,8 +228,9 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                 flingBehavior = fling, userScrollEnabled = visible,
                 key = { manga[it].id },
                 modifier = Modifier.fillMaxWidth().height(itemHeight + 14.dp)
-                    .semantics { stateDescription = "推荐 ${state.currentPage + 1} / ${manga.size}" }) { index ->
+                    .semantics { stateDescription = "推荐 ${state.settledPage.coerceIn(manga.indices) + 1} / ${manga.size}" }) { index ->
                 val emphasis = { (1f - abs(index - position.value)).coerceIn(0f, 1f) }
+                val settled = state.settledPage == index
                 FeaturedManga(manga[index], repository, captionHeight, titleLines, inlineInformation, imageWidthPx, imageHeightPx,
                     color = colors[index], atmosphere = atmosphere,
                     onColor = { extracted[manga[index].coverUrl] = it },
@@ -236,26 +240,31 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                         scaleX = scale; scaleY = scale
                         alpha = .72f + .28f * emphasis()
                     }.mangaCoverCard(22.dp),
-                    emphasis = emphasis,
-                    offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
-                        (if (rtl) -1f else 1f) else 0f },
+                    emphasis = emphasis, settled = settled, scrolling = state.isScrollInProgress,
+                    offset = { (index - position.value).coerceIn(-1f, 1f) },
                     onPreview = { scope.launch {
                         if (motion) state.animateScrollToPage(index,
                             animationSpec = spring(MangaMotion.GestureDamping, MangaMotion.GestureStiffness))
                         else state.scrollToPage(index)
-                    } }, enabled = visible, onOpen = onOpen, onRatings = onRatings, showSource = showSource)
+                    } }, enabled = visible, onOpen = onOpen,
+                    onRatings = onRatings, showSource = showSource)
             }
             Box(Modifier.fillMaxWidth().height(4.dp), contentAlignment = Alignment.Center) {
                 val color = MaterialTheme.colorScheme.onSurface
                 if (manga.size > 1) Canvas(Modifier.size(width = (manga.size * 16).dp, height = 4.dp).clearAndSetSemantics { }) {
+                    val slot = size.width / manga.size
+                    val page = position.value
+                    val visualPage = if (rtl) manga.lastIndex - page else page
                     repeat(manga.size) { index ->
-                        val visualIndex = if (rtl) manga.lastIndex - index else index
-                        val weight = (1f - abs(position.value - index)).coerceIn(0f, 1f)
-                        val width = (4f + 10f * weight).dp.toPx()
-                        drawRoundRect(color.copy(alpha = .13f + .45f * weight),
-                            topLeft = Offset((visualIndex * 16 + 8).dp.toPx() - width / 2f, 0f),
-                            size = Size(width, size.height), cornerRadius = CornerRadius(size.height / 2f))
+                        val distance = abs(index - visualPage).coerceAtMost(1f)
+                        drawCircle(color.copy(alpha = .15f * distance), radius = size.height / 2f,
+                            center = Offset((index + .5f) * slot, size.height / 2f))
                     }
+                    val center = (visualPage + .5f) * slot
+                    val fraction = page - floor(page)
+                    val width = 14.dp.toPx() + if (motion) 4.dp.toPx() * (4f * fraction * (1f - fraction)) else 0f
+                    drawRoundRect(color.copy(alpha = .60f), topLeft = Offset(center - width / 2f, 0f),
+                        size = Size(width, size.height), cornerRadius = CornerRadius(size.height / 2f))
                 }
             }
         }
@@ -361,7 +370,7 @@ private fun DesktopFeaturedRecommendations(
                                         color = color, atmosphere = color,
                                         onColor = { extracted[entry.coverUrl] = it }, onReady = {},
                                         modifier = Modifier.fillMaxSize().mangaCoverCard(22.dp),
-                                        emphasis = { 1f }, offset = { 0f }, onPreview = {},
+                                        emphasis = { 1f }, settled = true, scrolling = false, offset = { 0f }, onPreview = {},
                                         enabled = visible, onOpen = onOpen, onRatings = onRatings, showSource = showSource)
                                 }
                             }
@@ -407,6 +416,8 @@ private fun FeaturedManga(
     onReady: () -> Unit,
     modifier: Modifier,
     emphasis: () -> Float,
+    settled: Boolean,
+    scrolling: Boolean,
     offset: () -> Float,
     onPreview: () -> Unit,
     enabled: Boolean,
@@ -454,22 +465,23 @@ private fun FeaturedManga(
     val ink = if (lightInk) Color.White else Color(0xFF151717)
     val captionTone = lerp(textBase, if (lightInk) Color.Black else Color.White, .08f)
     val information = {
-        val t = ((emphasis() - .55f) / .45f).coerceIn(0f, 1f)
+        val t = ((emphasis() - .16f) / .56f).coerceIn(0f, 1f)
         t * t * (3f - 2f * t)
     }
-    Box(modifier.browseIntentWarmup(manga, repository, interaction, enabled)
-        .clickable(interactionSource = interaction, indication = null, role = Role.Button, enabled = enabled,
-        onClickLabel = "查看${manga.title}") {
-            if (emphasis() < .98f) onPreview() else {
+    val acceptsTap = enabled && !scrolling
+    Box(modifier.browseIntentWarmup(manga, repository, interaction, acceptsTap && settled)
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button, enabled = acceptsTap,
+        onClickLabel = if (settled) "查看详情" else "选中这部推荐") {
+            if (!settled) onPreview() else {
                 transition?.select?.invoke(MangaCoverKey(manga.id, "discovery-featured"))
                 onOpen(manga)
             }
         }.semantics(mergeDescendants = true) { contentDescription = manga.title }
-        .motionPress(interaction, pressedScale = .985f)) {
+        .motionPress(interaction, enabled = acceptsTap, pressedScale = .985f)) {
         BoxWithConstraints(Modifier.matchParentSize()) {
             val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
             val intrinsic = painter.intrinsicSize
-            val aspect = if (intrinsic.width.isFinite() && intrinsic.height.isFinite() &&
+            val aspect = if (intrinsic != Size.Unspecified && intrinsic.width.isFinite() && intrinsic.height.isFinite() &&
                 intrinsic.width > 0f && intrinsic.height > 0f)
                 intrinsic.width / intrinsic.height else 2f / 3f
             val pictureHeight = (maxHeight - if (inlineInformation) 12.dp else captionHeight + 10.dp)
@@ -489,22 +501,43 @@ private fun FeaturedManga(
             val infoHeight = if (inlineInformation) maxHeight - 12.dp else captionHeight
             Box(Modifier.matchParentSize().drawBehind {
                 drawRect(if (solidCaption) captionTone else lerp(coverTone, atmosphere.value, .15f).copy(alpha = fieldAlpha))
-            }) {
-                Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize().graphicsLayer { alpha = 1f - emphasis() })
+            })
+            // A single artwork window grows from a cropped edge preview to the complete poster.
+            // Only this child remeasures as the finger moves. The decode and the caption stay fixed.
+            Box(Modifier.matchParentSize().layout { measurable, bounds ->
+                val weight = emphasis()
+                val fit = if (motion) weight * (2f - weight) else if (settled) 1f else 0f
+                val width = (bounds.maxWidth + (posterWidth.toPx() - bounds.maxWidth) * fit)
+                    .roundToInt().coerceIn(0, bounds.maxWidth)
+                val height = (bounds.maxHeight + (posterHeight.toPx() - bounds.maxHeight) * fit)
+                    .roundToInt().coerceIn(0, bounds.maxHeight)
+                val frame = measurable.measure(Constraints.fixed(width, height))
+                layout(bounds.maxWidth, bounds.maxHeight) {
+                    val shift = if (motion) offset() * 4.dp.toPx() * fit else 0f
+                    val x = (posterLeft.toPx() * fit + shift).roundToInt().coerceIn(0, bounds.maxWidth - width)
+                    val y = (posterTop.toPx() * fit).roundToInt().coerceIn(0, bounds.maxHeight - height)
+                    frame.placeRelative(x, y)
+                }
+            }.mangaSharedCover(manga.id, "discovery-featured").clip(RoundedCornerShape(16.dp)),
+                contentAlignment = Alignment.Center) {
+                if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
+                    tint = ink.copy(alpha = .22f), modifier = Modifier.size(28.dp))
+                Image(painter, contentDescription = null, modifier = Modifier.matchParentSize(),
+                    contentScale = if (settled && (!scrolling || !motion)) ContentScale.Fit else ContentScale.Crop)
             }
             Box(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight),
                 contentAlignment = if (inlineInformation) Alignment.CenterStart else Alignment.BottomStart) {
                 Column(Modifier.fillMaxWidth().drawWithCache {
                     // Feather around the measured title and metrics. Logical placement follows RTL;
-                    // the parent card clips the falloff and the sharp poster paints above it.
-                    val radiusX = size.width + 8.dp.toPx()
-                    val radiusY = size.height + 8.dp.toPx()
+                    // the parent card clips the falloff when the artwork travels under the caption.
+                    val radiusX = size.width / 2f + 8.dp.toPx()
+                    val radiusY = size.height / 2f + (if (inlineInformation) 8.dp else 2.dp).toPx()
                     val midpoint = Offset(size.width / 2f, size.height / 2f)
                     val wash = Brush.radialGradient(0f to captionTone, .68f to captionTone.copy(alpha = .95f),
                         1f to captionTone.copy(alpha = 0f), center = midpoint, radius = radiusX)
                     onDrawBehind {
-                        if (!solidCaption) scale(1f, radiusY / radiusX, midpoint) {
+                        if (solidCaption) drawRect(captionTone, alpha = information())
+                        else scale(1f, radiusY / radiusX, midpoint) {
                             drawCircle(wash, radiusX, midpoint, alpha = information())
                         }
                     }
@@ -520,19 +553,9 @@ private fun FeaturedManga(
                         maxLines = if (inlineInformation) 3 else titleLines, overflow = TextOverflow.Ellipsis)
                     if (showSource) MangaBrowseSource(manga, foreground = ink.copy(alpha = .80f))
                     else MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,
-                        onExpand = if (enabled && information() >= .98f && onRatings != null) ({ onRatings(manga) }) else null)
+                        onExpand = if (acceptsTap && settled && onRatings != null) ({ onRatings(manga) }) else null)
                 }
             }
-            if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
-                tint = ink.copy(alpha = .22f), modifier = Modifier.offset(posterLeft, posterTop)
-                    .size(posterWidth, posterHeight).padding(20.dp))
-            Image(painter, contentDescription = null, contentScale = ContentScale.Fit,
-                modifier = Modifier.offset(posterLeft, posterTop).size(posterWidth, posterHeight)
-                    .mangaSharedCover(manga.id, "discovery-featured")
-                    .graphicsLayer {
-                        translationX = offset() * 4.dp.toPx()
-                        alpha = emphasis()
-                    }.clip(RoundedCornerShape(16.dp)))
         }
     }
 }
