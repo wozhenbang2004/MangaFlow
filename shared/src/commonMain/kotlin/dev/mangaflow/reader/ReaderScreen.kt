@@ -11,10 +11,8 @@ import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import me.saket.telephoto.zoomable.ZoomableState
 import me.saket.telephoto.zoomable.rememberZoomableState
-import me.saket.telephoto.zoomable.ZoomableContentLocation
 import me.saket.telephoto.zoomable.zoomable
 import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.LayoutDirection
 import dev.mangaflow.storage.swipeRightForNext
 
@@ -201,7 +199,6 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.onGloballyPositioned
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.imagePlatformContext
@@ -2300,6 +2297,7 @@ private fun ChapterPages(
     val endRevealPx = with(LocalDensity.current) { 24.dp.roundToPx() }
     val previewHeightPx = with(LocalDensity.current) { LocalMangaWindow.current.height.roundToPx() }
     var contentWidthPx by remember { mutableIntStateOf(0) }
+    val decodeViewport = readerDecodeViewport(contentWidthPx, previewHeightPx)
     val keyboardMotion = LocalMotionEnabled.current
     var prefetchViewport: ReaderPrefetchViewport? = null
     key(layoutKey) {
@@ -2429,21 +2427,27 @@ private fun ChapterPages(
         }
         LaunchedEffect(list) {
             var previous: Triple<Int, Int, Int>? = null
+            var resizeOrigin: ReaderReturnLocation? = null
             snapshotFlow {
                 Triple(list.layoutInfo.viewportSize.width,
                     list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex), list.firstVisibleItemScrollOffset)
             }.distinctUntilChanged().collect { current ->
                 val old = previous
                 previous = current
-                if (!restoring && old != null && old.first > 0 && current.first > 0 && old.first != current.first) {
-                    // A vertical page's height scales with its viewport width. Keep the same
-                    // place in the original image while rotating/resizing, without a new history format.
-                    val offset = ReaderReturnLocation(old.second, old.third, old.first).offsetAtWidth(current.first)
-                    withoutScrollDirection {
-                        list.stopScroll()
-                        list.scrollToItem(old.second, offset)
+                if (!restoring && old != null && old.first > 0 && current.first > 0 && old.first != current.first &&
+                    (platformKind != PlatformKind.DESKTOP || !list.isScrollInProgress)) {
+                    // Keep the original coordinate for a whole window drag. Rounding the previous
+                    // pixel offset at every intermediate width can move a long strip by many lines.
+                    val origin = resizeOrigin?.takeIf { it.pageIndex == old.second && it.offsetAtWidth(old.first) == old.third }
+                        ?: ReaderReturnLocation(old.second, old.third, old.first)
+                    val offset = origin.offsetAtWidth(current.first)
+                    resizeOrigin = origin
+                    if (current.second != origin.pageIndex || current.third != offset) withoutScrollDirection {
+                        list.scrollToItem(origin.pageIndex, offset)
                     }
-                    previous = Triple(current.first, old.second, offset)
+                    previous = Triple(current.first, origin.pageIndex, offset)
+                } else if (old != current) {
+                    resizeOrigin = null
                 }
             }
         }
@@ -2809,12 +2813,15 @@ private fun ChapterPages(
                     val second = group.second
                     val spreadZoom = rememberZoomableState()
                     var spreadViewport by remember { mutableStateOf(IntSize.Zero) }
-                    val spreadSlots = remember { mutableStateMapOf<Int, IntRect>() }
-                    if (second != null && spreadViewport.width > 0 && spreadViewport.height > 0) {
-                        spreadZoom.contentScale = ContentScale.Fit
-                        spreadZoom.contentAlignment = Alignment.Center
-                        spreadZoom.setContentLocation(ZoomableContentLocation.scaledInsideAndCenterAligned(
-                            Size(spreadViewport.width.toFloat(), spreadViewport.height.toFloat())))
+                    val rtl = preferences.mode == ReadingMode.RIGHT_TO_LEFT
+                    val leftPage = if (rtl && second != null) second else group.first
+                    val rightPage = if (rtl) group.first else second ?: group.first
+                    if (desktop && second != null) {
+                        fun imageSize(index: Int): IntSize {
+                            val page = replacements?.get(index)?.page ?: pages[index]
+                            return pageDimensions[page.url] ?: IntSize(page.width, page.height)
+                        }
+                        RetainDesktopSpreadFocus(spreadZoom, spreadViewport, imageSize(leftPage), imageSize(rightPage))
                     }
                     DisposableEffect(index, second, spreadZoom) {
                         if (second != null) spreadCameras[index] = spreadZoom
@@ -2824,20 +2831,13 @@ private fun ChapterPages(
                         }
                     }
                     val renderImage: @Composable (Int, Modifier, Alignment) -> Unit = { imageIndex, modifier, alignment ->
-                        Box(modifier.onGloballyPositioned { coordinates ->
-                            if (second != null) {
-                                val position = coordinates.positionInParent()
-                                val x = position.x.roundToInt()
-                                val y = position.y.roundToInt()
-                                spreadSlots[imageIndex] = IntRect(x, y, x + coordinates.size.width, y + coordinates.size.height)
-                            }
-                        }) {
+                        Box(modifier) {
                             CompositionLocalProvider(LocalLayoutDirection provides pageLayoutDirection) {
                             ReaderPage(
                                 pages[imageIndex], headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage,
                                 observePageTransfer = observePageTransfer, paged = true, pagedAlignment = alignment, onTap = onTap,
                                 spreadViewport = if (second != null) ReaderSpreadViewport(spreadZoom, spreadViewport,
-                                    spreadSlots[imageIndex] ?: IntRect.Zero) else null,
+                                    spreadViewport.spreadSlot(right = imageIndex == rightPage)) else null,
                                 sourceAlternatives = sourceAlternatives, sourceName = sourceName,
                                 readySourceVariants = readySourceVariants, prefetchFailure = prefetchFailures[imageIndex],
                                 pageCount = pages.size, foreground = preferences.theme.foreground(), onShowControls = onShowControls,
@@ -2861,6 +2861,8 @@ private fun ChapterPages(
                                 },
                                 onComposed = { present -> if (present) composedPages[imageIndex] = true else composedPages.remove(imageIndex) },
                                 prefetch = prefetchRequests[imageIndex],
+                                knownDimensions = pageDimensions[pages[imageIndex].url],
+                                onDimensionsKnown = { pageDimensions[pages[imageIndex].url] = it },
                                 isVisible = { active && pager.currentPage == index },
                                 onChapterSwipeReadyChanged = { ready ->
                                     if (ready) swipeReadyPages[imageIndex] = true else swipeReadyPages.remove(imageIndex)
@@ -2872,7 +2874,7 @@ private fun ChapterPages(
                     if (second != null) {
                         // Pair the image edges at the spine, leaving unused space outside the spread.
                         // Reading direction, rather than the system locale, selects the physical sides.
-                        Row(
+                        ReaderSpreadRow(
                             Modifier.fillMaxSize().clipToBounds().onSizeChanged { spreadViewport = it }
                                 .pointerInput(spreadZoom, active) {
                                     if (active) awaitEachGesture {
@@ -2889,17 +2891,9 @@ private fun ChapterPages(
                                     }
                                 }
                                 .zoomable(spreadZoom, enabled = active && pager.currentPage == index, onClick = { onTap() }),
-                            horizontalArrangement = Arrangement.Absolute.Left,
-                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            val rightToLeft = preferences.mode == ReadingMode.RIGHT_TO_LEFT
-                            val ordered = if (rightToLeft) listOf(second, group.first) else listOf(group.first, second)
-                            ordered.forEachIndexed { slot, imageIndex ->
-                                key(imageIndex) {
-                                    renderImage(imageIndex, Modifier.weight(1f).fillMaxHeight(),
-                                        if (slot == 0) AbsoluteAlignment.CenterRight else AbsoluteAlignment.CenterLeft)
-                                }
-                            }
+                            key(leftPage) { renderImage(leftPage, Modifier.fillMaxSize(), AbsoluteAlignment.CenterRight) }
+                            key(rightPage) { renderImage(rightPage, Modifier.fillMaxSize(), AbsoluteAlignment.CenterLeft) }
                         }
                     } else {
                         renderImage(group.first, Modifier.fillMaxSize(), Alignment.Center)
@@ -2917,7 +2911,7 @@ private fun ChapterPages(
     // Layout-specific state is returned, never published by an asynchronous effect.
     return checkNotNull(prefetchViewport).copy(
         composed = composedPages, loaded = loadedPages, failedLoads = failedLoads,
-        width = { contentWidthPx }, height = previewHeightPx,
+        width = { decodeViewport.width }, height = decodeViewport.height,
         active = active, layoutKey = layoutKey,
         failed = { index, failure ->
             prefetchFailures.recordPrefetchFailure(index, failure)
@@ -3040,7 +3034,11 @@ internal class ReaderPrefetchCacheRecovery(var recovered: Boolean = false)
 private class ReaderPrefetchDownloadOwned : Exception("已有下载负责本页")
 
 private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize, val requestedSize: IntSize,
-    val memoryCacheKey: coil3.memory.MemoryCache.Key? = null)
+    val memoryCacheKey: coil3.memory.MemoryCache.Key?, val attempt: ReaderLoadAttempt, val resource: Page,
+    val desktopImage: coil3.Image?) {
+    fun resizedPlaceholder(owner: ReaderLoadAttempt, page: Page, size: IntSize) =
+        desktopImage?.takeIf { attempt === owner && resource == page && requestedSize != size }
+}
 
 private fun IntSize.readerAspectRatio(): Float = (width.toFloat() / height).coerceAtLeast(.005f)
 
@@ -4407,7 +4405,8 @@ private fun ReaderPageImage(
     }
     BoxWithConstraints(if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth()) {
         val viewportWidthPx = with(density) { maxWidth.roundToPx() }
-        val previewSize = readerPreviewSize(viewportWidthPx, with(density) { screenHeight.roundToPx() },
+        val decodeViewport = readerDecodeViewport(viewportWidthPx, with(density) { screenHeight.roundToPx() })
+        val previewSize = readerPreviewSize(decodeViewport.width, decodeViewport.height,
             maxWidthPx = imageRuntime.previewWidthPx, maxHeightPx = imageRuntime.previewHeightPx)
         val currentPreviewSize by rememberUpdatedState(previewSize)
         val resource = resolvedPage
@@ -4426,6 +4425,7 @@ private fun ReaderPageImage(
         }
         val request = rememberReaderPageRequest(resource, headers, attempt, previewSize,
             build = @DontMemoize { requested ->
+                val previousPixels = { loadedImage?.resizedPlaceholder(attempt, requested, previewSize) }
                 val rejected = bypassPrefetchCache != null && requested.url.startsWith("https:") &&
                     readerPageCacheKey(requested, headers, sourceId) == bypassPrefetchCache
                 readerImageRequest(context, requested, headers, sourceId)
@@ -4434,6 +4434,10 @@ private fun ReaderPageImage(
                 .apply {
                     // Retry a suspect cached original until a foreground network decode succeeds.
                     // Never evict a key that another visible request may already have replaced.
+                    if (platformKind == PlatformKind.DESKTOP) {
+                        placeholder { previousPixels() }
+                        error { previousPixels() }
+                    }
                     if (rejected && !prefetchCacheRecovery.recovered) {
                         diskCachePolicy(CachePolicy.WRITE_ONLY)
                         memoryCachePolicy(CachePolicy.DISABLED)
@@ -4455,14 +4459,19 @@ private fun ReaderPageImage(
                         val height = result.image.height
                         if (width > 0 && height > 0) {
                             loadedImage = LoadedReaderImage(result.diskCacheKey, IntSize(width, height), previewSize,
-                                result.memoryCacheKey)
+                                result.memoryCacheKey, attempt, requested,
+                                result.image.takeIf { platformKind == PlatformKind.DESKTOP })
                         }
                         loading = false
                         if (width > 0 && height > 0 && rejected &&
                             result.dataSource == coil3.decode.DataSource.NETWORK) prefetchCacheRecovery.recovered = true
                         loadChanged(true)
                     } },
-                    onError = { _, result -> if (attempt.acceptsResult && currentPreviewSize == previewSize) {
+                    onError = failed@{ _, result -> if (attempt.acceptsResult && currentPreviewSize == previewSize) {
+                        if (previousPixels() != null) {
+                            loading = false
+                            return@failed
+                        }
                         loadChanged(false)
                         if (isReaderAdmissionDeferred(result.throwable)) {
                             // A resource wait must not trigger missing-file recovery or

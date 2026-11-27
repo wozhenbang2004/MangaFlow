@@ -2,11 +2,12 @@ package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -19,6 +20,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
@@ -27,9 +29,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
@@ -51,51 +53,48 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun AnimeDiscoveryWatchShelf(entries: List<AnimeLibraryEntry>, scroll: LazyListState, active: Boolean,
     onOpenHistory: () -> Unit, continuationLabel: (AnimeLibraryEntry) -> String,
-    onResume: (AnimeLibraryEntry) -> Unit, besideGallery: Boolean) {
+    onResume: (AnimeLibraryEntry) -> Unit) {
     if (entries.isEmpty()) return
     val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-    val rows = if (besideGallery) 2 else 1
-    val groups = (entries.size + rows - 1) / rows
-    val rail = if (besideGallery) rememberLazyListState() else scroll
     val motion = LocalMotionEnabled.current
     val scope = rememberCoroutineScope()
     fun turn(direction: Int) {
         scope.launch {
-            val layout = rail.layoutInfo
+            val layout = scroll.layoutInfo
             val visible = layout.visibleItemsInfo.count {
                 it.offset >= layout.viewportStartOffset && it.offset + it.size <= layout.viewportEndOffset
             }.coerceAtLeast(1)
-            val leading = rail.firstVisibleItemIndex + if (direction < 0 && rail.firstVisibleItemScrollOffset > 0) 1 else 0
-            val target = (leading + visible * direction).coerceIn(0, groups - 1)
-            if (motion) rail.animateScrollToItem(target) else rail.scrollToItem(target)
+            val leading = scroll.firstVisibleItemIndex + if (direction < 0 && scroll.firstVisibleItemScrollOffset > 0) 1 else 0
+            val target = (leading + visible * direction).coerceIn(0, entries.lastIndex)
+            if (motion) scroll.animateScrollToItem(target) else scroll.scrollToItem(target)
         }
     }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val gap = 10.dp
-        val targetWidth = 264.dp * scale
+        val wide = maxWidth >= 600.dp * scale
+        val gap = if (wide) 14.dp else 10.dp
+        val targetWidth = (if (wide) 200.dp else 264.dp) * scale
         val across = ((maxWidth + gap) / (targetWidth + gap)).toInt().coerceAtLeast(1)
         val cardWidth = when {
-            besideGallery -> maxWidth
-            groups == 1 -> minOf(maxWidth, 344.dp * scale)
+            entries.size == 1 -> minOf(maxWidth, (if (wide) 260.dp else 344.dp) * scale)
             across > 1 -> (maxWidth - gap * (across - 1)) / across
             else -> (maxWidth - 64.dp).coerceAtLeast(targetWidth).coerceAtMost(344.dp * scale).coerceAtMost(maxWidth)
         }
-        val paged = platformKind == PlatformKind.DESKTOP && groups > (if (besideGallery) 1 else across)
+        val paged = platformKind == PlatformKind.DESKTOP && entries.size > across
         val separateControls = paged && maxWidth < 200.dp * scale
         val useHistoryIcon = maxWidth < 160.dp * scale || paged && maxWidth < 250.dp * scale
         val pageControls: @Composable () -> Unit = {
-            MotionIconButton({ turn(-1) }, Modifier.size(40.dp), enabled = active && rail.canScrollBackward,
+            MotionIconButton({ turn(-1) }, Modifier.size(40.dp), enabled = active && scroll.canScrollBackward,
                 tooltip = "较新的观看记录") {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, "较新的观看记录", Modifier.size(18.dp))
             }
-            MotionIconButton({ turn(1) }, Modifier.size(40.dp), enabled = active && rail.canScrollForward,
+            MotionIconButton({ turn(1) }, Modifier.size(40.dp), enabled = active && scroll.canScrollForward,
                 tooltip = "较早的观看记录") {
                 Icon(Icons.AutoMirrored.Outlined.ArrowForward, "较早的观看记录", Modifier.size(18.dp))
             }
         }
         Column {
             Row(Modifier.fillMaxWidth().heightIn(min = 46.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("最近观看", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge,
+                Text("继续观看", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (paged && !separateControls) pageControls()
                 if (useHistoryIcon) {
@@ -109,18 +108,12 @@ internal fun AnimeDiscoveryWatchShelf(entries: List<AnimeLibraryEntry>, scroll: 
             if (separateControls) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 pageControls()
             }
-            LazyRow(state = rail, modifier = Modifier.fillMaxWidth(), userScrollEnabled = active,
+            LazyRow(state = scroll, modifier = Modifier.fillMaxWidth(), userScrollEnabled = active,
                 horizontalArrangement = Arrangement.spacedBy(gap), contentPadding = PaddingValues(bottom = 3.dp)) {
-                items(groups, key = { entries[it * rows].subject.id }) { group ->
-                    Column(Modifier.width(cardWidth), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        for (index in group * rows until minOf((group + 1) * rows, entries.size)) {
-                            val entry = entries[index]
-                            key(entry.subject.id) {
-                                AnimeDiscoveryResumeCard(entry, continuationLabel(entry), active,
-                                    compact = besideGallery && index % rows != 0,
-                                    reflow = cardWidth < 205.dp * scale, onResume = { onResume(entry) })
-                            }
-                        }
+                items(entries, key = { it.subject.id }) { entry ->
+                    Box(Modifier.width(cardWidth)) {
+                        AnimeDiscoveryResumeCard(entry, continuationLabel(entry), active, wide,
+                            reflow = cardWidth < 205.dp * scale, onResume = { onResume(entry) })
                     }
                 }
             }
@@ -131,14 +124,44 @@ internal fun AnimeDiscoveryWatchShelf(entries: List<AnimeLibraryEntry>, scroll: 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnimeDiscoveryResumeCard(entry: AnimeLibraryEntry, action: String, active: Boolean,
-    compact: Boolean, reflow: Boolean, onResume: () -> Unit) {
+    wide: Boolean, reflow: Boolean, onResume: () -> Unit) {
     val progress = entry.resume ?: return
     val colors = MaterialTheme.colorScheme
     val accessibility = LocalGlassAccessibilitySettings.current
     val opaque = accessibility.increaseContrast || accessibility.reduceTransparency
     val interaction = remember(entry.subject.id) { MutableInteractionSource() }
-    val coverWidth = if (compact || reflow) 43.dp else 55.dp
+    val coverWidth = if (reflow) 43.dp else 55.dp
     val title = entry.subject.title.ifBlank { entry.subject.originalTitle.ifBlank { "未命名番剧" } }
+    val click = Modifier.fillMaxWidth().clip(RoundedCornerShape(if (wide) 12.dp else 16.dp))
+        .clickable(interactionSource = interaction, indication = LocalIndication.current,
+            enabled = active, role = Role.Button, onClickLabel = action, onClick = onResume)
+        .motionPress(interaction, enabled = active, pressedScale = .985f)
+    if (wide) {
+        val episode = animeWatchedEpisodeName(entry, progress)
+        Column(click.semantics { stateDescription = episode + "，" + animeWatchPosition(progress) },
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Box(Modifier.fillMaxWidth().aspectRatio(2.04f).clip(RoundedCornerShape(11.dp))) {
+                AnimeResumePoster(entry, title, Modifier.matchParentSize(), wide = true)
+                Text(if (progress.completed) "已看完" else "看到 " + animeTime(progress.positionMs),
+                    Modifier.align(Alignment.BottomEnd).padding(7.dp).clearAndSetSemantics { }
+                        .background(colors.surface.copy(alpha = if (opaque) 1f else .93f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    color = colors.onSurface, style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!progress.completed) animeWatchFraction(progress)?.let { fraction ->
+                    key(progress.episodeId) {
+                        AnimeWatchProgressLine(fraction, Modifier.align(Alignment.BottomStart).background(colors.surface))
+                    }
+                }
+            }
+            Text(title, Modifier.padding(start = 2.dp, top = 2.dp), style = animeWorkTitleStyle(), color = colors.onSurface,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(if (progress.completed) action else episode, Modifier.padding(horizontal = 2.dp).clearAndSetSemantics { },
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        return
+    }
     val details: @Composable () -> Unit = {
         Text(animeWatchedEpisodeName(entry, progress), color = colors.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall, maxLines = if (reflow) 2 else 1, overflow = TextOverflow.Ellipsis)
@@ -157,15 +180,11 @@ private fun AnimeDiscoveryResumeCard(entry: AnimeLibraryEntry, action: String, a
             key(progress.episodeId) { AnimeWatchProgressLine(fraction, Modifier.padding(top = 2.dp)) }
         }
     }
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
-        .background(colors.surfaceContainerLow.copy(alpha = if (opaque) 1f else if (compact) .48f else .77f))
-        .clickable(interactionSource = interaction, indication = null, enabled = active, role = Role.Button,
-            onClickLabel = action, onClick = onResume)
-        .motionPress(interaction, enabled = active, pressedScale = .985f)
-        .padding(horizontal = 10.dp, vertical = if (compact) 6.dp else 9.dp),
+    Column(click.background(colors.surfaceContainerLow.copy(alpha = if (opaque) 1f else .77f))
+        .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-            AnimeResumePoster(entry, title, coverWidth)
+            AnimeResumePoster(entry, title, Modifier.width(coverWidth).aspectRatio(2f / 3f), wide = false)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(title, style = animeWorkTitleStyle(), color = colors.onSurface,
                     maxLines = if (reflow) 3 else 2, overflow = TextOverflow.Ellipsis)
@@ -177,7 +196,7 @@ private fun AnimeDiscoveryResumeCard(entry: AnimeLibraryEntry, action: String, a
 }
 
 @Composable
-private fun AnimeResumePoster(entry: AnimeLibraryEntry, title: String, width: Dp) {
+private fun AnimeResumePoster(entry: AnimeLibraryEntry, title: String, modifier: Modifier, wide: Boolean) {
     val subject = entry.subject
     val detail = entry.catalogDetail?.takeIf { it.subject.id == subject.id }
     val candidates = remember(subject, detail?.subject, entry.nativeMetadata, detail?.metadataSubject, entry.metadataAutoMatchDisabled) {
@@ -191,8 +210,8 @@ private fun AnimeResumePoster(entry: AnimeLibraryEntry, title: String, width: Dp
     var imageVisible by remember(candidates) { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
     val initial = remember(title) { title.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() }
-    Box(Modifier.width(width).aspectRatio(2f / 3f).clearAndSetSemantics { }
-        .clip(RoundedCornerShape(9.dp)).background(colors.secondaryContainer), contentAlignment = Alignment.Center) {
+    Box(modifier.clearAndSetSemantics { }
+        .clip(RoundedCornerShape(if (wide) 11.dp else 9.dp)).background(colors.secondaryContainer), contentAlignment = Alignment.Center) {
         if (!imageVisible) {
             if (initial != null) Text(initial, style = animeWorkTitleStyle(large = true), color = colors.onSecondaryContainer,
                 maxLines = 1)
@@ -207,6 +226,7 @@ private fun AnimeResumePoster(entry: AnimeLibraryEntry, title: String, width: Dp
             }
             key(request) {
                 AsyncImage(request, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
+                    alignment = if (wide) BiasAlignment(0f, -.56f) else Alignment.Center,
                     onSuccess = { if (selection == index) imageVisible = true },
                     onError = {
                         if (selection == index) {

@@ -130,11 +130,14 @@ internal fun ReaderEnhancedLayer(
     }
     val preview = key(liveLease) { rememberAsyncImagePainter(request) }
     val previewState by preview.state.collectAsState()
-    val ready = previewState is AsyncImagePainter.State.Success
-    val canDecodeTiles = ready || (desktop && previewState is AsyncImagePainter.State.Error)
-    val previewPixels by rememberUpdatedState(
-        (previewState as? AsyncImagePainter.State.Success)?.result?.image?.let { IntSize(it.width, it.height) }
-    )
+    val success = previewState as? AsyncImagePainter.State.Success
+    var previousPreview by remember(liveLease) { mutableStateOf<AsyncImagePainter.State.Success?>(null) }
+    if (desktop && success != null) SideEffect { previousPreview = success }
+    val displayedPreview = success ?: previousPreview
+    val ready = displayedPreview != null
+    val canDecodeTiles by rememberUpdatedState(ready || (desktop && previewState is AsyncImagePainter.State.Error))
+    val previewPixels by rememberUpdatedState(displayedPreview?.result?.image?.let { IntSize(it.width, it.height) })
+    val currentSpread by rememberUpdatedState(spread)
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     var tiles by remember(asset.identity, liveLease) { mutableStateOf<List<EnhancedTileBitmap>>(emptyList()) }
     // Both renderers read the finished enhanced file. On desktop either can supply the first frame.
@@ -145,7 +148,7 @@ internal fun ReaderEnhancedLayer(
 
     fun drawingBounds(): Rect {
         if (viewport.width <= 0 || viewport.height <= 0) return Rect.Zero
-        if (zoom != null && spread == null) return runCatching {
+        if (zoom != null && currentSpread == null) return runCatching {
             with(zoom.coordinateSystem) { unscaledContentBounds.rectIn(CoordinateSpace.Viewport) }
         }.getOrDefault(Rect.Zero)
         val fit = minOf(viewport.width.toFloat() / image.width, viewport.height.toFloat() / image.height)
@@ -154,8 +157,9 @@ internal fun ReaderEnhancedLayer(
         return Rect(offset.x.toFloat(), offset.y.toFloat(), (offset.x + drawn.width).toFloat(), (offset.y + drawn.height).toFloat())
     }
 
-    fun visibleBounds(): Rect =
-        if (spread != null && spread.viewport.width > 0 && spread.viewport.height > 0) runCatching {
+    fun visibleBounds(): Rect {
+        val spread = currentSpread
+        return if (spread != null && spread.viewport.width > 0 && spread.viewport.height > 0) runCatching {
             // The spread has one outer zoom transform; map its viewport back into this page's slot.
             with(spread.zoom.coordinateSystem) {
                 val bounds = unscaledContentBounds.rectIn(CoordinateSpace.ZoomableContent)
@@ -170,6 +174,7 @@ internal fun ReaderEnhancedLayer(
         }.getOrDefault(Rect.Zero) else liveWindow?.invoke()?.let {
             Rect(0f, it.top.toFloat(), viewport.width.toFloat(), it.bottom.toFloat())
         } ?: Rect(0f, 0f, viewport.width.toFloat(), viewport.height.toFloat())
+    }
 
     fun comparisonBounds(): Rect = visibleBounds().intersect(drawingBounds())
         .intersect(Rect(0f, 0f, viewport.width.toFloat(), viewport.height.toFloat())).takeIf {
@@ -179,6 +184,7 @@ internal fun ReaderEnhancedLayer(
 
     fun previewCovers(drawn: Rect): Boolean {
         val pixels = previewPixels ?: return false
+        val spread = currentSpread
         val scale = if (spread == null) 1f else {
             if (spread.viewport.width <= 0) return false
             runCatching {
@@ -192,10 +198,11 @@ internal fun ReaderEnhancedLayer(
             pixels.height + 0.5f >= minOf(drawn.height * scale, image.height.toFloat())
     }
 
-    LaunchedEffect(liveLease, zoom, spread, canDecodeTiles, viewport, alignment) {
-        if (!canDecodeTiles || viewport.width <= 0 || viewport.height <= 0) return@LaunchedEffect
+    LaunchedEffect(liveLease, zoom, spread?.zoom, alignment) {
         val retained = mutableMapOf<EnhancedTile, ImageBitmap>()
         snapshotFlow {
+            if (!canDecodeTiles || viewport.width <= 0 || viewport.height <= 0) return@snapshotFlow emptyList<EnhancedTile>()
+            val spread = currentSpread
             val drawn = drawingBounds()
             if (drawn.width <= 0 || drawn.height <= 0 || (desktop && previewCovers(drawn))) emptyList()
             else {
@@ -257,7 +264,9 @@ internal fun ReaderEnhancedLayer(
             } ?: 0f
             clipRect(left = divider, top = 0f, right = size.width, bottom = size.height) {
                 translate(bounds.left, bounds.top) {
-                    if (ready) with(preview) { draw(Size(bounds.width, bounds.height)) }
+                    if (displayedPreview != null) with(displayedPreview.painter) {
+                        draw(Size(bounds.width, bounds.height))
+                    }
                     tiles.forEach { decoded ->
                         val rect = decoded.tile.bounds
                         val left = rect.left.toFloat() / image.width * bounds.width

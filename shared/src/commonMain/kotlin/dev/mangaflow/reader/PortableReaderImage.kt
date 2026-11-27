@@ -7,9 +7,11 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -179,23 +181,33 @@ internal fun PortableReaderZoomableImage(
     val context = LocalMangaContext.current
     val policy = remember(context) { ExperiencePolicyStore.get(context) }
     val loader = SingletonImageLoader.get(imagePlatformContext(context))
-    val preview = rememberAsyncImagePainter(model, imageLoader = loader)
+    val request = model as? ImageRequest
+    val desktop = platformKind == PlatformKind.DESKTOP
+    // The reader's explicit disk key includes the source, route headers and original page.
+    // Request size may change while exactly the same file is still displayed and leased.
+    val sourceOwner = if (desktop && request?.diskCacheKey != null) request.diskCacheKey to request.data else model
+    val preview = key(sourceOwner) { rememberAsyncImagePainter(model, imageLoader = loader) }
     val result by preview.state.collectAsState()
-    val success = (result as? AsyncImagePainter.State.Success)?.result
-    var sourceFile by remember(model) { mutableStateOf<ReaderOriginalSource?>(null) }
-    var original by remember(model) { mutableStateOf<IntSize?>(null) }
+    val success = result as? AsyncImagePainter.State.Success
+    var previous by remember(sourceOwner) { mutableStateOf<AsyncImagePainter.State.Success?>(null) }
+    if (desktop && success != null) SideEffect { previous = success }
+    val displayed = success ?: previous
+    val diskKey = displayed?.result?.diskCacheKey
+    var sourceFile by remember(sourceOwner) { mutableStateOf<ReaderOriginalSource?>(null) }
+    var original by remember(sourceOwner) { mutableStateOf<IntSize?>(null) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
-    val tileState = remember(model) { mutableStateOf<List<DecodedReaderTile>>(emptyList()) }
+    val tileState = remember(sourceOwner) { mutableStateOf<List<DecodedReaderTile>>(emptyList()) }
     val zoom = spread?.zoom ?: state.zoomableState
-    LaunchedEffect(model) { state.detailError = null; state.detailNotice = null }
-    LaunchedEffect(result) { state.isImageDisplayed = success != null }
-    LaunchedEffect(model, success?.diskCacheKey, policy, loader) {
+    val liveSpread by rememberUpdatedState(spread)
+    LaunchedEffect(sourceOwner) { state.detailError = null; state.detailNotice = null }
+    LaunchedEffect(state, displayed != null) { state.isImageDisplayed = displayed != null }
+    LaunchedEffect(sourceOwner, diskKey, policy, loader) {
         var snapshot: DiskCache.Snapshot? = null
         try {
             val data = (model as? ImageRequest)?.data ?: model
             val local = (data as? String)?.let(::readerFilePath)
             val source = local?.let(::ReaderOriginalSource) ?: withContext(Dispatchers.IO) {
-                val key = success?.diskCacheKey ?: return@withContext null
+                val key = diskKey ?: return@withContext null
                 snapshot = loader.diskCache?.openSnapshot(key)
                 snapshot?.data?.toString()?.let { ReaderOriginalSource(it, key) }
             }
@@ -222,13 +234,14 @@ internal fun PortableReaderZoomableImage(
         finally { withContext(NonCancellable + Dispatchers.IO) { snapshot?.close() } }
     }
     // Tile arrivals invalidate drawing only; the zoom content keeps one stable painter.
-    val painter = remember(preview, original, tileState) { OriginalTilePainter(preview, original, tileState) }
+    val basePainter = if (desktop && displayed != null) displayed.painter else preview
+    val painter = remember(basePainter, original, tileState) { OriginalTilePainter(basePainter, original, tileState) }
     if (spread == null) {
         zoom.contentScale = contentScale
         zoom.contentAlignment = alignment
         zoom.setContentLocation(ZoomableContentLocation.scaledInsideAndCenterAligned(painter.intrinsicSize))
     }
-    LaunchedEffect(sourceFile, original, zoom, policy, spread, alignment, loader) {
+    LaunchedEffect(sourceFile, original, zoom, policy, alignment, loader) {
         val source = sourceFile ?: return@LaunchedEffect
         val imageSize = original ?: return@LaunchedEffect
         withReaderRegionDecoder(source, loader.diskCache, onFailure = { failure ->
@@ -239,6 +252,7 @@ internal fun PortableReaderZoomableImage(
             val retained = mutableMapOf<ReaderTile, ReaderRegion>()
             var fallbackPixels = policy.state.value.runtime.fallbackDecodeMiPixels
             snapshotFlow {
+                val spread = liveSpread
                 if (viewport.width <= 0 || viewport.height <= 0 || !state.isImageDisplayed) emptyList()
                 else runCatching {
                     with(zoom.coordinateSystem) {

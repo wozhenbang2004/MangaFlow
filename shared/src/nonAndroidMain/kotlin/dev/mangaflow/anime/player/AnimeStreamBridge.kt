@@ -86,7 +86,10 @@ internal class AnimeStreamBridge private constructor(
     val lastFailureStatus: Int? get() = synchronized(lock) { failureStatus }
     private var failureRetryable: Boolean? = null
     val lastFailureRetryable: Boolean? get() = synchronized(lock) { failureRetryable }
-    private var attempt = 0L
+    private class ReadAttempt { val mediaDeliveries = atomic(0L) }
+    private var attempt = ReadAttempt()
+    /** Changes as media payload is delivered on this attempt, independently of playlist or subtitle traffic. */
+    val mediaDeliveryRevision: Long get() = synchronized(lock) { attempt.mediaDeliveries.value }
     private val startupOriginUntil = atomic(0L)
     private var lastStartupOriginAt: Long? = null
     private val releaseCache = runCatching { cache?.retain(asset) }.getOrNull()
@@ -94,7 +97,7 @@ internal class AnimeStreamBridge private constructor(
     private val bypassedCacheResources = mutableSetOf<String>()
 
     fun beginAttempt() = synchronized(lock) {
-        attempt++
+        attempt = ReadAttempt()
         failure = null
         failureStatus = null
         failureRetryable = null
@@ -108,7 +111,7 @@ internal class AnimeStreamBridge private constructor(
         lastStartupOriginAt?.let { monotonicTimeMillis() - it in 0L..3_000L } == true
     }
 
-    private fun observeStartupResponse(ownedAttempt: Long) {
+    private fun observeStartupResponse(ownedAttempt: ReadAttempt) {
         val until = startupOriginUntil.value
         if (until == 0L) return
         val now = monotonicTimeMillis()
@@ -116,7 +119,7 @@ internal class AnimeStreamBridge private constructor(
             startupOriginUntil.compareAndSet(until, 0L)
             return
         }
-        synchronized(lock) { if (ownedAttempt == attempt) lastStartupOriginAt = now }
+        synchronized(lock) { if (ownedAttempt === attempt) lastStartupOriginAt = now }
     }
 
     lateinit var mediaUrl: String
@@ -211,6 +214,7 @@ internal class AnimeStreamBridge private constructor(
                             if (count < 0) break
                             warmReads?.admit(count)
                             if (segment == null) output.bytes(buffer, count) else segment.write(buffer, count)
+                            if (count > 0) ownedAttempt.mediaDeliveries.incrementAndGet()
                         }
                     }
                     segment?.finish()
@@ -241,6 +245,7 @@ internal class AnimeStreamBridge private constructor(
                     output.headers(if (range == null) 200 else 206, headers)
                     if (request.method == "GET") connection.write(buffered.bytes, start.toInt(), count)
                 }
+                if (request.method == "GET" && count > 0) ownedAttempt.mediaDeliveries.incrementAndGet()
                 return
             }
             var url = resource.url
@@ -286,7 +291,7 @@ internal class AnimeStreamBridge private constructor(
                             }
                             received.code !in 200..299 -> {
                                 synchronized(lock) {
-                                    if (ownedAttempt == attempt) {
+                                    if (ownedAttempt === attempt) {
                                         failure = "来源返回 HTTP ${received.code}，可刷新线路或选择其他来源"
                                         failureStatus = received.code
                                         failureRetryable = received.code >= 500 || received.code == 408
@@ -354,6 +359,8 @@ internal class AnimeStreamBridge private constructor(
                             val normalized = segment
                             if (normalized == null) output.bytes(bytes, count) else normalized.write(bytes, count)
                         }
+                        if (classified && !manifest && count > 0 && (resource.kind == Kind.MEDIA || resource.kind == Kind.AUTO))
+                            ownedAttempt.mediaDeliveries.incrementAndGet()
                     },
                 )
                 if (redirect != null) {
@@ -388,7 +395,7 @@ internal class AnimeStreamBridge private constructor(
             throw cancel
         } catch (error: Throwable) {
             synchronized(lock) {
-                if (ownedAttempt == attempt) {
+                if (ownedAttempt === attempt) {
                     failure = readablePlayerError(error)
                     failureStatus = null
                     failureRetryable = error !is IllegalArgumentException && error !is IllegalStateException

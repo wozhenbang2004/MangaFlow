@@ -263,16 +263,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     )
     private val associationSignatures = mutableMapOf<String, AssociationSignature>()
     private val associationCandidates = mutableMapOf<String, Pair<String?, List<AnimeSourceTitle>>>()
-    private data class StartupDiscoveryLead(
-        val sourceId: String, val revision: String, val route: DownloadRouteSnapshot, val network: String,
-        val preferredHeight: Int, val directory: AnimeSourceTitle?, val group: String?,
-        val sameWorkingDirectory: Boolean, val startupOrder: Double,
-    )
-    private data class AdmittedStartupDirectory(
-        val lead: StartupDiscoveryLead, val subjectId: String, val detailOwner: Long, val restoreEpoch: Long,
-        val attempt: Long, val catalogRequest: Long,
-    )
-    private var admittedStartupDirectory: AdmittedStartupDirectory? = null
+    private data class StartupDiscoveryLead(val sourceId: String, val revision: String,
+        val route: DownloadRouteSnapshot, val sameWorkingDirectory: Boolean, val startupOrder: Double)
     private class EpisodeLineLookup(val visit: EpisodeLineLookupVisit, val sourceIds: Set<String>) {
         val attempts = mutableMapOf<String, Long>()
         var timeout: Job? = null
@@ -403,6 +395,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         var endingSkipped: Boolean = false,
         var nextPreparationNotBefore: Long = 0L,
         var recoveryHandled: Boolean = false,
+        var recoveryTimeline: Long? = null,
         var playbackStarted: Boolean = false,
         var firstFrameMeasurementSaved: Boolean = false,
         var steadyPlayback: SteadyPlayback? = null,
@@ -413,7 +406,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         var measuredDurationMs: Long? = null,
         val automaticIntent: Boolean = false,
         val explicitResolutionId: String? = null,
-        val preserveEarlierPositionMs: Long? = null,
+        var preserveEarlierPositionMs: Long? = null,
+        val openingTimeline: Long = -1L,
+        var pendingRecoverySeek: RecoveryPoint? = null,
+        var lastReadyTimeline: Long = -1L,
+        var lastReadyPositionMs: Long = 0L,
         var resumeNoticeShown: Boolean = false,
         var viewingPolicy: EnhancementPolicy? = null,
         val healthKeys: List<AnimeLineHealthKey> = emptyList(),
@@ -423,7 +420,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         var healthStallSince: Long? = null,
         var healthStalledMs: Long = 0L,
         var healthWindowFinished: Boolean = false,
-        var sourceDiscoveryPaused: Boolean = false,
+        var continueEpisodeDiscovery: Boolean? = null,
+        var standbyAddressScheduled: Boolean = false,
     )
     private data class PendingPlayback(
         val detail: AnimeDetail, val episode: AnimeEpisode, val option: AnimeEpisodeOption,
@@ -437,6 +435,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val preferredHeight: Int? = null,
         val preserveEarlierPositionMs: Long? = null,
         val savedResumeInput: SavedResumeInput? = null,
+        val pendingRecoverySeek: RecoveryPoint? = null,
     )
     private data class StalledStartup(val owner: ActivePlayback, val timeline: Long,
         val resolveGeneration: Long, val originResponded: Boolean)
@@ -474,6 +473,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private data class PlaybackReceipt(val playback: ActivePlayback, val positionMs: Long, val playWhenReady: Boolean)
     private data class RecoveryResume(val playback: ActivePlayback, val assetId: String, val positionMs: Long,
         val durationMs: Long?, val playWhenReady: Boolean)
+    private data class RecoveryPoint(val positionMs: Long, val durationMs: Long) {
+        fun fits(actualDurationMs: Long) = positionMs in 1L until actualDurationMs &&
+            kotlin.math.abs(actualDurationMs - durationMs) <= 1_000L
+    }
     private data class PlaybackIntentTiming(val subjectId: String, val episodeId: String, val startedAt: Long,
         val exactSavedPosition: Boolean = false)
     private data class ReviewContext(val detail: AnimeDetail, val remote: AnimeTrackingSnapshot, val restoreEpoch: Long)
@@ -1089,6 +1092,22 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         currentDetail(input.detailOwner, input.subject.id) &&
             savedResumeInput(input.subject.id, input.checkpoint.episodeId)?.let(input::sameOwner) == true
 
+    private fun matchesSavedRow(input: SavedResumeInput, row: AnimeSourceEpisode): Boolean {
+        val binding = input.binding
+        if (!binding.automatic && binding.selectedGroup != null && row.group != binding.selectedGroup) return false
+        val saved = input.checkpoint
+        return when {
+            saved.resumeLineKey != null -> animeResumeLineKey(input.bindingKey, row) == saved.resumeLineKey
+            input.intrinsic -> nativeEpisodeId(input.subject, row) == saved.episodeId
+            else -> binding.episodeMappings[saved.episodeId] == row.id
+        }
+    }
+
+    private fun savedLines(input: SavedResumeInput) = confirmedPlaybackLines(input.checkpoint.episodeId).filter {
+        it.sourceId == input.checkpoint.sourceId && it.catalog.id == input.binding.catalog.id &&
+            it.catalog.url == input.binding.catalog.url && matchesSavedRow(input, it.episode)
+    }
+
     /** At most one preferred same-line catalogue and address read per visit; no player until an explicit play. */
     private fun obtainSavedResume(input: SavedResumeInput, renew: Boolean = false): SavedResumeOpening {
         if (!renew) savedResumeOpening?.takeIf { it.input.sameOwner(input) && !it.result.isCancelled }?.let { return it }
@@ -1104,16 +1123,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     val catalog = sources.catalog(provider, input.binding.catalog, forceRefresh = true)
                     if (!ownsSavedResume(input)) return@read null
                     val row = withContext(Dispatchers.Default) {
-                        val mapping = input.binding.episodeMappings[saved.episodeId]
-                        catalog.episodes.singleOrNull { row ->
-                            (input.binding.automatic || input.binding.selectedGroup == null ||
-                                row.group == input.binding.selectedGroup) && when {
-                                saved.resumeLineKey != null ->
-                                    animeResumeLineKey(input.bindingKey, row) == saved.resumeLineKey
-                                input.intrinsic -> nativeEpisodeId(input.subject, row) == saved.episodeId
-                                else -> mapping != null && row.id == mapping
-                            }
-                        }
+                        catalog.episodes.singleOrNull { matchesSavedRow(input, it) }
                     } ?: return@read null
                     if (!ownsSavedResume(input)) return@read null
                     val beganAt = monotonicTimeMillis()
@@ -1161,6 +1171,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val input = savedResumeInput(subjectId, episodeId)?.takeIf { expected == null || it.checkpoint == expected }
             ?: return false
         val episode = savedResumeEpisode(input, detail)
+        val settings = mutableState.value.settings
+        if (expected == null && !retry && settings.automaticSourceRecovery && settings.automaticRecoveryAttempts > 0 &&
+            detail.ownsResumeEpisode(subjectId, episodeId) && hasAutomaticPlaybackLine(episodeId) &&
+            savedResumeOpening?.takeIf { it.input.sameOwner(input) }?.result?.isCompleted != true) {
+            playEpisode(episodeId, exactSavedPosition = true)
+            return true
+        }
         val opening = obtainSavedResume(input, renew = retry)
         val preparedBeforePlay = opening.result.isCompleted
         cancelPendingResume()
@@ -1184,8 +1201,20 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     ready = obtainSavedResume(input, renew = true).result.await()
                 if (!current()) return@launch
                 check(ownsSavedResume(input)) { "上次观看记录或线路已变化，位置仍保留。" }
-                val resolved = ready?.takeIf { freshOpeningAddress(it.address) }
-                    ?: error("上次播放线路暂不可续看，原观看位置已保留。")
+                val resolved = ready?.takeIf { freshOpeningAddress(it.address) } ?: run {
+                    val settingsNow = library.state.value.settings
+                    val catalogue = mutableState.value.detail
+                    if (settingsNow.automaticSourceRecovery && settingsNow.automaticRecoveryAttempts > 0 &&
+                        catalogue?.ownsResumeEpisode(subjectId, episodeId) == true) {
+                        val failed = savedLines(input).mapTo(mutableSetOf(), ::optionKey)
+                        releaseSavedResume()
+                        if (automaticPlaybackLines(episodeId).any { optionKey(it) !in failed })
+                            resolveAndPlay(episodeId, attempted = failed)
+                        else autoAssociateAndPlay(episodeId, attempted = failed)
+                        return@launch
+                    }
+                    error("上次播放线路暂不可续看，原观看位置已保留。")
+                }
                 val live = mutableState.value.detail ?: return@launch
                 val asset = resolved.address.asset.copy(episodeId = episodeId, title = live.subject.title + " · " + episode.title)
                 val resolution = asset.resolutions.singleOrNull {
@@ -2789,12 +2818,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         mutableState.update { it.copy(playbackTarget = AnimePlaybackTarget(episode, option,
             exactSavedPosition = exactSavedPosition), autoMatching = false) }
-        val preferredGrace = option == null && !exactSavedPosition && active == null &&
-            detail.subject.externalIds["native-source"] == null && explicitPlaybackSource(detail.subject.id) == null &&
-            preparedForEpisode(detail.subject.id, episodeId) == null
-        if (option == null && (!hasAutomaticPlaybackLine(episodeId) ||
-                preferredGrace && pendingStartupDirectory(episodeId, mutableState.value) != null)) {
-            autoAssociateAndPlay(episodeId, preferredDiscoveryGrace = preferredGrace)
+        if (option == null && !hasAutomaticPlaybackLine(episodeId)) {
+            autoAssociateAndPlay(episodeId)
         } else {
             resolveAndPlay(episodeId, option)
         }
@@ -2819,7 +2844,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         associationSignatures.clear()
         associationAttempts.clear()
         associationCandidates.clear()
-        admittedStartupDirectory = null
         catalogueJob?.cancel()
         catalogueJob = null
         catalogueRebuildRequested = false
@@ -2831,10 +2855,21 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             sourceAggregationCompleted = 0, sourceAggregationTotal = 0) }
     }
 
-    private fun pauseSourceAggregationForPlayback(owner: ActivePlayback) {
-        if (owner.sourceDiscoveryPaused) return
-        owner.sourceDiscoveryPaused = true
-        unifiedSearch.pauseSourceRequests()
+    private fun settlePlaybackDiscovery(owner: ActivePlayback) {
+        val settings = mutableState.value.settings
+        val keep = owner.localMedia == null && settings.automaticSourceRecovery && settings.automaticRecoveryAttempts > 0
+        val previous = owner.continueEpisodeDiscovery
+        if (previous == keep) return
+        if (previous == null) unifiedSearch.pauseSourceRequests()
+        owner.continueEpisodeDiscovery = keep
+        if (keep) {
+            if (previous == false) {
+                startSourceAggregation(owner.detail, episodeId = owner.episode.id)
+                prepareDetailOpeningAddresses()
+            }
+            return
+        }
+        releaseOpeningAddresses()
         val explicit = episodeLineLookup?.attempts.orEmpty()
         val unfinished = mutableState.value.sourceAggregation.filter { (id, progress) ->
             progress.phase.checking && associationJobs[id]?.isActive == true &&
@@ -3015,42 +3050,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             val startup = groupHealth ?: health("")
             if (exactRecent == null && (startup == null || startup.startupSucceeded <= startup.startupFailed))
                 return@mapNotNull null
-            StartupDiscoveryLead(id, revision, route, network, height, directory, group, exactRecent != null,
+            StartupDiscoveryLead(id, revision, route, exactRecent != null,
                 healthOrder(startup?.copy(addressP50Ms = null)))
         }.minWithOrNull(compareByDescending<StartupDiscoveryLead> { it.sameWorkingDirectory }
             .thenBy { it.startupOrder })
-    }
-
-    /** An actual admitted catalogue read, never an unbound prediction or another episode's line. */
-    private fun pendingStartupDirectory(episodeId: String, snapshot: AnimeScreenState): AdmittedStartupDirectory? {
-        val visit = admittedStartupDirectory ?: return null
-        val lead = visit.lead
-        val directory = lead.directory ?: return null
-        val detail = snapshot.detail?.takeIf { it.subject.id == visit.subjectId } ?: return null
-        val stored = library.state.value
-        if (!foreground || active != null || detail.episodes.none { it.id == episodeId } ||
-            visit.detailOwner != detailGeneration || visit.restoreEpoch != stored.restoreEpoch ||
-            associationAttempts[lead.sourceId] != visit.attempt || catalogRequests[lead.sourceId] != visit.catalogRequest ||
-            detail.subject.externalIds["native-source"] != null ||
-            explicitPlaybackSource(visit.subjectId) != null || sources.provider(lead.sourceId) == null ||
-            lead.route != playbackHistoryRoute(lead.sourceId) || lead.revision != discoverySourceRevision(lead.sourceId) ||
-            lead.network != playbackNetworkClass() || lead.preferredHeight != snapshot.settings.preferredSourceHeight ||
-            lead.sourceId in stored.entries[visit.subjectId]?.excludedSourceIds.orEmpty()) return null
-        val binding = stored.bindings.singleOrNull { it.subjectId == visit.subjectId && it.catalog.sourceId == lead.sourceId &&
-            it.catalog.id == directory.id && it.catalog.url == directory.url && it.catalog.sourceRevision == lead.revision &&
-            (it.selectedGroup == null || it.selectedGroup == lead.group) } ?: return null
-        // A successful source on a different work gets a head start, never a playback wait.
-        if (!lead.sameWorkingDirectory && episodeId !in binding.episodeMappings) return null
-        if (automaticPlaybackLines(episodeId, snapshot).any { it.sourceId == lead.sourceId &&
-                it.catalog.id == directory.id && it.catalog.url == directory.url &&
-                (lead.group == null || it.episode.group == lead.group) }) return null
-        val phase = snapshot.sourceAggregation[lead.sourceId]?.phase
-        return visit.takeIf {
-            phase == AnimeAssociationPhase.SEARCHING && associationJobs[lead.sourceId]?.isActive == true ||
-                phase == AnimeAssociationPhase.LINKED && snapshot.episodeOptionsLoading &&
-                snapshot.sourceCatalogs.any { catalog -> catalog.title.sourceId == lead.sourceId &&
-                    catalog.title.id == directory.id && catalog.title.url == directory.url && catalog.notice == null }
-        }
     }
 
     /** Detail-owned discovery, independent of player preparation and its cancellation. */
@@ -3068,7 +3071,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (lookup != null && (episodeLineLookup !== lookup || visibleLineLookupVisit !== lookup.visit ||
                 !ownsLineLookupVisit(lookup.visit))) return
         if (lookup == null && !force && !retryFailed && onlySourceId == null && mutableState.value.playbackTarget == null &&
-            active?.let { it.detail.subject.id == detail.subject.id && it.sourceDiscoveryPaused && !it.recoveryHandled } == true) return
+            active?.let { it.detail.subject.id == detail.subject.id && it.continueEpisodeDiscovery == false && !it.recoveryHandled } == true) return
         val nativeOrigin = detail.subject.externalIds["native-source"]
         val retiredOrigin = nativeOrigin?.let(::isRetiredAnimeSource) == true
         if (retiredOrigin && (detail.episodes.isEmpty() || detail.episodes.any { it.subjectId != detail.subject.id })) return
@@ -3205,17 +3208,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     }
                     var remainingSourceMs = 35_000L
                     var remainingSearchMs = 14_000L
-                    suspend fun <T> readSource(timeoutMs: Long, searching: Boolean = false,
-                        boundDirectory: AnimeSourceTitle? = null, read: suspend () -> T): T? {
+                    suspend fun <T> readSource(timeoutMs: Long, searching: Boolean = false, read: suspend () -> T): T? {
                         suspend fun admitted(): T? = associationPermits.withPermit {
                             if (!current()) return@withPermit null
                             val remaining = minOf(remainingSourceMs,
                                 if (searching) remainingSearchMs else remainingSourceMs)
                             if (remaining <= 0L) return@withPermit null
-                            if (lead != null && boundDirectory != null && boundDirectory == lead.directory) {
-                                admittedStartupDirectory = AdmittedStartupDirectory(lead, detail.subject.id, owner, epoch,
-                                    attempt, catalogRequest)
-                            }
                             report(AnimeAssociationPhase.SEARCHING)
                             val started = monotonicTimeMillis()
                             try { withTimeoutOrNull(minOf(timeoutMs, remaining)) { read() } }
@@ -3254,7 +3252,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     report(AnimeAssociationPhase.LINKED)
                                     return@aggregation true
                                 }
-                                val catalog = readSource(15_000L, boundDirectory = existing.catalog) {
+                                val catalog = readSource(15_000L) {
                                     sources.catalog(provider, existing.catalog, forceRefresh = force || retrySource)
                                 }
                                     ?: error("来源目录读取超时，请重试。")
@@ -3525,7 +3523,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val excluded = stored.entries[visit.subjectId]?.excludedSourceIds.orEmpty()
         val saved = onlineBindings(stored, visit.subjectId).mapTo(mutableSetOf()) { it.catalog.sourceId }
         val stoppedForPlayback = active?.let {
-            it.detail.subject.id == visit.subjectId && it.sourceDiscoveryPaused && !it.recoveryHandled
+            it.detail.subject.id == visit.subjectId && it.continueEpisodeDiscovery == false && !it.recoveryHandled
         } == true
         return sources.providers.map { it.id }.filterTo(linkedSetOf()) { id ->
             val phase = snapshot.sourceAggregation[id]?.phase
@@ -4323,7 +4321,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     /** Wait for progressive discovery, never cancel the other sources when one can start. */
     private fun autoAssociateAndPlay(episodeId: String, attempted: Set<String> = emptySet(),
-        lastFailure: AnimePlaybackFailure? = null, preferredDiscoveryGrace: Boolean = false) {
+        lastFailure: AnimePlaybackFailure? = null) {
         val detail = mutableState.value.detail ?: return
         val episode = detail.episodes.firstOrNull { it.id == episodeId } ?: return
         clearPreparation()
@@ -4334,11 +4332,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         pending = null
         cancelPendingResume()
         val exactSavedPosition = hasExactSavedPosition(episode)
-        val preferredUntil = playbackIntent?.takeIf { preferredDiscoveryGrace &&
-            it.subjectId == detail.subject.id && it.episodeId == episodeId }
-            ?.let { minOf(it.startedAt + ANIME_STARTUP_HEDGE_DELAY_MS, autoPlaybackDeadline) }
         mutableState.update { it.copy(resolving = true, autoMatching = true,
-            pendingPlayback = null, playbackTarget = AnimePlaybackTarget(episode, exactSavedPosition = exactSavedPosition)) }
+            pendingPlayback = null, playbackTarget = AnimePlaybackTarget(episode, exactSavedPosition = exactSavedPosition,
+                recoveringPlayback = recoveryFor(episode) != null)) }
         autoPlayJob = scope.launch {
             try {
                 library.awaitLoaded(); sources.extensions.ready.await()
@@ -4359,22 +4355,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     playbackDiscoveryRetried = true
                     startSourceAggregation(detail, retryFailed = true, episodeId = episodeId)
                     ready = awaitLines()
-                }
-                if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
-                if (ready != null && nextLineAvailable(ready) && preferredUntil != null) {
-                    val admitted = pendingStartupDirectory(episodeId, ready)
-                    val graceMs = preferredUntil - monotonicTimeMillis()
-                    // Only yield once to one admitted, exact work catalogue. Usable alternatives
-                    // never wait for unknown providers, every source, search/alias work, or a new deadline.
-                    if (admitted != null && graceMs > 0) {
-                        withTimeoutOrNull(graceMs) {
-                            state.first { pendingStartupDirectory(episodeId, it) !== admitted }
-                        }
-                        if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
-                        // A previously usable fallback can be withdrawn while the catalogue changes.
-                        // Then resume the existing wait; don't fail early or grant a second grace.
-                        ready = awaitLines()
-                    }
                 }
                 if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
                 if (ready != null && nextLineAvailable(ready)) {
@@ -4418,8 +4398,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         val refreshResolutionId = startupRefresh?.explicitResolutionId
         val ready = if (startupRefresh == null) preparedForEpisode(detail.subject.id, episodeId) else null
-        // An address or cached bytes save work for the selected line; neither proves that
-        // a lower-ranked line can start playback. The normal hedge still runs in parallel.
         val selected = if (option == null) options.firstOrNull()
             else currentPlaybackLine(episodeId, option)?.takeIf { canAttemptPlaybackLine(episodeId, it) }
         if (selected == null) {
@@ -4441,9 +4419,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         cancelPendingResume()
         val available = ready?.takeIf { samePlaybackLine(it.target.option, selected) }
+        // A personal choice gets priority. Historical speed orders the automatic race,
+        // but cannot hold back an already resolved and confirmed alternative.
         val protectSelected = manualOption != null && startupRefresh == null || available?.decoderAsset != null ||
-            attempted.isEmpty() && (selected.sourceId == explicitPlaybackSource(detail.subject.id) ||
-                currentWorkingSource(detail.subject.id)?.matches(selected) == true)
+            attempted.isEmpty() && selected.sourceId == explicitPlaybackSource(detail.subject.id)
         clearPreparation(keepDecoder = available)
         val owner = detailGeneration
         val addresses = matchingOpeningAddresses(episodeId) ?: if (canFallback) {
@@ -4458,15 +4437,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         addresses?.expiry = null
         val generation = ++resolveGeneration
         resolveJob?.cancel()
-        val selectedKey = playbackHistoryKey(detail.subject.id, episodeId, selected)
+        val retainedLines = if (canFallback) options + selected else listOf(selected)
+        val candidateKeys = retainedLines.mapNotNull { playbackHistoryKey(detail.subject.id, episodeId, it) }.toSet()
         addresses?.requests?.entries?.removeAll { (key, request) ->
-            (key != selectedKey && !request.result.isCompleted).also { if (it) request.result.cancel() }
+            (key !in candidateKeys).also { if (it) request.result.cancel() }
         }
         pending = null
         resolvingSourceId = selected.sourceId
         mutableState.update { it.copy(resolving = true, autoMatching = false, pendingPlayback = null,
             playbackTarget = AnimePlaybackTarget(episode, manualOption, selected.sourceName,
-                exactSavedPosition = exactResumeIntent)) }
+                exactSavedPosition = exactResumeIntent, recoveringPlayback = recoveryFor(episode) != null)) }
         resolveJob = scope.launch {
             var resolutionCompleted = false
             var manualFailed = false
@@ -4633,12 +4613,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     fun lane(candidate: AnimeEpisodeOption) = if (sources.provider(candidate.sourceId) is LanercProvider)
                         "script:${candidate.sourceId}" else optionKey(candidate)
                     var selectedPending = true
-                    fun provenStartupRisk(line: AnimeEpisodeOption): Boolean {
-                        val sample = lineHealthEstimate(line, playbackHistoryRoute(line.sourceId),
-                            preferredHeight, playbackNetworkClass()) ?: return false
-                        return sample.startupFailed > sample.startupSucceeded
-                    }
-                    var hedgeReady = false
+                    var hedgeReady = !protectSelected
                     var spare: ResolvedPlaybackOption? = null
                     var lastFailure: Result<ResolvedPlaybackOption>? = null
                     fun usableSpare(): Result<ResolvedPlaybackOption>? = spare?.takeIf { candidate ->
@@ -4706,7 +4681,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 events.trySend(PlaybackResolutionEvent.CatalogueChanged)
                             }
                         }
-                        if (canFallback) attempts.launch {
+                        if (canFallback && protectSelected) attempts.launch {
                             delay(ANIME_STARTUP_HEDGE_DELAY_MS)
                             events.trySend(PlaybackResolutionEvent.HedgeDelayElapsed)
                         }
@@ -4735,13 +4710,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             runningLanes.remove(candidate)
                             val preferred = samePlaybackLine(candidate, selected)
                             if (result.isSuccess) {
-                                val mayOvertake = !selectedPending || !protectSelected &&
-                                    (!provenStartupRisk(candidate) || provenStartupRisk(selected))
-                                if (preferred || mayOvertake && recoveryEnabled()) return@race result
+                                if (preferred || (!selectedPending || !protectSelected) && recoveryEnabled()) return@race result
                                 if (recoveryEnabled() && usableSpare() == null) spare = result.getOrThrow()
-                                // A known-weak spare must not occupy the newly free lane or
-                                // prevent a stronger, newly confirmed option from joining.
-                                if (!protectSelected) startAvailable()
                                 continue
                             }
                             lastFailure = result
@@ -4791,8 +4761,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     live != null && belongsTo(live, snapshot) && hasPlaybackOutput(snapshot)
                 }
                 val previous = library.progressFor(detail.subject.id, episodeId)
-                val recovery = recoveryResume?.takeIf { receipt -> receipt.playback.detail.subject.id == detail.subject.id &&
-                    receipt.playback.episode.id == episodeId && receipt.playback.libraryEpoch == library.state.value.restoreEpoch }
+                val recovery = recoveryFor(episode)
                 val unconfirmedResume = recovery?.takeIf { it.positionMs > 0L &&
                     !canResumeRecovery(it, resolvedOption, resolved) }
                 val exactSavedPosition = previous?.resumeLineKey != null || exactResumeIntent
@@ -4816,7 +4785,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         !savedTimelineChanged,
                     automaticIntent = automaticIntent || manualFailed,
                     bypassMediaCache = startupRefresh != null && samePlaybackLine(resolvedOption, startupRefresh.option),
-                    preferredHeight = preferredHeight, preserveEarlierPositionMs = preserveEarlier)
+                    preferredHeight = preferredHeight, preserveEarlierPositionMs = preserveEarlier,
+                    pendingRecoverySeek = unconfirmedResume?.let { recoveryPointFor(it, resolvedOption) }
+                        ?: previous?.takeIf { savedTimelineChanged }?.let { savedRecoveryPoint(it, resolvedOption) })
                 if (manualOption != null && !manualFailed && startupRefresh == null && position > 0L &&
                     previousAsset != null && previousAsset != resolved.id && (live == null || !samePlaybackLine(live.option, resolvedOption))) {
                     pending = choice
@@ -4931,31 +4902,43 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             it.restoreEpoch == library.state.value.restoreEpoch
     }
 
-    /** Resolve the same episode shown by the detail's play action without opening
-     * another player or writing viewing progress before the user presses play. */
+    /** Warm one exact-episode address for the detail action, or one spare for the playing episode.
+     * Both use the foreground resolver pool; neither opens another media player. */
     private fun prepareDetailOpeningAddresses() {
         val snapshot = mutableState.value
         val detail = snapshot.detail ?: return
-        if (!foreground || active != null || (snapshot.detailLoading && detail.episodes.isEmpty()) || snapshot.resolving ||
-            snapshot.autoMatching || snapshot.pendingPlayback != null || resumeRequest != null) return
-        if (detail.episodes.isNotEmpty() && prepareSavedResume(detail)) { releaseOpeningAddresses(); return }
-        val episode = continuationEpisode(detail.subject.id) ?: run { releaseOpeningAddresses(); return }
+        if (!foreground || snapshot.resolving || snapshot.autoMatching || snapshot.pendingPlayback != null ||
+            snapshot.playbackTarget != null || resumeRequest != null ||
+            snapshot.detailLoading && detail.episodes.isEmpty()) return
+        val playing = active
+        val episode = if (playing != null) {
+            if (playing.detail.subject.id != detail.subject.id || playing.localMedia != null || playing.recoveryHandled ||
+                playing.standbyAddressScheduled || !snapshot.settings.automaticSourceRecovery ||
+                snapshot.settings.automaticRecoveryAttempts <= 0) return
+            detail.episodes.singleOrNull { it.id == playing.episode.id && it.subjectId == detail.subject.id } ?: return
+        } else {
+            if (detail.episodes.isNotEmpty() && prepareSavedResume(detail)) { releaseOpeningAddresses(); return }
+            continuationEpisode(detail.subject.id) ?: run { releaseOpeningAddresses(); return }
+        }
         if (episodeAvailability(episode.id, snapshot) == AnimeEpisodeAvailability.UPCOMING) {
             releaseOpeningAddresses()
             return
         }
-        val lines = fairPlaybackOptions(detail.subject.id, episode.id, automaticPlaybackLines(episode.id, snapshot))
+        val candidates = automaticPlaybackLines(episode.id, snapshot).filterNot { line ->
+            playing != null && (samePlaybackLine(line, playing.option) || optionKey(line) in recoveryOptions)
+        }
+        val lines = fairPlaybackOptions(detail.subject.id, episode.id, candidates)
         val existing = matchingOpeningAddresses(episode.id)
         if (existing == null && openingAddresses != null) releaseOpeningAddresses()
         if (lines.isEmpty()) {
-            releaseOpeningAddresses()
+            if (playing == null) releaseOpeningAddresses()
             return
         }
         val addresses = existing ?: OpeningAddresses(detailGeneration, detail.subject.id, episode.id,
             snapshot.settings.preferredSourceHeight, library.state.value.restoreEpoch, scope).also { owner ->
             openingAddresses = owner
             owner.expiry = owner.owner.launch {
-                delay(30_000L)
+                delay(if (playing == null) 30_000L else ANIME_STANDBY_LIFETIME_MS)
                 if (openingAddresses === owner) releaseOpeningAddresses()
             }
         }
@@ -4965,14 +4948,21 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             (key !in validKeys).also { if (it) request.result.cancel() }
         }
         addresses.warmed.retainAll(validKeys)
+        if (playing != null && addresses.requests.any { (key, request) ->
+                key in validKeys && !request.result.isCancelled
+            }) {
+            playing.standbyAddressScheduled = true
+            return
+        }
         if (addresses.warmed.size >= ANIME_STARTUP_RESOLVE_PARALLELISM ||
             addresses.warmed.any { addresses.requests[it]?.result?.isCancelled == false }) return
         keyed.filterNot { it.first in addresses.warmed }.take(1)
             .forEach { (key, line) ->
+                if (playing != null) playing.standbyAddressScheduled = true
                 addresses.warmed += key
                 addresses.owner.launch {
                     fun current() = openingAddresses === addresses && matchingOpeningAddresses(episode.id) === addresses &&
-                        key.route == playbackHistoryRoute(line.sourceId) &&
+                        (playing == null || active === playing) && key.route == playbackHistoryRoute(line.sourceId) &&
                         playbackHistoryKey(detail.subject.id, episode.id, line) == key &&
                         currentPlaybackLine(episode.id, line) != null
                     try {
@@ -5091,6 +5081,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val engine = player
         val old = active
         val oldSnapshot = engine.state.value
+        val recovering = old?.takeIf { it.recoveryTimeline != null && it.episode.id == choice.episode.id &&
+            it.detail.subject.id == choice.detail.subject.id && recoveryFor(choice.episode) != null }
+        if (recovering != null && (!belongsTo(recovering, oldSnapshot) ||
+                oldSnapshot.timelineGeneration != recovering.recoveryTimeline)) {
+            cancelPlaybackResolution()
+            return
+        }
         val continuingSnapshot = if (inheritEnhancementSession != null) {
             val owner = old ?: return
             if ("anime:${owner.asset.id}:${owner.playerGeneration}" != inheritEnhancementSession ||
@@ -5126,6 +5123,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             resumeLineKey = playbackResumeLineKey(choice),
             automaticIntent = choice.automaticIntent, explicitResolutionId = choice.resolutionId,
             preserveEarlierPositionMs = choice.preserveEarlierPositionMs,
+            openingTimeline = oldSnapshot.timelineGeneration + 1, pendingRecoverySeek = choice.pendingRecoverySeek,
             healthKeys = healthNetwork?.let { network ->
                 healthKeys(choice.option, labelledAsset.sourceRevision, labelledAsset.route,
                     choice.preferredHeight ?: mutableState.value.settings.preferredSourceHeight, network)
@@ -5154,15 +5152,21 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 choice.asset.resolutions.singleOrNull { item -> item.url == choice.asset.url }?.id) }
         engine.configure(playerOptions(mutableState.value.settings))
         val owner = active
-        engine.open(AnimePlayerRequest(labelledAsset, position, continuingSnapshot?.playWhenReady ?: choice.playWhenReady, choice.localMedia,
+        val playWhenReady = continuingSnapshot?.playWhenReady ?: oldSnapshot.playWhenReady.takeIf { recovering != null } ?: choice.playWhenReady
+        engine.open(AnimePlayerRequest(labelledAsset, position, playWhenReady, choice.localMedia,
             bypassMediaCache = choice.bypassMediaCache, hasStartupAlternative = owner?.takeIf { it.localMedia == null }?.let { playback ->
-                { canFailOverStartup(playback) }
+                { hasRecoveryAlternative(playback) }
             }, onStartupWaitExpired = owner?.takeIf { it.automaticIntent && it.localMedia == null }?.let { playback ->
                 val notify: suspend (Long, Boolean) -> Unit = { timeline, originResponded ->
                     recoverStalledStartup(playback, timeline, originResponded)
                 }
                 notify
             }))
+        if (owner != null && owner.localMedia == null && libraryState.settings.automaticSourceRecovery &&
+            libraryState.settings.automaticRecoveryAttempts > 0 && choice.detail.ownsResumeEpisode(choice.detail.subject.id, choice.episode.id)) {
+            startSourceAggregation(choice.detail, episodeId = choice.episode.id)
+            prepareDetailOpeningAddresses()
+        }
     }
 
     fun restorePreviousPlayback() {
@@ -5410,6 +5414,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 mutablePlaybackPhase.value = snapshot.phase
                 val owner = active ?: return@collect
                 if (!belongsTo(owner, snapshot)) return@collect
+                if (owner.recoveryTimeline?.let { it != snapshot.timelineGeneration } == true) {
+                    owner.recoveryTimeline = null
+                    owner.recoveryHandled = false
+                    if (mutableState.value.playbackTarget?.recoveringPlayback == true) cancelPlaybackResolution()
+                }
                 startupHealthEvidence?.takeIf { it.owner === owner }?.let(::retireInterruptedStartup)
                 val now = monotonicTimeMillis()
                 val firstOutput = snapshot.firstFrameRendered == true || snapshot.hasVideoTracks == false && snapshot.isPlaying
@@ -5422,9 +5431,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     val intentElapsed = owner.intent?.let { (firstFrameAt - it.startedAt).coerceAtLeast(0L) }
                     mutableState.update { it.copy(playbackFirstFrameMs = elapsed, playbackIntentFirstFrameMs = intentElapsed) }
                 }
+                if (applyRecoverySeek(engine, owner, snapshot)) return@collect
                 if (owner.playbackStarted) {
                     if (playbackIntent === owner.intent) playbackIntent = null
-                    if (owner.preserveEarlierPositionMs != null && !owner.resumeNoticeShown) {
+                    if (snapshot.phase == AnimePlayerPhase.READY && hasPlaybackOutput(snapshot)) {
+                        owner.lastReadyTimeline = snapshot.timelineGeneration
+                        owner.lastReadyPositionMs = snapshot.positionMs.coerceAtLeast(0L)
+                        if (owner.preserveEarlierPositionMs?.let { snapshot.positionMs >= it } == true)
+                            owner.preserveEarlierPositionMs = null
+                    }
+                    if (owner.preserveEarlierPositionMs != null && owner.pendingRecoverySeek == null && !owner.resumeNoticeShown) {
                         owner.resumeNoticeShown = true
                         notice("备用线路的时间轴尚未确认，已从本集开头播放，原观看进度已保留。")
                     }
@@ -5459,8 +5475,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 owner.steadyPlayback = steady
                 val stableFor = steady?.let { now - it.startedAt } ?: 0L
                 if (stableFor >= 2_000L && mutableState.value.playbackTarget == null && !mutableState.value.resolving) {
-                    if (openingAddresses != null) releaseOpeningAddresses()
-                    pauseSourceAggregationForPlayback(owner)
+                    settlePlaybackDiscovery(owner)
                     if (sourceMeasurementsJob != null && !sourceMeasurementsUserRequested) cancelEpisodeSourceMeasurements()
                     if (maySavePlaybackPosition(owner, snapshot)) recoveryResume = null
                 }
@@ -5825,11 +5840,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun canRetryPlaybackDiscovery(snapshot: AnimeScreenState) =
         !playbackDiscoveryRetried && hasRetryableAssociation(snapshot)
 
-    private fun canFailOverStartup(owner: ActivePlayback): Boolean {
+    private fun hasRecoveryAlternative(owner: ActivePlayback): Boolean {
         val snapshot = mutableState.value
-        return active === owner && !owner.playbackStarted && !owner.recoveryHandled &&
+        return active === owner && !owner.recoveryHandled &&
             owner.libraryEpoch == library.state.value.restoreEpoch && snapshot.detail?.subject?.id == owner.detail.subject.id &&
-            !snapshot.resolving && pending == null && snapshot.settings.automaticSourceRecovery &&
+            snapshot.selectedEpisodeId == owner.episode.id && !snapshot.resolving && snapshot.playbackTarget == null &&
+            pending == null && snapshot.settings.automaticSourceRecovery &&
             snapshot.settings.automaticRecoveryAttempts > 0 &&
             (!sourceRecoveryWindowStarted || monotonicTimeMillis() < autoPlaybackDeadline) &&
             automaticPlaybackLines(owner.episode.id, snapshot).any {
@@ -5837,26 +5853,65 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             }
     }
 
+    private fun recoveryFor(episode: AnimeEpisode): RecoveryResume? = recoveryResume?.takeIf {
+        it.playback.detail.subject.id == episode.subjectId && it.playback.episode.id == episode.id &&
+            it.playback.libraryEpoch == library.state.value.restoreEpoch
+    }
+
+    /** Both source episodes must have been mapped to the same local episode. Equal
+     * durations may corroborate that mapping; a matching episode number alone cannot. */
+    private fun recoveryPointFor(receipt: RecoveryResume, option: AnimeEpisodeOption): RecoveryPoint? {
+        val previous = receipt.playback
+        if (receipt.assetId != previous.asset.id) return null
+        return recoveryPoint(previous.option, option, receipt.positionMs, receipt.durationMs)
+    }
+
+    private fun savedRecoveryPoint(saved: AnimeWatchProgress, next: AnimeEpisodeOption): RecoveryPoint? {
+        val input = savedResumeInput(saved.subjectId, saved.episodeId)?.takeIf { it.checkpoint == saved } ?: return null
+        val previous = savedLines(input).singleOrNull() ?: return null
+        return recoveryPoint(previous, next, saved.positionMs, saved.durationMs)
+    }
+
+    private fun recoveryPoint(previous: AnimeEpisodeOption, next: AnimeEpisodeOption,
+        positionMs: Long, durationMs: Long?): RecoveryPoint? {
+        if (durationMs == null || positionMs !in 1L until durationMs || !previous.confirmed || !next.confirmed ||
+            previous.episode.kind != next.episode.kind ||
+            !previous.episode.edition.trim().equals(next.episode.edition.trim(), ignoreCase = true)) return null
+        return RecoveryPoint(positionMs, durationMs)
+    }
+
     private fun canResumeRecovery(receipt: RecoveryResume, option: AnimeEpisodeOption, asset: AnimePlaybackAsset): Boolean {
         if (asset.id == receipt.assetId) return true
         val previous = receipt.playback
         if (receipt.assetId != previous.asset.id) return false
         if (animeContentIdentity(previous.asset.url) == animeContentIdentity(asset.url)) return true
-        val oldCatalog = previous.option.catalog
-        if (oldCatalog.sourceId != option.catalog.sourceId || oldCatalog.id != option.catalog.id ||
-            oldCatalog.url != option.catalog.url) return false
-        val sharedCatalogue = mutableState.value.sourceCatalogs.any {
-            it.title.sourceId == oldCatalog.sourceId && it.title.id == oldCatalog.id && it.title.url == oldCatalog.url &&
-                (it.sameWorkRoutes || hasLmmCatalogWorkId(it.title))
-        }
-        if (!sharedCatalogue) return false
-        val previousEdition = previous.option.episode.edition.trim().takeIf { it.isNotEmpty() } ?: return false
-        if (!previousEdition.equals(option.episode.edition.trim(), ignoreCase = true)) return false
-        val duration = receipt.durationMs ?: return false
+        val point = recoveryPointFor(receipt, option) ?: return false
         val key = playbackHistoryKey(previous.detail.subject.id, previous.episode.id, option) ?: return false
-        val observed = currentPlaybackMeasurements(key, option)?.takeIf { it.durationAssetId == asset.id }?.durationMs
+        val duration = currentPlaybackMeasurements(key, option)?.takeIf { it.durationAssetId == asset.id }?.durationMs
             ?: return false
-        return receipt.positionMs < observed && kotlin.math.abs(observed - duration) <= 1_000L
+        return point.fits(duration)
+    }
+
+    /** A newly discovered spare often has no earlier native duration measurement.
+     * Seek once its own backend supplies one, unless the viewer has already sought. */
+    private fun applyRecoverySeek(engine: AnimePlayer, owner: ActivePlayback, snapshot: AnimePlayerState): Boolean {
+        val point = owner.pendingRecoverySeek ?: return false
+        if (engine.state.value !== snapshot) return false
+        val live = mutableState.value
+        if (snapshot.timelineGeneration != owner.openingTimeline || live.resolving ||
+            live.playbackTarget != null || live.detail?.subject?.id != owner.detail.subject.id ||
+            live.selectedEpisodeId != owner.episode.id || owner.libraryEpoch != library.state.value.restoreEpoch ||
+            snapshot.positionMs > 3_000L || snapshot.ended || snapshot.phase == AnimePlayerPhase.ERROR) {
+            owner.pendingRecoverySeek = null
+            return false
+        }
+        if (snapshot.phase != AnimePlayerPhase.READY || snapshot.durationMs <= 0L) return false
+        owner.pendingRecoverySeek = null
+        if (!point.fits(snapshot.durationMs) || currentPlaybackLine(owner.episode.id, owner.option) == null) return false
+        owner.resumeNoticeShown = true
+        owner.openingSkipped = true
+        engine.seekTo(point.positionMs)
+        return true
     }
 
     private fun startupStillWaiting(stalled: StalledStartup): Boolean {
@@ -5894,7 +5949,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             !owner.recoveryHandled && !owner.playbackStarted && engine.state.value.phase == AnimePlayerPhase.OPENING &&
             owner.option.sourceId != explicitPlaybackSource(owner.detail.subject.id) && startupStillWaiting(stalled)
         if (!sameOpening()) return
-        if (!canFailOverStartup(owner)) {
+        if (!hasRecoveryAlternative(owner)) {
             // The first catalogue can win startup while other verified episode options
             // are still being published. Observe the existing work only; never restart it.
             val remaining = minOf(8_000L, autoPlaybackDeadline - monotonicTimeMillis())
@@ -5903,7 +5958,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 combine(state, engine.state) { screen, _ ->
                     when {
                         !sameOpening() -> false
-                        canFailOverStartup(owner) -> true
+                        hasRecoveryAlternative(owner) -> true
                         !screen.sourceAggregationRunning && !screen.episodeOptionsLoading -> false
                         else -> null
                     }
@@ -5911,7 +5966,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             }
             if (available != true) return
         }
-        if (!sameOpening() || !canFailOverStartup(owner) ||
+        if (!sameOpening() || !hasRecoveryAlternative(owner) ||
             currentPlaybackLine(owner.episode.id, owner.option) == null) return
         owner.recoveryHandled = true
         startupHealthEvidence = stalled
@@ -5922,9 +5977,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val playback = playerInstance?.state?.value?.takeIf {
             belongsTo(owner, it) && (it.phase == AnimePlayerPhase.ERROR || stalled != null && startupStillWaiting(stalled))
         } ?: return
+        val screen = mutableState.value
         if (!playback.sourceRecoveryAllowed || owner.localMedia != null || active !== owner ||
-            pending != null || mutableState.value.resolving) return
-        val settings = mutableState.value.settings
+            screen.detail?.subject?.id != owner.detail.subject.id || screen.selectedEpisodeId != owner.episode.id ||
+            owner.libraryEpoch != library.state.value.restoreEpoch || pending != null || screen.resolving) return
+        val settings = screen.settings
         // The saved count bounds retries of one media request in the player, not how many
         // independently verified same-episode candidates may be tried. Zero still opts out.
         if (settings.automaticRecoveryAttempts == 0) return
@@ -5948,11 +6005,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             mutableState.update { it.copy(playbackRecoveryStopReason = "本轮自动恢复已到时限，可手动重试本集。") }
             return
         }
+        owner.recoveryTimeline = playback.timelineGeneration
         if (recoveryResume == null) {
             val saved = library.progressFor(owner.detail.subject.id, owner.episode.id)?.takeUnless { it.completed }
-            recoveryResume = if (owner.playbackStarted && maySavePlaybackPosition(owner, playback)) {
-                RecoveryResume(owner, owner.asset.id, playback.positionMs.coerceAtLeast(0L),
-                    playback.durationMs.takeIf { it > 0L }, playback.playWhenReady)
+            val position = if (playback.positionMs <= 0L && owner.lastReadyTimeline == playback.timelineGeneration)
+                owner.lastReadyPositionMs else playback.positionMs.coerceAtLeast(0L)
+            recoveryResume = if (owner.playbackStarted && owner.preserveEarlierPositionMs?.let { position >= it } != false) {
+                RecoveryResume(owner, owner.asset.id, position,
+                    playback.durationMs.takeIf { it > 0L } ?: owner.measuredDurationMs, playback.playWhenReady)
             } else RecoveryResume(owner, saved?.assetId ?: owner.asset.id, saved?.positionMs ?: 0L,
                 saved?.durationMs?.takeIf { it > 0L }, playback.playWhenReady)
         }

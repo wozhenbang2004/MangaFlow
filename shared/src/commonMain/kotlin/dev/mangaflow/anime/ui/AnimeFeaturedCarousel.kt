@@ -10,9 +10,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,11 +36,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
@@ -86,7 +81,6 @@ import dev.mangaflow.ui.platform.*
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 internal data class AnimeFeaturedEntry(
     val key: String,
@@ -110,7 +104,9 @@ internal fun AnimeFeaturedCarousel(
     onSelected: (String) -> Unit,
     onOpenScores: (AnimeFeaturedEntry) -> Unit,
     onOpen: (AnimeFeaturedEntry) -> Unit,
-    hasCompanion: Boolean = false,
+    wide: Boolean,
+    navigationInset: Dp,
+    viewportHeight: Dp,
 ) {
     if (entries.isEmpty()) return
     BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -119,25 +115,23 @@ internal fun AnimeFeaturedCarousel(
         val window = LocalMangaWindow.current
         val desktop = platformKind == PlatformKind.DESKTOP
         val fontScale = density.fontScale.coerceAtLeast(1f)
-        val indexVisible = desktop && !hasCompanion && entries.size > 1 && maxWidth >= 820.dp * fontScale
-        val indexWidth = if (indexVisible) (maxWidth * .32f).coerceIn(246.dp, 348.dp) else 0.dp
-        val indexSpace = if (indexVisible) indexWidth + 22.dp else 0.dp
-        val galleryWidth = maxWidth - indexSpace
-        val galleryLimit = if (desktop) 1020.dp else 700.dp
-        val galleryInset = if (indexVisible || hasCompanion) 0.dp else ((galleryWidth - galleryLimit) / 2f).coerceAtLeast(0.dp)
-        val peek = if (!desktop && entries.size > 1 && !indexVisible) 18.dp else 0.dp
-        val preferredWidth = (galleryWidth - galleryInset * 2 - peek).coerceAtLeast(1.dp)
-        val compactLayout = preferredWidth < 272.dp * fontScale || fontScale > 1.35f
-        val footerHeight = if (entries.size == 1) 0.dp else if (desktop) 44.dp else 10.dp
+        val galleryInset = if (wide) 0.dp else ((maxWidth - 700.dp) / 2f).coerceAtLeast(0.dp)
+        val peek = if (!wide && !desktop && entries.size > 1) 18.dp else 0.dp
+        val preferredWidth = (maxWidth - galleryInset * 2 - peek).coerceAtLeast(1.dp)
+        val compactLayout = !wide && (preferredWidth < 272.dp * fontScale || fontScale > 1.35f)
+        val footerHeight = when {
+            entries.size == 1 -> 0.dp
+            wide || desktop -> 48.dp
+            else -> 10.dp
+        }
         val itemHeight = when {
+            wide -> navigationInset + ((viewportHeight - navigationInset) * .45f)
+                .coerceIn(156.dp * fontScale, 360.dp * fontScale)
             compactLayout -> 110.dp + 82.dp * fontScale
             window.shortHeight -> (window.height * .42f).coerceIn(136.dp, 192.dp)
-            desktop -> minOf((window.height * .39f).coerceIn(224.dp, 344.dp),
-                (preferredWidth * .57f).coerceAtLeast(206.dp))
-            indexVisible || hasCompanion -> (window.height * .33f).coerceIn(194.dp, 316.dp)
             else -> (preferredWidth * .63f).coerceIn(174.dp, 270.dp)
         }
-        val galleryHeight = itemHeight + footerHeight + 8.dp
+        val galleryHeight = itemHeight + footerHeight + if (wide) 0.dp else 8.dp
         val state = rememberPagerState(
             initialPage = entries.indexOfFirst { it.key == selectedKey }.coerceAtLeast(0),
         ) { entries.size }
@@ -175,11 +169,12 @@ internal fun AnimeFeaturedCarousel(
         val currentCoverReady = artworkKeys[state.currentPage.coerceIn(artworkKeys.indices)] in readyCovers
         val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
         fun decodePixels(size: Dp): Int = with(density) {
-            ((size.roundToPx().coerceAtLeast(1) + 63) / 64) * 64
+            val step = if (wide) 128 else 64
+            ((size.roundToPx().coerceAtLeast(1) + step - 1) / step) * step
         }
         val imageWidthPx = decodePixels(preferredWidth)
-        val imageHeightPx = decodePixels(itemHeight)
-        Column(Modifier.fillMaxWidth().padding(end = indexSpace).height(galleryHeight)
+        val imageHeightPx = decodePixels(if (wide) itemHeight * 1.7f else itemHeight)
+        Column(Modifier.fillMaxWidth().height(galleryHeight)
             .onPreviewKeyEvent { event ->
                 if (!active || entries.size <= 1 || event.type != KeyEventType.KeyDown ||
                     event.isAltPressed || event.isCtrlPressed || event.isMetaPressed) false
@@ -196,24 +191,26 @@ internal fun AnimeFeaturedCarousel(
                 }
             }.focusGroup()) {
             HorizontalPager(state = state, pageSize = PageSize.Fixed(preferredWidth),
-                contentPadding = PaddingValues(start = galleryInset, end = galleryInset + peek, top = 2.dp, bottom = 6.dp),
-                pageSpacing = 6.dp,
+                contentPadding = PaddingValues(start = galleryInset, end = galleryInset + peek,
+                    top = if (wide) 0.dp else 2.dp, bottom = if (wide) 0.dp else 6.dp),
+                pageSpacing = if (wide) 0.dp else 6.dp,
                 beyondViewportPageCount = if (visible && currentCoverReady) 1 else 0,
                 flingBehavior = fling, userScrollEnabled = active,
                 key = { entries[it].key },
-                modifier = Modifier.fillMaxWidth().height(itemHeight + 8.dp)
+                modifier = Modifier.fillMaxWidth().height(itemHeight + if (wide) 0.dp else 8.dp)
                     .semantics { stateDescription = "番剧 " + (state.settledPage.coerceIn(entries.indices) + 1) + " / " + entries.size }) { index ->
                 val emphasis = { (1f - abs(index - position.value)).coerceIn(0f, 1f) }
                 val settled = state.settledPage == index
                 val acceptTap = active && !state.isScrollInProgress
                 val key = artworkKeys[index]
-                AnimeFeaturedCard(entries[index], compactLayout, imageWidthPx, imageHeightPx, readyCovers[key],
+                AnimeFeaturedCard(entries[index], compactLayout, wide, navigationInset, imageWidthPx, imageHeightPx, readyCovers[key],
                     onReady = { readyCovers[key] = it }, onTint = { coverTints[key] = it },
                     modifier = Modifier.fillMaxWidth().height(itemHeight).graphicsLayer {
-                        val scale = if (motion) .978f + .022f * emphasis() else 1f
+                        val scale = if (motion && !wide) .978f + .022f * emphasis() else 1f
                         scaleX = scale
                         scaleY = scale
-                    }.mangaCoverCard(if (desktop) 17.dp else 20.dp, shadowRadius = if (desktop) 4.dp else 11.dp),
+                    }.then(if (wide) Modifier.clip(RoundedCornerShape(bottomStart = 14.dp, bottomEnd = 14.dp))
+                        else Modifier.mangaCoverCard(if (desktop) 17.dp else 20.dp, shadowRadius = if (desktop) 4.dp else 11.dp)),
                     offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
                         (if (rtl) -1f else 1f) else 0f },
                     enabled = acceptTap, scoresEnabled = acceptTap && settled,
@@ -226,72 +223,56 @@ internal fun AnimeFeaturedCarousel(
             }
             if (entries.size > 1) Row(Modifier.fillMaxWidth().padding(end = peek).height(footerHeight),
                 verticalAlignment = Alignment.CenterVertically) {
-                if (desktop) MotionIconButton(onClick = { selectPage(state.currentPage - 1) },
+                if (desktop && !wide) MotionIconButton(onClick = { selectPage(state.currentPage - 1) },
                     enabled = active && state.currentPage > 0, modifier = Modifier.size(44.dp),
                     tooltip = "上一部番剧") {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "上一部番剧", Modifier.size(18.dp))
                 }
-                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                Box(Modifier.weight(1f).fillMaxHeight(),
+                    contentAlignment = if (wide) Alignment.CenterStart else Alignment.Center) {
                     val color = MaterialTheme.colorScheme.onSurface
                     val contrast = LocalGlassAccessibilitySettings.current.increaseContrast
-                    Canvas(Modifier.size(width = (entries.size * 14).dp, height = 3.dp)
-                        .clearAndSetSemantics { }) {
-                        val slot = size.width / entries.size
-                        fun x(index: Float) = (if (rtl) entries.lastIndex - index else index) * slot + slot / 2f
-                        repeat(entries.size) { i ->
-                            drawCircle(color.copy(alpha = if (contrast) .56f else .28f),
-                                size.height / 2f, Offset(x(i.toFloat()), size.height / 2f))
+                    val slotWidth = if (wide) 48.dp else 14.dp
+                    Box(Modifier.width(slotWidth * entries.size).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                        Canvas(Modifier.fillMaxWidth().height(3.dp).clearAndSetSemantics { }) {
+                            val slot = size.width / entries.size
+                            fun x(index: Float) = (if (rtl) entries.lastIndex - index else index) * slot + slot / 2f
+                            repeat(entries.size) { i ->
+                                drawCircle(color.copy(alpha = if (contrast) .56f else .28f),
+                                    size.height / 2f, Offset(x(i.toFloat()), size.height / 2f))
+                            }
+                            // Both ends are driven by this drag's exact distance. Reversing the drag
+                            // retracts the leading end before extending back toward the previous stop.
+                            val page = if (motion) position.value else state.currentPage.toFloat().coerceIn(0f, entries.lastIndex.toFloat())
+                            val start = page.toInt()
+                            val next = (start + 1).coerceAtMost(entries.lastIndex)
+                            val t = page - start
+                            val rear = x(start + t * t)
+                            val front = x(start + t * (2f - t))
+                            val half = minOf(slot * .32f, 8.dp.toPx())
+                            val firstColor = coverTints[artworkKeys[start]] ?: color
+                            val nextColor = coverTints[artworkKeys[next]] ?: color
+                            val marker = if (contrast) color else lerp(color, lerp(firstColor, nextColor, t), .24f)
+                            drawRoundRect(marker, Offset(minOf(rear, front) - half, 0f),
+                                Size(abs(front - rear) + 2f * half, size.height), CornerRadius(size.height / 2f))
                         }
-                        // Both ends are driven by this drag's exact distance. Reversing the drag
-                        // retracts the leading end before extending back toward the previous stop.
-                        val page = if (motion) position.value else state.currentPage.toFloat().coerceIn(0f, entries.lastIndex.toFloat())
-                        val start = page.toInt()
-                        val next = (start + 1).coerceAtMost(entries.lastIndex)
-                        val t = page - start
-                        val rear = x(start + t * t)
-                        val front = x(start + t * (2f - t))
-                        val half = slot * .32f
-                        val firstColor = coverTints[artworkKeys[start]] ?: color
-                        val nextColor = coverTints[artworkKeys[next]] ?: color
-                        val marker = if (contrast) color else lerp(color, lerp(firstColor, nextColor, t), .24f)
-                        drawRoundRect(marker, Offset(minOf(rear, front) - half, 0f),
-                            Size(abs(front - rear) + 2f * half, size.height), CornerRadius(size.height / 2f))
+                        if (wide) Row(Modifier.fillMaxSize().selectableGroup()) {
+                            entries.forEachIndexed { index, entry ->
+                                Box(Modifier.weight(1f).fillMaxHeight().selectable(selected = index == state.settledPage,
+                                    enabled = active, role = Role.Tab, onClick = { selectPage(index) })
+                                    .semantics { contentDescription = entry.title })
+                            }
+                        }
                     }
+                }
+                if (desktop && wide) MotionIconButton(onClick = { selectPage(state.currentPage - 1) },
+                    enabled = active && state.currentPage > 0, modifier = Modifier.size(44.dp), tooltip = "上一部番剧") {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, "上一部番剧", Modifier.size(18.dp))
                 }
                 if (desktop) MotionIconButton(onClick = { selectPage(state.currentPage + 1) },
                     enabled = active && state.currentPage < entries.lastIndex, modifier = Modifier.size(44.dp),
                     tooltip = "下一部番剧") {
                     Icon(Icons.AutoMirrored.Outlined.ArrowForward, "下一部番剧", Modifier.size(18.dp))
-                }
-            }
-        }
-        if (indexVisible) {
-            val colors = MaterialTheme.colorScheme
-            val list = rememberLazyListState()
-            LaunchedEffect(state.settledPage, entries.size) {
-                val selected = state.settledPage.coerceIn(entries.indices)
-                if (list.layoutInfo.visibleItemsInfo.none { it.index == selected }) list.scrollToItem(selected)
-            }
-            LazyColumn(Modifier.align(Alignment.TopEnd).width(indexWidth).height(galleryHeight).selectableGroup(),
-                state = list, userScrollEnabled = active, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                itemsIndexed(entries, key = { _, entry -> entry.key }) { index, entry ->
-                    val selected = index == state.settledPage
-                    val interaction = remember(entry.key) { MutableInteractionSource() }
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                        .then(if (selected) Modifier.background(colors.surfaceContainerHigh) else Modifier)
-                        .motionPress(interaction, enabled = active, pressedScale = .99f)
-                        .selectable(selected, interaction, indication = null, enabled = active, role = Role.Tab,
-                            onClick = { selectPage(index) }).padding(horizontal = 8.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        AnimePoster(entry.coverUrl, Modifier.size(33.dp, 48.dp), sourceId = entry.sourceId, title = entry.title)
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(entry.title, style = MaterialTheme.typography.titleSmall,
-                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                color = colors.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            if (entry.caption.isNotBlank()) Text(entry.caption, style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
                 }
             }
         }
@@ -302,6 +283,8 @@ internal fun AnimeFeaturedCarousel(
 private fun AnimeFeaturedCard(
     entry: AnimeFeaturedEntry,
     stacked: Boolean,
+    wide: Boolean,
+    navigationInset: Dp,
     imageWidthPx: Int,
     imageHeightPx: Int,
     previousPoster: FeaturedPosterInfo?,
@@ -342,7 +325,8 @@ private fun AnimeFeaturedCard(
     val hue = rememberAnimePosterTint(entry.coverUrl, entry.sourceId, decoded)
     val reportTint by rememberUpdatedState(onTint)
     LaunchedEffect(entry.key, hue) { hue?.let(reportTint) }
-    val paper = hue?.let { lerp(colors.surface, it, if (colors.surface.luminance() > .5f) .085f else .12f) }
+    val lightPaper = colors.surface.luminance() > .5f
+    val paper = hue?.let { lerp(colors.surface, it, if (wide) .27f else if (lightPaper) .085f else .12f) }
         ?: colors.surface
     val desktopSpread = platformKind == PlatformKind.DESKTOP && !stacked
     val imageGround = hue?.let { lerp(paper, it, if (desktopSpread) .15f else .32f) } ?: paper
@@ -358,6 +342,66 @@ private fun AnimeFeaturedCard(
             contentDescription = listOf(entry.title, entry.caption).filter(String::isNotBlank).joinToString("，")
         }.motionPress(interaction, enabled = enabled, pressedScale = .985f)) {
         val textScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        if (wide) {
+            val bodyHeight = maxHeight - navigationInset
+            val roomy = bodyHeight >= 200.dp * textScale
+            val largeTitle = roomy && maxWidth >= 840.dp * textScale
+            val titleWidth = minOf(maxWidth * .49f, 520.dp * textScale)
+            // Portrait-only catalogues keep one sharp piece of art, anchored near its upper third.
+            // Keep the text ground continuous with the art's sampled color on either theme.
+            val artWidth = when {
+                solidCaption -> maxWidth - titleWidth
+                landscape -> maxWidth
+                else -> minOf(maxWidth * .63f, maxHeight * aspect * 1.7f)
+            }
+            Box(Modifier.align(Alignment.CenterEnd).width(artWidth).fillMaxHeight().clipToBounds(),
+                contentAlignment = Alignment.Center) {
+                if (showPlaceholder) Icon(Icons.Outlined.Tv, null, Modifier.size(28.dp), tint = colors.onSurfaceVariant)
+                Image(painter, null, Modifier.matchParentSize().graphicsLayer {
+                    if (motion && landscape) {
+                        val distance = offset()
+                        val scale = 1f + .035f * abs(distance)
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = -distance * minOf(size.width * .013f, 9.dp.toPx())
+                    }
+                }, alignment = BiasAlignment(0f, if (landscape) -.28f else -.58f),
+                    contentScale = if (solidCaption && !landscape) ContentScale.Fit else ContentScale.Crop)
+                if (!solidCaption && !landscape) Spacer(Modifier.align(Alignment.CenterStart)
+                    .fillMaxHeight().fillMaxWidth(.26f).featuredTitleFade(paper))
+            }
+            if (landscape && !solidCaption) Spacer(Modifier.align(Alignment.CenterStart)
+                .width(minOf(maxWidth, titleWidth * 1.42f)).fillMaxHeight().featuredTitleFade(paper))
+            Box(Modifier.fillMaxSize().padding(top = navigationInset)) {
+                Column(Modifier.align(Alignment.BottomStart).width(titleWidth)
+                    .padding(start = if (largeTitle) 34.dp else 20.dp, end = 10.dp,
+                        top = 8.dp, bottom = if (roomy) 24.dp else 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (roomy) 8.dp else 4.dp)) {
+                    Text(entry.title, Modifier.clearAndSetSemantics { }, color = colors.onSurface,
+                        style = animeWorkTitleStyle(large = true).copy(
+                            fontSize = if (largeTitle) 41.sp else 30.sp,
+                            lineHeight = if (largeTitle) 48.sp else 36.sp),
+                        maxLines = if (roomy) 2 else 1, overflow = TextOverflow.Ellipsis)
+                    if (entry.caption.isNotBlank() || primaryScore != null) Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (entry.caption.isNotBlank()) Text(entry.caption,
+                            Modifier.weight(1f, fill = false).clearAndSetSemantics { },
+                            style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
+                            color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (primaryScore != null) AnimeDiscoveryPrimaryScore(primaryScore, foreground = colors.onSurface,
+                            onScores = ({ onOpenScores(entry.copy(discoveryItem = item.copy(sourceScores = scores))) }).takeIf { scoresEnabled })
+                    }
+                    Row(Modifier.clearAndSetSemantics { }
+                        .background(colors.primary, RoundedCornerShape(50))
+                        .padding(horizontal = 13.dp, vertical = if (roomy) 7.dp else 4.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("查看详情", style = MaterialTheme.typography.labelLarge, color = colors.onPrimary, maxLines = 1)
+                        Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.size(15.dp), tint = colors.onPrimary)
+                    }
+                }
+            }
+            return@BoxWithConstraints
+        }
         val spacious = desktopSpread && maxWidth >= 448.dp * textScale && maxHeight >= 220.dp * textScale
         val tallSpread = spacious && maxHeight >= 260.dp * textScale
         val art: @Composable (Modifier) -> Unit = { area ->
@@ -443,13 +487,7 @@ private fun AnimeFeaturedCard(
             }
         } else {
             if (landscape) art(Modifier.matchParentSize())
-            else {
-                Spacer(Modifier.matchParentSize().paintFeaturedPortrait(painter, aspect))
-                if (showPlaceholder) Box(Modifier.align(Alignment.CenterEnd).fillMaxWidth(.5f),
-                    contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.Tv, null, Modifier.size(26.dp), tint = colors.onSurfaceVariant)
-                }
-            }
+            else art(Modifier.align(Alignment.CenterEnd).width(minOf(maxWidth, maxHeight * aspect)).fillMaxHeight())
             Spacer(Modifier.matchParentSize().drawWithCache {
                 val edge = if (landscape) .5f else 1f - size.height * aspect / size.width.coerceAtLeast(1f)
                 val clearAt = (edge + .14f).coerceIn(.64f, .96f)
@@ -467,21 +505,11 @@ private fun AnimeFeaturedCard(
     }
 }
 
-/** Extend only the facing edge beneath the title. The sharp poster and its reflection share a pixel boundary. */
-private fun Modifier.paintFeaturedPortrait(painter: Painter, aspect: Float): Modifier = drawWithCache {
-    val posterWidth = (size.height * aspect).roundToInt().coerceAtLeast(1).toFloat()
-    val poster = Size(posterWidth, size.height)
+/** The far edge stays clear. Only the reading side of the artwork carries the title's ground. */
+private fun Modifier.featuredTitleFade(color: Color): Modifier = drawWithCache {
     val rtl = layoutDirection == LayoutDirection.Rtl
-    val posterLeft = if (rtl) 0f else size.width - posterWidth
-    val edge = if (rtl) posterWidth else posterLeft
-    val extension = (size.width - posterWidth).coerceAtLeast(0f)
-    val sample = minOf(posterWidth * .26f, 46.dp.toPx()).coerceAtLeast(1f)
-    onDrawBehind {
-        if (extension > 0f) withTransform({
-            if (rtl) clipRect(left = edge) else clipRect(right = edge)
-            scale(-extension / sample, 1f, Offset(edge, 0f))
-            translate(posterLeft, 0f)
-        }) { with(painter) { draw(poster) } }
-        withTransform({ translate(posterLeft, 0f) }) { with(painter) { draw(poster) } }
-    }
+    val brush = Brush.horizontalGradient(0f to color, .46f to color.copy(alpha = .97f),
+        .72f to color.copy(alpha = .83f), 1f to color.copy(alpha = 0f),
+        startX = if (rtl) size.width else 0f, endX = if (rtl) 0f else size.width)
+    onDrawBehind { drawRect(brush) }
 }

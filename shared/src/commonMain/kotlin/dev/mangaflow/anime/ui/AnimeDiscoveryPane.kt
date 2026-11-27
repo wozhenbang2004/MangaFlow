@@ -253,8 +253,9 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
                 val rated = item.copy(sourceScores = animeDiscoverySourceScores(item, provider))
                 AnimeFeaturedEntry(key = "douban:" + item.key, title = item.title, coverUrl = item.coverUrl,
                     sourceId = animeDiscoverySourceId(item.coverProvider ?: provider),
-                    caption = listOfNotNull(item.year?.toString(),
-                        item.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).joinToString(" · "),
+                    caption = listOfNotNull(item.format?.let(::animeDiscoveryFormatLabel), item.year?.takeIf { it > 0 }?.toString(),
+                        item.episodeCount?.takeIf { it > 0 && (it > 1 || item.format != AnimeDiscoveryFormat.MOVIE) }
+                            ?.let { "$it 集" }).joinToString(" · "),
                     discoveryItem = rated)
             }.toList()
     }
@@ -272,9 +273,9 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
         onClearTag = { controller.configureDiscovery(AnimeDiscoveryTab.HOME, query.withTags(emptyList())) },
         featured = featured, contentTopPadding = contentTopPadding,
         watchShelf = if (recent.isEmpty()) null else {
-            { besideGallery -> AnimeDiscoveryWatchShelf(recent, scrolls.watchHistory, contentActive, onOpenHistory,
+            { AnimeDiscoveryWatchShelf(recent, scrolls.watchHistory, contentActive, onOpenHistory,
                 continuationLabel = { entry -> animeContinuationLabel(entry, controller.continuationEpisode(entry.subject.id)) },
-                onResume = onResume, besideGallery = besideGallery) }
+                onResume = onResume) }
         },
         homeShortcuts = if (onOpenSchedule == null && onOpenRanking == null) null else ({
             AnimeHomeDiscoveryShortcuts(state.discoveryFeeds[animeDiscoveryFeedKey(AnimeDiscoveryTab.CALENDAR)],
@@ -507,7 +508,7 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
     onManage: (AnimeSubject) -> Unit, onRefresh: () -> Unit,
     onRetry: () -> Unit, onMore: () -> Unit, onClearTag: () -> Unit, onShowFullWeek: (() -> Unit)? = null,
     featured: List<AnimeFeaturedEntry> = emptyList(),
-    watchShelf: (@Composable (Boolean) -> Unit)? = null, homeShortcuts: (@Composable () -> Unit)? = null,
+    watchShelf: (@Composable () -> Unit)? = null, homeShortcuts: (@Composable () -> Unit)? = null,
     catalogueHeader: (@Composable (Dp) -> Unit)? = null,
     contentTopPadding: Dp = 0.dp, calendarDate: LocalDate? = null) {
     val retainedScroll = scrolls.grid(key, feed?.query)
@@ -551,9 +552,10 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
         val columns = animeDiscoveryColumns(gridWidth, preference)
         val inset = animeDiscoveryInset(gridWidth, preference, columns)
         val readableWidth = gridWidth - inset * 2
-        val besideGallery = desktop && featured.isNotEmpty() && watchShelf != null &&
-            readableWidth >= 820.dp * LocalDensity.current.fontScale.coerceAtLeast(1f) &&
-            maxHeight - contentTopPadding >= 390.dp
+        val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val viewportHeight = maxHeight
+        val wideFeature = featured.isNotEmpty() && readableWidth >= 600.dp * fontScale &&
+            viewportHeight - contentTopPadding >= 190.dp * fontScale
         if (desktop) {
             val trailingKeys = remember(works, columns) { works.takeLast(columns * 2).map { it.key }.toSet() }
             AnimeBrowsePagination(key = key to feed?.query, refreshKey = feed?.fetchedAt,
@@ -568,7 +570,8 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
         LazyVerticalGrid(GridCells.Fixed(columns), state = scroll, modifier = Modifier.fillMaxSize()
             .then(if (desktop) Modifier else Modifier.bottomPullLoad(pull)),
             userScrollEnabled = active,
-            contentPadding = PaddingValues(start = inset, end = inset, top = contentTopPadding + 4.dp, bottom = contentBottomPadding),
+            contentPadding = PaddingValues(start = inset, end = inset,
+                top = if (wideFeature) 0.dp else contentTopPadding + 4.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(animeDiscoveryGap(columns)),
             verticalArrangement = Arrangement.spacedBy(when {
                 columns == 1 -> 9.dp
@@ -577,25 +580,17 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
                 else -> 16.dp
             })) {
             if (featured.isNotEmpty()) item(key = "featured", span = { GridItemSpan(maxLineSpan) }) {
-                val gallery: @Composable () -> Unit = {
-                    AnimeFeaturedCarousel(featured, active = active, visible = active && galleryInView,
-                        selectedKey = scrolls.featuredKey, onSelected = { scrolls.featuredKey = it },
-                        onOpenScores = { entry -> if (active) onScores(entry.discoveryItem) },
-                        onOpen = { entry -> if (active) onOpen(entry.discoveryItem) }, hasCompanion = besideGallery)
-                }
-                if (besideGallery) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
-                    Box(Modifier.weight(1f)) { gallery() }
-                    Column(Modifier.width((readableWidth * .32f).coerceIn(264.dp, 344.dp)),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        watchShelf?.invoke(true)
-                        homeShortcuts?.invoke()
-                    }
-                } else gallery()
+                AnimeFeaturedCarousel(featured, active = active, visible = active && galleryInView,
+                    selectedKey = scrolls.featuredKey, onSelected = { scrolls.featuredKey = it },
+                    onOpenScores = { entry -> if (active) onScores(entry.discoveryItem) },
+                    onOpen = { entry -> if (active) onOpen(entry.discoveryItem) },
+                    wide = wideFeature, navigationInset = if (wideFeature) contentTopPadding else 0.dp,
+                    viewportHeight = viewportHeight)
             }
-            if (!besideGallery && watchShelf != null) item(key = "continue-watching", span = { GridItemSpan(maxLineSpan) }) { watchShelf(false) }
-            if (catalogueHeader != null || homeShortcuts != null && !besideGallery) item(key = "discovery-heading", span = { GridItemSpan(maxLineSpan) }) {
+            if (watchShelf != null) item(key = "continue-watching", span = { GridItemSpan(maxLineSpan) }) { watchShelf() }
+            if (catalogueHeader != null || homeShortcuts != null) item(key = "discovery-heading", span = { GridItemSpan(maxLineSpan) }) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (!besideGallery) homeShortcuts?.invoke()
+                    homeShortcuts?.invoke()
                     catalogueHeader?.invoke(gridWidth)
                 }
             }

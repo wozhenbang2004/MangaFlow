@@ -50,6 +50,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import dev.mangaflow.data.Manga
@@ -80,19 +81,73 @@ internal fun BookshelfBook(
     modifier: Modifier = Modifier,
     resumeTarget: SavedResumeTarget? = null,
     dragEnabled: Boolean = true,
+    decodeSize: IntSize? = null,
 ) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val motion = LocalMotionEnabled.current
-    var rootOrigin by remember(manga.id) { mutableStateOf(Offset.Zero) }
-    var dragOffset by remember(manga.id) { mutableStateOf(Offset.Zero) }
-    var dragPoint by remember(manga.id) { mutableStateOf(Offset.Zero) }
-    var grip by remember(manga.id) { mutableStateOf(TransformOrigin.Center) }
-    val returnPosition = remember(manga.id) { Animatable(Offset.Zero, Offset.VectorConverter) }
-    val velocityTracker = remember(manga.id) { VelocityTracker() }
+    val gesture = Modifier.shelfBookGesture(manga.id, interaction, dragging, deleteArmed, dragEnabled,
+        onDragStart, onDragMove, onDragEnd, onDragCancel)
+    val colors = MaterialTheme.colorScheme
+    val readingState = resumeTarget?.let {
+        "已采用拷贝进度，继续至 ${it.chapterTitle.ifBlank { "已保存章节" }}"
+    } ?: progress?.let {
+        "读至 ${it.chapterTitle.ifBlank { "已保存章节" }}，第 ${it.pageIndex + 1} 页" +
+            if (it.pageCount > 0) "，共 ${it.pageCount} 页" else ""
+    } ?: "尚未阅读"
+
+    Box(modifier.widthIn(min = 48.dp).heightIn(min = 64.dp)
+        .then(gesture)
+        .zIndex(if (dragging) 8f else if (pressed) 1f else 0f)
+        .semantics(mergeDescendants = true) {
+            contentDescription = manga.title
+            stateDescription = if (opening) "正在打开，$readingState" else readingState
+        }
+        .clickable(interactionSource = interaction, indication = null, enabled = !dragging,
+            role = Role.Button, onClickLabel = if (resumeTarget != null || progress != null) "继续阅读" else "开始阅读",
+            onClick = onOpen)) {
+        MangaCover(manga, repository, Modifier.fillMaxSize().mangaCoverCard(12.dp, shadowRadius = 8.dp),
+            decodeSize = decodeSize, scale = ContentScale.Crop)
+        if (opening) Box(Modifier.align(Alignment.BottomEnd).padding(7.dp).size(22.dp)
+            .background(colors.surface.copy(alpha = .94f), RoundedCornerShape(11.dp)),
+            contentAlignment = Alignment.Center) {
+            if (motion) CircularProgressIndicator(Modifier.size(13.dp), color = colors.onSurface, strokeWidth = 1.5.dp)
+            else Canvas(Modifier.size(13.dp)) {
+                val stroke = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
+                drawCircle(colors.onSurface.copy(alpha = .18f),
+                    radius = (size.minDimension - stroke.width) / 2f, style = stroke)
+                drawArc(colors.onSurface, startAngle = -90f, sweepAngle = 240f, useCenter = false,
+                    topLeft = Offset(stroke.width / 2f, stroke.width / 2f),
+                    size = Size(size.width - stroke.width, size.height - stroke.width), style = stroke)
+            }
+        }
+    }
+}
+
+@Composable
+private fun Modifier.shelfBookGesture(
+    mangaId: String,
+    interaction: MutableInteractionSource,
+    dragging: Boolean,
+    deleteArmed: Boolean,
+    dragEnabled: Boolean,
+    onDragStart: (Offset) -> Unit,
+    onDragMove: (Offset) -> Unit,
+    onDragEnd: (Offset) -> Unit,
+    onDragCancel: () -> Unit,
+): Modifier {
+    // Desktop uses the context menu for book management. Its cells only need press feedback.
+    if (platformKind == PlatformKind.DESKTOP) return motionPress(interaction)
+    val motion = LocalMotionEnabled.current
+    var rootOrigin by remember(mangaId) { mutableStateOf(Offset.Zero) }
+    var dragOffset by remember(mangaId) { mutableStateOf(Offset.Zero) }
+    var dragPoint by remember(mangaId) { mutableStateOf(Offset.Zero) }
+    var grip by remember(mangaId) { mutableStateOf(TransformOrigin.Center) }
+    val returnPosition = remember(mangaId) { Animatable(Offset.Zero, Offset.VectorConverter) }
+    val velocityTracker = remember(mangaId) { VelocityTracker() }
     val scope = rememberCoroutineScope()
-    var returning by remember(manga.id) { mutableStateOf(false) }
-    var settleJob by remember(manga.id) { mutableStateOf<Job?>(null) }
+    var returning by remember(mangaId) { mutableStateOf(false) }
+    var settleJob by remember(mangaId) { mutableStateOf<Job?>(null) }
     val latestMotion by rememberUpdatedState(motion)
     val latestDragEnd by rememberUpdatedState(onDragEnd)
     val latestDragCancel by rememberUpdatedState(onDragCancel)
@@ -121,18 +176,10 @@ internal fun BookshelfBook(
     val drop = animateFloatAsState(if (dragging && deleteArmed && motion) 1f else 0f,
         if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(), label = "shelf-drop-target")
     val artworkShape = remember { RoundedCornerShape(12.dp) }
-    val colors = MaterialTheme.colorScheme
-    val readingState = resumeTarget?.let {
-        "已采用拷贝进度，继续至 ${it.chapterTitle.ifBlank { "已保存章节" }}"
-    } ?: progress?.let {
-        "读至 ${it.chapterTitle.ifBlank { "已保存章节" }}，第 ${it.pageIndex + 1} 页" +
-            if (it.pageCount > 0) "，共 ${it.pageCount} 页" else ""
-    } ?: "尚未阅读"
-
-    Box(modifier.widthIn(min = 48.dp).heightIn(min = 64.dp)
+    return this
         .onGloballyPositioned { rootOrigin = it.positionInRoot() }
-        .pointerInput(manga.id, dragEnabled) {
-            if (dragEnabled && platformKind != PlatformKind.DESKTOP) detectDragGesturesAfterLongPress(
+        .pointerInput(mangaId, dragEnabled) {
+            if (dragEnabled) detectDragGesturesAfterLongPress(
                 onDragStart = { local ->
                     val caught = if (returning) returnPosition.value else Offset.Zero
                     settleJob?.cancel()
@@ -178,29 +225,4 @@ internal fun BookshelfBook(
             alpha = 1f - .14f * overTarget
         }
         .motionPress(interaction, enabled = !dragging && !returning)
-        .zIndex(if (dragging) 8f else if (pressed) 1f else 0f)
-        .semantics(mergeDescendants = true) {
-            contentDescription = manga.title
-            stateDescription = if (opening) "正在打开，$readingState" else readingState
-        }
-        .clickable(interactionSource = interaction, indication = null, enabled = !dragging,
-            role = Role.Button, onClickLabel = if (resumeTarget != null || progress != null) "继续阅读" else "开始阅读",
-            onClick = onOpen)) {
-        MangaCover(manga, repository, Modifier.fillMaxSize().mangaCoverCard(12.dp, shadowRadius = 8.dp),
-            scale = ContentScale.Crop)
-        if (opening) Box(Modifier.align(Alignment.BottomEnd).padding(7.dp).size(22.dp)
-            .background(colors.surface.copy(alpha = .94f), RoundedCornerShape(11.dp)),
-            contentAlignment = Alignment.Center) {
-            if (motion) CircularProgressIndicator(Modifier.size(13.dp), color = colors.onSurface, strokeWidth = 1.5.dp)
-            else Canvas(Modifier.size(13.dp)) {
-                val stroke = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
-                drawCircle(colors.onSurface.copy(alpha = .18f),
-                    radius = (size.minDimension - stroke.width) / 2f, style = stroke)
-                drawArc(colors.onSurface, startAngle = -90f, sweepAngle = 240f, useCenter = false,
-                    topLeft = Offset(stroke.width / 2f, stroke.width / 2f),
-                    size = Size(size.width - stroke.width, size.height - stroke.width), style = stroke)
-            }
-        }
-    }
 }
-

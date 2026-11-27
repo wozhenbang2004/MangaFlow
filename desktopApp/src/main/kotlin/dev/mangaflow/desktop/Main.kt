@@ -17,7 +17,10 @@ import androidx.compose.ui.window.rememberWindowState
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.WindowState
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import androidx.compose.ui.input.key.*
@@ -52,6 +55,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import javax.imageio.ImageIO
 import kotlin.math.roundToInt
 
+@OptIn(FlowPreview::class)
 fun main(args: Array<String>) {
     System.setProperty("compose.interop.blending", "true")
     System.setProperty("java.net.useSystemProxies", "true")
@@ -106,12 +110,11 @@ fun main(args: Array<String>) {
             LaunchedEffect(windowState, windowPreferences) {
                 snapshotFlow {
                     if (fullscreen.active || fullscreen.restoring) null else windowState.desktopSnapshot()
-                }.collectLatest { snapshot ->
-                    if (snapshot == null) return@collectLatest
-                    // Capture immediately for close; persist only once movement has settled.
-                    windowPreferences.capture(snapshot)
-                    delay(400)
-                    windowPreferences.save()
+                }.onEach { bounds ->
+                    // Keep the last floating bounds even when a drag ends by maximizing.
+                    if (bounds != null) windowPreferences.capture(bounds)
+                }.debounce(400L).collect { settled ->
+                    if (settled != null) windowPreferences.save()
                 }
             }
             val requestClose: () -> Unit = remember(windowState, scope) {

@@ -821,7 +821,11 @@ private fun AnimeWorkspaceContent(
                             val actionsWidth = 88.dp // Recent watching and the overlaid search trigger.
                             val headerRoom = maxWidth - 16.dp - actionsWidth - if (navigationVisible) 56.dp else 6.dp
                             val tabsWidth = headerRoom.coerceIn(112.dp * fontScale, 184.dp * fontScale)
-                            val desktopBar = platformKind == PlatformKind.DESKTOP && !navigationVisible
+                            val artPage = shownDetail != null || shown.depth == 0 &&
+                                baseDestination == AnimeWorkspaceDestination.HOME && !directoryDetailOpen
+                            val artworkHeader = artPage && maxWidth >= 600.dp * fontScale.coerceAtMost(1.5f) &&
+                                maxHeight >= 230.dp * fontScale.coerceAtMost(1.5f)
+                            val desktopBar = platformKind == PlatformKind.DESKTOP && !navigationVisible && !artworkHeader
                             val stackDesktopTabs = workspaceTabs && !navigationVisible &&
                                 (headerRoom < tabsWidth || desktopBar && headerRoom < tabsWidth + 100.dp * fontScale)
                             val controlsAlpha = {
@@ -858,7 +862,7 @@ private fun AnimeWorkspaceContent(
                                         else if (desktopBar) (if (workspaceTabs) "番剧" else baseDestination.label)
                                         else "番剧 · ${baseDestination.label}") else
                                         shownDetail?.subject?.title ?: openingSubject?.title ?: "番剧详情",
-                                    backdrop = backdrop, navigationVisible = navigationVisible,
+                                    backdrop = backdrop, navigationVisible = navigationVisible, artworkHeader = artworkHeader,
                                     primary = primaryTabs.takeIf { workspaceTabs && !stackDesktopTabs },
                                     showTitle = shownDetail == null || heroCollapsed,
                                     tabsWidth = tabsWidth, actionsWidth = actionsWidth, controlsAlpha = controlsAlpha,
@@ -1249,12 +1253,33 @@ private fun AnimeHeaderViewport(header: @Composable () -> Unit, content: @Compos
 /** Desktop has a permanent navigation rail, so it must not receive an empty menu surface. */
 @Composable
 private fun AnimeWorkspaceHeader(root: Boolean, title: String, backdrop: HazeState,
-    navigationVisible: Boolean, navigation: @Composable () -> Unit,
+    navigationVisible: Boolean, artworkHeader: Boolean, navigation: @Composable () -> Unit,
     primary: (@Composable () -> Unit)?, showTitle: Boolean,
     tabsWidth: Dp, actionsWidth: Dp, controlsAlpha: () -> Float,
     actions: (@Composable () -> Unit)?) {
     val headerModifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
         .padding(horizontal = 8.dp, vertical = 2.dp)
+    if (artworkHeader) {
+        Box(headerModifier.fillMaxWidth().heightIn(min = 44.dp).semantics { paneTitle = title }) {
+            if (!root || navigationVisible) HeaderGlassSurface(backdrop, Modifier.align(Alignment.CenterStart),
+                quietShadow = true) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    navigation()
+                    if (!root && showTitle) Text(title, Modifier.widthIn(max = 320.dp).padding(end = 16.dp),
+                        style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            if (primary != null) HeaderGlassSurface(backdrop,
+                Modifier.align(Alignment.Center).width(tabsWidth).graphicsLayer { alpha = controlsAlpha() },
+                quietShadow = true, ink = rememberBrowseTabInk(animePrimaryLabels, animePrimaryTypeSize, 0.dp)) {
+                primary()
+            }
+            if (actions != null) HeaderGlassSurface(backdrop,
+                Modifier.align(Alignment.CenterEnd).width(actionsWidth).graphicsLayer { alpha = controlsAlpha() },
+                quietShadow = true, ink = rememberHeaderActionInk(actionsWidth)) { actions() }
+        }
+        return
+    }
     if (platformKind == PlatformKind.DESKTOP && !navigationVisible) {
         Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
             .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))

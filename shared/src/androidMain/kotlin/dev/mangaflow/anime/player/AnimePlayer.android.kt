@@ -125,6 +125,7 @@ internal class AndroidAnimePlayer(
     private var session: MediaSession? = null
     private var listener: Player.Listener? = null
     private var polling: Job? = null
+    private var reportingEngine: ExoPlayer? = null
     private var http: AnimeMediaHttpClient? = null
     private var releaseCache: (() -> Unit)? = null
     private var recovery: Job? = null
@@ -870,9 +871,10 @@ internal class AndroidAnimePlayer(
     }
 
     private fun prepareOnEngine(generation: Long, exo: ExoPlayer, media: MediaSource) {
+        // A new or retried source emits synchronous callbacks before its playback intent is applied.
+        reportingEngine = null
         applyVideoEnhancement(generation, exo)
-        exo.setMediaSource(media)
-        exo.seekTo(state.value.positionMs)
+        exo.setMediaSource(media, state.value.positionMs)
         configureActiveMedia(exo)
         exo.prepare()
         startPlaybackPolling(generation, exo)
@@ -887,6 +889,7 @@ internal class AndroidAnimePlayer(
 
     private fun startPlaybackPolling(generation: Long, exo: ExoPlayer) {
         polling?.cancel()
+        reportingEngine = exo
         polling = playerScope.launch(Dispatchers.Main.immediate) {
             while (isActive && isCurrent(generation)) {
                 synchronize(generation, exo, sampleWatchTime = true)
@@ -1308,6 +1311,7 @@ internal class AndroidAnimePlayer(
         detail: String = "图形处理已停止，本次播放已退回原画；重新打开媒体可重试",
     ): Boolean {
         if (!isCurrent(generation) || engine.value !== exo || nativeVideoOnly || enhancementRecoveryUsed || bufferingTimedOut) return false
+        retainInterruptedPlayhead(generation, exo)
         enhancementRecoveryUsed = true
         nativeVideoRecoveryPending = true
         nativeVideoRestored = false
@@ -1335,7 +1339,7 @@ internal class AndroidAnimePlayer(
             var replacement: ExoPlayer? = null
             try {
                 val media = requireNotNull(preparedMedia)
-                val position = exo.currentPosition.takeIf { it >= 0L } ?: state.value.positionMs
+                val position = state.value.positionMs
                 val playing = state.value.playWhenReady
                 val parameters = exo.trackSelectionParameters
                 val speed = state.value.speed
@@ -1481,10 +1485,12 @@ internal class AndroidAnimePlayer(
         val startup = state.value.firstFrameRendered == false && state.value.hasVideoTracks != false && !nativeVideoOnly
         val noProgressLimit = if (startup) 12_000L else 30_000L
         if (since == null) return
-        val canSwitch = startup && now - since >= 10_000L && hasStartupAlternative()
-        if (!canSwitch && now - bufferingProgressAt < noProgressLimit && now - since < 120_000L) return
+        val stalledStartup = startup && now - since >= 10_000L && hasStartupAlternative()
+        val stalledPlayback = !startup && now - bufferingProgressAt >= 12_000L && hasRecoveryAlternative()
+        if (!stalledStartup && !stalledPlayback && now - bufferingProgressAt < noProgressLimit && now - since < 120_000L) return
         stopStalledPlayback(generation, exo, when {
-            canSwitch -> "这条线路起播缓冲超过 10 秒，正在尝试本集备用线路"
+            stalledStartup -> "这条线路起播缓冲超过 10 秒，正在尝试本集备用线路"
+            stalledPlayback -> "当前线路的播放和缓冲已停滞，可切换本集备用线路"
             now - bufferingProgressAt >= noProgressLimit ->
                 "这条线路已 ${(noProgressLimit / 1_000L)} 秒没有收到新数据或缓冲进展，请重试或换个来源"
             else -> "这条线路持续缓冲超过 2 分钟，暂未达到起播条件，请重试或换个来源"
@@ -1492,6 +1498,7 @@ internal class AndroidAnimePlayer(
     }
 
     private fun stopStalledPlayback(generation: Long, exo: ExoPlayer, reason: String) {
+        retainInterruptedPlayhead(generation, exo)
         bufferingTimedOut = true // Set before stop's synchronous callbacks can republish READY.
         clearLiveEnhancement()
         var cancelled = false
@@ -1507,9 +1514,22 @@ internal class AndroidAnimePlayer(
         }
     }
 
-    private fun hasStartupAlternative() = localLease == null && state.value.firstFrameAtMillis == null &&
-        state.value.hasVideoTracks != false && !nativeVideoOnly && (foreground || state.value.inPictureInPicture) &&
-        state.value.playWhenReady && !state.value.playbackSuppressed && request?.hasStartupAlternative?.invoke() == true
+    private fun hasStartupAlternative() = state.value.firstFrameAtMillis == null &&
+        state.value.hasVideoTracks != false && !nativeVideoOnly && hasRecoveryAlternative()
+
+    private fun hasRecoveryAlternative() = localLease == null && (!nativeVideoOnly || nativeVideoRestored) &&
+        (foreground || state.value.inPictureInPicture) && state.value.playWhenReady &&
+        !state.value.playbackSuppressed && request?.hasStartupAlternative?.invoke() == true
+
+    private fun retainInterruptedPlayhead(generation: Long, exo: ExoPlayer) {
+        if (reportingEngine !== exo || engine.value !== exo || exo.currentMediaItem == null) return
+        // Media3 can expose an empty clock after a stop. An explicit seek to zero already updated the session.
+        val position = exo.currentPosition.takeIf { it > 0L }
+        val duration = exo.duration.takeIf { it > 0L }
+        publish(generation) { current -> current.copy(
+            positionMs = position ?: current.positionMs, durationMs = duration ?: current.durationMs,
+        ) }
+    }
 
     private fun observeVisibleWatchTime(exo: ExoPlayer, now: Long, position: Long, frames: Long): Long {
         val snapshot = state.value
@@ -1527,7 +1547,8 @@ internal class AndroidAnimePlayer(
     }
 
     private fun synchronize(generation: Long, exo: ExoPlayer, sampleWatchTime: Boolean = false) {
-        if (!isCurrent(generation) || engine.value !== exo) return
+        if (!isCurrent(generation) || engine.value !== exo || reportingEngine !== exo) return
+        if (exo.playbackState == Player.STATE_IDLE || state.value.phase == AnimePlayerPhase.ERROR) return
         if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed || bufferingTimedOut) return
         if (exo.playerError != null) return // The typed error callback alone owns recovery/error publication.
         reusablePreparedVideo?.takeIf { exo.currentPosition >= it.receipt.endMs }?.let {
@@ -1535,7 +1556,7 @@ internal class AndroidAnimePlayer(
             mutableState.value = state.value.copy(preparedVideoRetainedBytes = 0L)
         }
         val now = SystemClock.elapsedRealtime()
-        val position = exo.currentPosition.coerceAtLeast(0L)
+        val position = exo.currentPosition.takeIf { it >= 0L } ?: state.value.positionMs
         val outputFrames = outputFrameReleases.get()
         val watchDelta = if (sampleWatchTime) observeVisibleWatchTime(exo, now, position, outputFrames) else 0L
         val enhancementActive = lastEnhancementSubmissionAt?.let { now - it < ANIME_ENHANCED_FRAME_FRESH_MS } == true &&
@@ -1678,6 +1699,7 @@ internal class AndroidAnimePlayer(
         if (!isCurrent(generation) || engine.value !== exo || lastPlaybackError === error) return
         if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed || bufferingTimedOut) return
         lastPlaybackError = error
+        retainInterruptedPlayhead(generation, exo)
         clearLiveEnhancement()
         val observation = state.value
         val sourceId = request?.asset?.sourceId
@@ -1704,7 +1726,7 @@ internal class AndroidAnimePlayer(
         // A parsed HLS segment failure cannot change the entry playlist into a
         // progressive video file. Only retry transport failures here; the controller
         // owns recovery across confirmed alternatives for the same episode.
-        if (!retryableNetwork || hasStartupAlternative() || state.value.recoveryAttempt >= options.automaticRecoveryAttempts) {
+        if (!retryableNetwork || hasRecoveryAlternative() || state.value.recoveryAttempt >= options.automaticRecoveryAttempts) {
             publish(generation) { it.copy(notice = it.notice.takeUnless { value -> value == recoveryNotice }) }
             recoveryNotice = null
             fail(generation, playbackFailure(error, remoteMediaPlan?.type),
@@ -1965,6 +1987,7 @@ internal class AndroidAnimePlayer(
         return exo.playbackParameters.speed
     }
     override fun releaseNative() {
+        reportingEngine = null
         visibleWatchSample = null
         frameWindow.reset()
         clearRealtimeMotion()

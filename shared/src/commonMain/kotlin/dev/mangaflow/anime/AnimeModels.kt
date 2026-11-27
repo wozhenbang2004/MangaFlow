@@ -260,6 +260,7 @@ data class AnimePlaybackTarget(
     val failure: AnimePlaybackFailure? = null,
     val savedResume: Boolean = false,
     val exactSavedPosition: Boolean = false,
+    val recoveringPlayback: Boolean = false,
 )
 
 data class AnimePlaybackFailure(

@@ -195,6 +195,7 @@ internal fun AnimePlayerPane(
         target.episode.id == state.selectedEpisodeId && playback.phase == AnimePlayerPhase.READY &&
         !playback.isBuffering && !awaitingVideo
     val blockingResolution = state.resolving && !keepingCurrentVideo
+    val recoveringHere = blockingResolution && target?.recoveringPlayback == true
     val showingCurrentPlayback = (target == null || keepingCurrentVideo) && playback.assetKey != null &&
         playback.episodeId == state.selectedEpisodeId
     val currentOption = state.selectedPlaybackOption.takeIf {
@@ -318,7 +319,7 @@ internal fun AnimePlayerPane(
     }
     val opening = playback.phase == AnimePlayerPhase.IDLE || playback.phase == AnimePlayerPhase.OPENING || awaitingVideo
     val showStage = blockingResolution || failure != null || opening
-    val showArtwork = showStage && subject?.coverUrl?.isNotBlank() == true &&
+    val showArtwork = showStage && !recoveringHere && subject?.coverUrl?.isNotBlank() == true &&
         !(playback.firstFrameRendered == true && playback.episodeId == episode?.id) && !playback.inPictureInPicture
     val posterSource = if (showArtwork && subject != null) animePosterSourceId(subject) else null
     val posterLayer = if (showArtwork) key(subject?.id, subject?.coverUrl, posterSource) { rememberHazeState() } else null
@@ -739,10 +740,10 @@ internal fun AnimePlayerPane(
                 if (!playback.inPictureInPicture) Box(Modifier.fillMaxSize()
                     .padding(top = statusTop, bottom = statusBottom)
                     .motionInputGate(active && !locked && !obscured && !settingsPresent && !watchPanelPresent),
-                    contentAlignment = Alignment.Center) {
+                    contentAlignment = if (recoveringHere) Alignment.BottomCenter else Alignment.Center) {
                     val status: @Composable () -> Unit = {
                         AnimeVideoStatus(
-                            resolving = blockingResolution, autoMatching = state.autoMatching,
+                            resolving = blockingResolution, recoveringHere = recoveringHere, autoMatching = state.autoMatching,
                             sourceName = if (target == null) playbackSource else target.sourceName,
                             failure = failure, incident = incident, playback = playback,
                             hasAudioAlternative = hasAudioAlternative,
@@ -756,8 +757,9 @@ internal fun AnimePlayerPane(
                     }
                     val audioOnly = playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && playback.hasVideoTracks == false
                     if (showStage || audioOnly) {
-                        AnimePlaybackSurface(artwork, Modifier.padding(horizontal = 10.dp).widthIn(max = 452.dp),
-                            panel = true, cornerRadius = 21.dp) {
+                        AnimePlaybackSurface(artwork, Modifier.padding(horizontal = 10.dp,
+                            vertical = if (recoveringHere) 8.dp else 0.dp).widthIn(max = 452.dp),
+                            panel = !recoveringHere, cornerRadius = 21.dp) {
                             Box(Modifier.padding(horizontal = 6.dp, vertical = 7.dp), contentAlignment = Alignment.Center) { status() }
                         }
                     } else {
@@ -1266,7 +1268,8 @@ private fun AnimeWatchingPane(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnimeVideoStatus(
-    resolving: Boolean, autoMatching: Boolean, sourceName: String?, failure: String?, incident: AnimePlaybackFailure?,
+    resolving: Boolean, recoveringHere: Boolean, autoMatching: Boolean, sourceName: String?, failure: String?,
+    incident: AnimePlaybackFailure?,
     playback: AnimePlaybackChrome, hasAudioAlternative: Boolean, canChooseSource: Boolean, canRetry: Boolean,
     compact: Boolean, next: AnimeEpisode?, nextUpcoming: Boolean,
     onRetry: () -> Unit, onSources: () -> Unit, onEpisode: (AnimeEpisode) -> Unit,
@@ -1284,6 +1287,18 @@ private fun AnimeVideoStatus(
         }
     }
     when {
+        recoveringHere -> Row(Modifier.padding(horizontal = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (LocalMotionEnabled.current) CircularProgressIndicator(Modifier.size(14.dp),
+                color = MaterialTheme.colorScheme.primary, strokeWidth = 1.5.dp)
+            Column(Modifier.weight(1f, fill = false)) {
+                Text("正在恢复本集播放", style = MaterialTheme.typography.labelLarge)
+                if (!sourceName.isNullOrBlank()) Text(sourceName, style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (canChooseSource) MotionIconButton(onClick = onSources, modifier = Modifier.size(44.dp),
+                tooltip = "选择本集线路") { Icon(Icons.Outlined.SwapHoriz, "选择本集线路", Modifier.size(18.dp)) }
+        }
         resolving -> Column(Modifier.padding(horizontal = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             PlayerStageMessage(if (autoMatching) "正在找本集线路" else "正在打开本集", sourceName, loading = true)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {

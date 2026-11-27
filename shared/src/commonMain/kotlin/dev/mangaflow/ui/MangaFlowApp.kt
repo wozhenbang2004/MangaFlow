@@ -1832,31 +1832,28 @@ private fun MangaFlowContent(
                                     underCatalogue = current.section.usesCatalogueVeil)
                             }
                         }
-                        val contentWidth = if (playerOwnsScreen) {
-                            window.value.width
-                        } else if (desktop && current.section != Section.DISCOVER) {
-                            MangaLayout.DesktopWorkspaceWidth
-                        } else when (current.section) {
-                            Section.SETTINGS -> MangaLayout.SettingsWidth
-                            Section.ACCOUNT -> MangaLayout.AccountWidth
-                            Section.DOWNLOADS -> MangaLayout.ListWidth
-                            Section.DISCOVER -> when {
-                                !desktop -> MangaLayout.BrowseWidth
-                                LocalMangaWindow.current.width < 760.dp -> LocalMangaWindow.current.width
-                                else -> MangaLayout.desktopBrowseWidth(window.value.width)
-                            }
-                            else -> MangaLayout.BrowseWidth
+                        val contentBounds = when {
+                            playerOwnsScreen -> Modifier
+                            desktop && current.section == Section.DISCOVER -> Modifier.desktopBrowseWidth(window)
+                            desktop || current.section == Section.ANIME -> Modifier.widthIn(max = MangaLayout.DesktopWorkspaceWidth)
+                            else -> Modifier.widthIn(max = when (current.section) {
+                                Section.SETTINGS -> MangaLayout.SettingsWidth
+                                Section.ACCOUNT -> MangaLayout.AccountWidth
+                                Section.DOWNLOADS -> MangaLayout.ListWidth
+                                else -> MangaLayout.BrowseWidth
+                            })
                         }
-                        BoxWithConstraints(Modifier
+                        val discoveryActionsWidth = (if (restrictedMode || ordinaryHistory.isNotEmpty()) 88.dp else 44.dp) + 16.dp
+                        val stackHeaderBelow = if (desktop || current.section != Section.DISCOVER) null
+                            else 16.dp + 44.dp + 12.dp + discoveryTabsWidth + discoveryActionsWidth
+                        CatalogueViewport(Modifier
                             .screenFitViewport()
-                            .widthIn(max = contentWidth).fillMaxSize().align(Alignment.TopCenter).graphicsLayer {
+                            .then(contentBounds).fillMaxSize().align(Alignment.TopCenter).graphicsLayer {
                             // Only the incoming foreground settles; the real backdrop never disappears.
                             alpha = rootOpacity.value
                             translationY = ((1f - rootOpacity.value) / (1f - MangaMotion.RootEntryAlpha))
                                 .coerceIn(0f, 1f) * 6.dp.toPx()
-                        }.motionInputGate(!rootHandoff)) {
-                            val discoveryActionsWidth = (if (restrictedMode || ordinaryHistory.isNotEmpty()) 88.dp else 44.dp) + 16.dp
-                            val discoveryStacked = maxWidth - 16.dp < 44.dp + 12.dp + discoveryTabsWidth + discoveryActionsWidth
+                        }.motionInputGate(!rootHandoff), stackHeaderBelow) { discoveryStacked ->
                             val discoveryTabHeight = with(chromeDensity) {
                                 maxOf(44.dp, 14.sp.toDp() * (if (fontScale > 1.3f) 2.6f else 1.3f) + 16.dp)
                             }

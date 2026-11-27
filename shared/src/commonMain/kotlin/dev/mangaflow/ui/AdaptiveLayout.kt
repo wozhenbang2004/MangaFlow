@@ -1,12 +1,16 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -47,6 +51,25 @@ object MangaLayout {
         val available = (width - inset * 2).coerceAtLeast(0.dp)
         return ((available + gap) / (minimum + gap)).toInt().coerceIn(1, maximum.coerceAtLeast(1))
     }
+}
+
+/** Only the touch discovery header uses measured width to choose one or two rows. */
+@Composable
+internal fun CatalogueViewport(modifier: Modifier, stackHeaderBelow: Dp?,
+    content: @Composable BoxScope.(Boolean) -> Unit) {
+    if (stackHeaderBelow == null) {
+        Box(modifier) { content(false) }
+    } else {
+        BoxWithConstraints(modifier) { content(maxWidth < stackHeaderBelow) }
+    }
+}
+
+/** Keep exact window changes in measurement, outside the catalogue and navigation composition. */
+internal fun Modifier.desktopBrowseWidth(window: State<MangaWindowSize>): Modifier = layout { measurable, bounds ->
+    val limit = if (bounds.hasBoundedWidth && bounds.maxWidth < 760.dp.roundToPx()) bounds.maxWidth
+        else MangaLayout.desktopBrowseWidth(window.value.width).roundToPx().coerceIn(bounds.minWidth, bounds.maxWidth)
+    val child = measurable.measure(bounds.copy(maxWidth = limit))
+    layout(child.width, child.height) { child.placeRelative(0, 0) }
 }
 
 /** All targets supply their actual Compose window to the same layout policy. */

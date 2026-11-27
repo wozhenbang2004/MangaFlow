@@ -19,6 +19,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.key
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
@@ -123,6 +125,7 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
@@ -150,6 +153,7 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
+import coil3.compose.AsyncImagePainter
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
@@ -1029,8 +1033,11 @@ private fun DiscoveryPane(
                     info.totalItemsCount - visibleColumns * 2 - 1
         }, onMore = onMore)
     val sectionWidth = (maxWidth - inset * 2).coerceAtLeast(0.dp)
-    val wideCards = desktop && !ranking && columns != 1 &&
-        (sectionWidth - gap * (visibleColumns - 1)) / visibleColumns >= maxOf(292.dp, 112.dp + 122.dp * fontScale)
+    val cellWidth = (sectionWidth - gap * (visibleColumns - 1)) / visibleColumns
+    val wideCards = desktop && !ranking && columns != 1 && cellWidth >= maxOf(292.dp, 112.dp + 122.dp * fontScale)
+    val decodeSize = if (desktop && !ranking && columns != 1) LocalDensity.current.coverDecodeSize(
+        if (wideCards) 96.dp else cellWidth, if (wideCards) 96f / 140f else 2f / 3f) else null
+    val scrollSectionActions = sectionWidth < 132.dp
     val showCategoryLabel = indexed || androidManga && sectionWidth >= 330.dp && fontScale <= 1.3f
     // Put the larger gap below each book's caption, keeping the section heading close to its first row.
     val afterCover = when {
@@ -1096,7 +1103,7 @@ private fun DiscoveryPane(
                 }
             }
             // A low strip of ink groups the three utility glyphs. Their touch targets stay full height.
-            Row(Modifier.then(if (sectionWidth < 132.dp) Modifier.horizontalScroll(rememberScrollState()) else Modifier)
+            Row(Modifier.then(if (scrollSectionActions) Modifier.horizontalScroll(rememberScrollState()) else Modifier)
                 .drawBehind {
                     val h = minOf(size.height, 32.dp.toPx())
                     val insetX = minOf(size.width / 2f, 2.dp.toPx())
@@ -1305,16 +1312,17 @@ private fun DiscoveryPane(
                                         MangaMetricBadges(manga, foreground = browseNoteColor(), compact = true,
                                             plain = true, showMore = true, onExpand = { onRatings(manga) })
                                     }), onLongClick = { onManage(manga) }) { onOpen(manga) }
-                                else if (!list && wideCards) DesktopShelfCard(manga, repository, placement,
+                                else if (!list && desktop) DesktopShelfCard(manga, repository, placement,
+                                    wide = wideCards, narrow = visibleColumns >= 4, decodeSize = decodeSize,
                                     showChapter = state.mode == DiscoveryMode.LATEST, showSource = mixedSources,
                                     showMetrics = !adultProfile, onManage = { onManage(manga) },
-                                    onOpen = { onOpen(manga) })
+                                    onRatings = { onRatings(manga) }, onOpen = { onOpen(manga) })
                                 else if (list) BrowseListRow(manga, repository,
                                     showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
                                     showSource = mixedSources, showMetrics = !adultProfile,
                                     onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
                                 else CoverTile(manga, repository, dense = true, narrow = visibleColumns >= 4,
-                                    desktopCatalogue = desktop, showSource = mixedSources, showMetrics = !adultProfile,
+                                    showSource = mixedSources, showMetrics = !adultProfile,
                                     showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
                                     onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
                             }
@@ -1676,7 +1684,20 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DesktopShelfCard(manga: Manga, repository: MangaRepository, placement: String,
-    showChapter: Boolean, showSource: Boolean, showMetrics: Boolean, onManage: () -> Unit, onOpen: () -> Unit) {
+    wide: Boolean, narrow: Boolean, decodeSize: IntSize?, showChapter: Boolean, showSource: Boolean,
+    showMetrics: Boolean, onManage: () -> Unit, onRatings: () -> Unit, onOpen: () -> Unit) {
+    val currentBook by rememberUpdatedState(manga)
+    val currentSize by rememberUpdatedState(decodeSize)
+    // The catalogue can put credits beside or below the same cover during a single window drag.
+    val artwork = remember(repository, manga.sourceId, manga.id) {
+        movableContentOf { frame: Modifier -> MangaCover(currentBook, repository, frame, decodeSize = currentSize) }
+    }
+    if (!wide) {
+        CoverTile(manga, repository, dense = true, narrow = narrow, desktopCatalogue = true,
+            showSource = showSource, showMetrics = showMetrics, showChapter = showChapter, placement = placement,
+            onLongClick = onManage, onRatings = onRatings, artwork = artwork, onClick = onOpen)
+        return
+    }
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
     val note = browseNoteColor()
@@ -1687,7 +1708,7 @@ private fun DesktopShelfCard(manga: Manga, repository: MangaRepository, placemen
                 onOpen()
             }).motionPress(interaction, pressedScale = .993f),
         horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        MangaCover(manga, repository, Modifier.size(96.dp, 140.dp).mangaSharedCover(manga.id, placement).mangaCoverCard(8.dp))
+        artwork(Modifier.size(96.dp, 140.dp).mangaSharedCover(manga.id, placement).mangaCoverCard(8.dp))
         Column(Modifier.weight(1f).heightIn(min = 140.dp).padding(end = 16.dp, top = 4.dp, bottom = 6.dp),
             verticalArrangement = Arrangement.SpaceBetween) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -2137,6 +2158,7 @@ internal fun CoverTile(
     showMetrics: Boolean = true,
     onCoverReady: (() -> Unit)? = null,
     desktopCatalogue: Boolean = false,
+    artwork: (@Composable (Modifier) -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -2149,11 +2171,12 @@ internal fun CoverTile(
                 onClick()
             })
         .motionPress(interaction)) {
-        MangaCover(manga, repository, BrowseTileCoverFrame
+        val frame = BrowseTileCoverFrame
             .then(if (placement != null) Modifier.mangaSharedCover(manga.id, placement) else Modifier)
             .mangaCoverCard(if (desktopCatalogue) 6.dp else BrowseTileCoverRadius,
-                shadowRadius = if (desktopCatalogue) 4.dp else if (narrow) 7.dp else 9.dp),
-            onReady = onCoverReady)
+                shadowRadius = if (desktopCatalogue) 4.dp else if (narrow) 7.dp else 9.dp)
+        if (artwork == null) MangaCover(manga, repository, frame, onReady = onCoverReady)
+        else artwork(frame)
         if (desktopCatalogue) {
             DesktopCoverCaption(manga, narrow, showChapter, showSource, showMetrics, bodySources, onRatings)
             return@Column
@@ -2242,24 +2265,58 @@ internal fun MangaBrowseSource(manga: Manga, modifier: Modifier = Modifier,
 
 @Composable
 internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Modifier,
-    scale: ContentScale = ContentScale.Crop, onReady: (() -> Unit)? = null) {
+    scale: ContentScale = ContentScale.Crop, onReady: (() -> Unit)? = null) =
+    MangaCover(manga, repository, modifier, decodeSize = null, scale = scale, onReady = onReady)
+
+@Composable
+internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Modifier,
+    decodeSize: IntSize?, scale: ContentScale = ContentScale.Crop, onReady: (() -> Unit)? = null) {
     val context = LocalContext.current
-    val motion = LocalMotionEnabled.current
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val fade = !desktop && LocalMotionEnabled.current
     val identity = mangaCoverIdentity(manga, repository)
-    val request = remember(context, repository, manga.id, manga.coverUrl, manga.sourceUrl, identity, motion) {
+    val source = remember(manga.id) { dev.mangaflow.data.SourceKeys.decodeManga(manga.id).sourceId }
+    val target = if (decodeSize != null) {
+        var largest by remember(source, identity) { mutableStateOf<IntSize>(decodeSize) }
+        val next = IntSize(maxOf(largest.width, decodeSize.width), maxOf(largest.height, decodeSize.height))
+        if (next != largest) SideEffect { largest = next }
+        next
+    } else null
+    val request = remember(context, source, identity, desktop, fade, target) {
         identity.url.takeIf(String::isNotBlank)?.let { url ->
+            val memoryKey = "manga-cover:" + identity.cacheKey
             ImageRequest.Builder(imagePlatformContext(context)).data(url)
-                .sourceNetwork(dev.mangaflow.data.SourceKeys.decodeManga(manga.id).sourceId)
-                .memoryCacheKey("manga-cover:" + identity.cacheKey)
+                .sourceNetwork(source)
+                .memoryCacheKey(memoryKey)
+                .apply {
+                    if (desktop) placeholderMemoryCacheKey(memoryKey)
+                    if (target != null) size(target.width, target.height)
+                }
                 .diskCacheKey(identity.cacheKey)
                 .httpHeaders(NetworkHeaders.Builder().apply {
                     identity.headers.forEach { (name, value) -> set(name, value) }
-                }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()
+                }.build()).crossfade(if (fade) MangaMotion.Quick else 0).build()
         }
     }
     Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
         Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f), modifier = Modifier.size(25.dp))
-        if (request != null) AsyncImage(model = request, contentDescription = null, contentScale = scale,
+        if (request == null) return@Box
+        if (desktop) key(manga.id, source, identity) {
+            var displayed by remember { mutableStateOf<Painter?>(null) }
+            AsyncImage(model = request, contentDescription = null, contentScale = scale, modifier = Modifier.fillMaxSize(),
+                transform = { state ->
+                    when (state) {
+                        is AsyncImagePainter.State.Loading -> displayed?.let { state.copy(painter = it) } ?: state
+                        is AsyncImagePainter.State.Error -> displayed?.let { state.copy(painter = it) } ?: state
+                        else -> state
+                    }
+                }, onState = { state ->
+                    if (state is AsyncImagePainter.State.Success) {
+                        displayed = state.painter
+                        onReady?.invoke()
+                    }
+                })
+        } else AsyncImage(model = request, contentDescription = null, contentScale = scale,
             modifier = Modifier.fillMaxSize(), onSuccess = { onReady?.invoke() })
     }
 }

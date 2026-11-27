@@ -81,7 +81,6 @@ import coil3.request.crossfade
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeDetail
-import dev.mangaflow.anime.AnimeDiscoveryFormat
 import dev.mangaflow.anime.AnimeEpisode
 import dev.mangaflow.anime.AnimeEpisodeAvailability
 import dev.mangaflow.anime.AnimeEpisodeKind
@@ -341,6 +340,13 @@ internal fun AnimeDetailPane(
         val wide = if (desktop) maxWidth >= 780.dp * fontScale && maxHeight - contentTopPadding >= 325.dp * fontScale
             else maxWidth >= (if (compactHero) 650.dp else 840.dp) * fontScale.coerceAtMost(1.5f)
         val width = minOf(maxWidth, if (wide) 1400.dp else 1080.dp)
+        val roomHeight = maxHeight - contentTopPadding
+        val landscapeStage = wide && roomHeight >= 460.dp * fontScale
+        val compactStage = roomHeight < 620.dp * fontScale
+        val collapsingHero = !wide || landscapeStage
+        val stageCollapsed by remember(header, landscapeStage) { derivedStateOf {
+            landscapeStage && header.heightOffsetLimit < 0f && header.heightOffset <= header.heightOffsetLimit + 1f
+        } }
         val horizontal = if (wide) 24.dp else 16.dp
         val contentInsets = screenFitContentInsets()
         val bottomInset = contentInsets.asPaddingValues().calculateBottomPadding()
@@ -358,7 +364,7 @@ internal fun AnimeDetailPane(
             locateRevision++
             contentsRequested = true
             selectDetailTab(0)
-            if (!wide && alreadyInCatalogue) {
+            if (collapsingHero && alreadyInCatalogue) {
                 headerJump?.cancel()
                 headerJump = scope.launch {
                     if (motion) Animatable(header.heightOffset).animateTo(header.heightOffsetLimit,
@@ -366,7 +372,7 @@ internal fun AnimeDetailPane(
                     else header.heightOffset = header.heightOffsetLimit
                     contentsRequested = false
                 }
-            } else if (wide) contentsRequested = false
+            } else if (!collapsingHero) contentsRequested = false
         }
         val dockTravel = with(density) { 96.dp.toPx() }
         val dockCollapse by remember(header, subject.id, detailTab, wide, dockTravel) {
@@ -379,9 +385,9 @@ internal fun AnimeDetailPane(
                 }
             }
         }
-        val playDock: @Composable (Modifier) -> Unit = { dockModifier ->
+        val playDock: @Composable (Modifier, Boolean) -> Unit = { dockModifier, visible ->
             playControl?.let { control ->
-                val dockActive = active && !statusPresent && !discussionChecksPresent && !discussionFilter && episodeMenuOwner == null
+                val dockActive = visible && active && !statusPresent && !discussionChecksPresent && !discussionFilter && episodeMenuOwner == null
                 AnimeDetailPlayAction(subject.id, control, backdrop = backdrop, active = dockActive,
                     persistent = wide, collapseProgress = { dockCollapse }, modifier = dockModifier,
                     onHeightChanged = { measuredDock = maxOf(measuredDock, it) },
@@ -402,7 +408,7 @@ internal fun AnimeDetailPane(
                     onActivate = play@{
                         val latest = controller.state.value
                         val liveDetail = latest.detail?.takeIf { it.subject.id == subject.id } ?: return@play
-                        if (!active || latest.resolving || latest.playbackTarget != null) return@play
+                        if (!dockActive || latest.resolving || latest.playbackTarget != null) return@play
                         val liveProgress = latest.library.firstOrNull { it.subject.id == subject.id }?.resume
                         if (offeredSavedLine && control.mode == AnimeDetailPlayMode.PLAY) {
                             if (liveProgress != null && savedProgress != null && liveProgress.episodeId == savedProgress.episodeId &&
@@ -440,12 +446,12 @@ internal fun AnimeDetailPane(
                     })
             }
         }
-        LaunchedEffect(subject.id, header, wide) {
-            snapshotFlow { !wide && header.heightOffsetLimit < 0f && header.heightOffset <= header.heightOffsetLimit + 1f }
+        LaunchedEffect(subject.id, header, collapsingHero) {
+            snapshotFlow { collapsingHero && header.heightOffsetLimit < 0f && header.heightOffset <= header.heightOffsetLimit + 1f }
                 .collect { reportHeroCollapsed(it) }
         }
-        LaunchedEffect(detailTab, measuredHero, wide, motion) {
-            if (wide || measuredHero <= 0) return@LaunchedEffect
+        LaunchedEffect(detailTab, measuredHero, collapsingHero, motion) {
+            if (!collapsingHero || measuredHero <= 0) return@LaunchedEffect
             if (detailTab != 0 && !informationOwnsHeader) {
                 catalogueHeaderOffset = header.heightOffset
                 informationOwnsHeader = true
@@ -467,15 +473,19 @@ internal fun AnimeDetailPane(
                 return behavior.nestedScrollConnection.onPreScroll(available, source)
             }
         } }
+        val follow: @Composable () -> Unit = {
+            AnimeDetailFollow(entry, backdrop, !state.libraryReadUnavailable, active && !stageCollapsed, native,
+                iconsOnly = landscapeStage, onFollow = { controller.setFollowed(subject, entry?.followed != true) },
+                onStatus = { controller.setWatchStatus(subject.id, it) }, onTracking = onTracking,
+                onPresence = { statusPresent = it })
+        }
         val hero: @Composable () -> Unit = {
-            AnimeDetailHero(subject, canonicalInfo, liveScores, wide, compactHero, active, backdrop,
-                contentTopPadding = contentTopPadding + if (wide) 8.dp else 0.dp,
-                followAction = {
-                    AnimeDetailFollow(entry, backdrop, !state.libraryReadUnavailable, active, native,
-                        onFollow = { controller.setFollowed(subject, entry?.followed != true) },
-                        onStatus = { controller.setWatchStatus(subject.id, it) }, onTracking = onTracking,
-                        onPresence = { statusPresent = it })
-                })
+            if (landscapeStage) {
+                val primary: (@Composable (Modifier) -> Unit)? = if (showDock) ({ playDock(it, !stageCollapsed) }) else null
+                AnimeDetailStage(subject, canonicalInfo, liveScores, backdrop, contentTopPadding,
+                    compactStage, active, stageCollapsed, primary, follow, onSummary = { selectDetailTab(1) })
+            } else AnimeDetailHero(subject, canonicalInfo, liveScores, wide, compactHero, active, backdrop,
+                contentTopPadding = contentTopPadding + if (wide) 8.dp else 0.dp, followAction = follow)
         }
         val sectionPane: @Composable (Modifier) -> Unit = { paneModifier ->
             Column(paneModifier) {
@@ -491,6 +501,7 @@ internal fun AnimeDetailPane(
                                 fontSize = 13.sp, fullWidthIndicator = true)
                         }
                     }
+                    if (stageCollapsed && showDock) playDock(Modifier.padding(start = 8.dp).width(206.dp * fontScale), true)
                     if (detailTab == 2 && observedWork != null) {
                         AnimeDiscussionSourcesStrip(subject.id, currentDiscussion.checks, backdrop,
                             enabled = active, canRetry = true,
@@ -732,6 +743,7 @@ internal fun AnimeDetailPane(
                             else -> Column(Modifier.fillMaxSize()) {
                                 AnimeDetailLineRow(first, firstAvailability, firstLines.size, firstCanRetry, lastSource,
                                     sourceSearchInProgress, hasSourceIssues, paneActive, Modifier.padding(horizontal = horizontal),
+                                    compact = landscapeStage,
                                     onOpen = { onSources(first) }, onManage = { onSources(null) })
                                 Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = horizontal)
                                     .motionInputGate(paneActive),
@@ -887,7 +899,7 @@ internal fun AnimeDetailPane(
                 }
             }
         }
-        if (wide) Row(Modifier.width(width).fillMaxHeight().padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
+        if (wide && !landscapeStage) Row(Modifier.width(width).fillMaxHeight().padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp)) {
             val workWidth = if (desktop) (width * .32f).coerceIn(244.dp * fontScale, 382.dp * fontScale)
                 else (width * .36f).coerceIn(280.dp, 420.dp)
@@ -911,16 +923,13 @@ internal fun AnimeDetailPane(
                     }
                     DesktopVerticalScrollbar(summaryPosition, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                 }
-                if (showDock && (!desktop || compactHero))
-                    playDock(Modifier.fillMaxWidth().padding(top = 6.dp, end = 12.dp, bottom = bottomInset + 4.dp))
+                if (showDock)
+                    playDock(Modifier.fillMaxWidth().padding(top = 6.dp, end = 12.dp, bottom = bottomInset + 4.dp), true)
             }
             Column(Modifier.weight(1f).fillMaxHeight().padding(top = contentTopPadding + 8.dp)) {
-                if (desktop && !compactHero && showDock)
-                    playDock(Modifier.padding(start = horizontal, end = horizontal, bottom = 12.dp)
-                        .widthIn(max = 460.dp * fontScale).fillMaxWidth())
                 sectionPane(Modifier.fillMaxSize())
             }
-        } else Box(Modifier.widthIn(max = 1080.dp).fillMaxSize()) {
+        } else Box(Modifier.widthIn(max = if (landscapeStage) 1400.dp else 1080.dp).fillMaxSize()) {
             // Like the manga detail, drags outside a tile share the current catalogue's scroll owner.
             val catalogueDrag = Modifier.scrollable(activeCatalogScroll, Orientation.Vertical, reverseDirection = true,
                 enabled = active && detailTab == 0 && !statusPresent && !discussionChecksPresent &&
@@ -947,10 +956,10 @@ internal fun AnimeDetailPane(
                     }) { hero() }
                 sectionPane(Modifier.weight(1f).fillMaxWidth().then(catalogueDrag))
             }
-            if (showDock) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+            if (showDock && !landscapeStage) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                 .windowInsetsPadding(contentInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                 .padding(horizontal = 16.dp, vertical = 8.dp), contentAlignment = Alignment.BottomCenter) {
-                playDock(Modifier.fillMaxWidth())
+                playDock(Modifier.fillMaxWidth(), true)
             }
         }
     }
@@ -1110,25 +1119,13 @@ private fun AnimeDetailHero(
 ) {
     val surface = MaterialTheme.colorScheme.surface
     val colors = MaterialTheme.colorScheme
-    val facts = listOfNotNull(
-        (subject.year ?: metadata?.year)?.toString(),
-        when (subject.format ?: metadata?.format) {
-            AnimeDiscoveryFormat.SERIES -> "剧集"
-            AnimeDiscoveryFormat.MOVIE -> "剧场版"
-            AnimeDiscoveryFormat.SPECIAL -> "特别篇"
-            AnimeDiscoveryFormat.SHORT -> "短片"
-            null -> null
-        },
-        (subject.episodeCount ?: metadata?.episodeCount)?.takeIf { it > 0 }?.let { "$it 集" },
-    ).joinToString(" · ")
+    val facts = animeDetailFacts(subject, metadata)
     val alternateTitle = listOfNotNull(subject.originalTitle, metadata?.originalTitle, metadata?.title)
         .firstOrNull { it.isNotBlank() && it != subject.title }
     val artwork = metadata?.takeIf { subject.coverUrl.isBlank() && it.coverUrl.isNotBlank() } ?: subject
     val context = LocalMangaContext.current
     val motion = LocalMotionEnabled.current
     val density = LocalDensity.current
-    val ratings = LocalAnimeRatings.current
-    val openRatings = { ratings.open(AnimeRatingRequest(subject.id, subject.title, subject, scores)) }
     val desktop = platformKind == PlatformKind.DESKTOP
     val posterPanel = desktop && wide && !compact
     BoxWithConstraints(Modifier.fillMaxWidth().clip(if (wide) RoundedCornerShape(20.dp) else RoundedCornerShape(0.dp))) {
@@ -1182,15 +1179,8 @@ private fun AnimeDetailHero(
                     color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (desktop && facts.isNotBlank()) Text(facts, style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
                     color = colors.onSurfaceVariant)
-                if (scores.isNotEmpty()) AnimeRatingBadges(subject.id, scores, Modifier.fillMaxWidth(),
-                    onExpand = openRatings.takeIf { active && ratings.active })
-                else if (metadata != null || subject.canonicalDoubanId() != null) MotionTextButton(
-                    onClick = openRatings, enabled = active && ratings.active,
-                    contentPadding = PaddingValues(0.dp), modifier = Modifier.heightIn(min = 44.dp)) {
-                    Icon(Icons.Outlined.StarOutline, null, Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("各站评分", style = MaterialTheme.typography.labelMedium)
-                }
+                AnimeDetailRatingLinks(subject, metadata, scores, active,
+                    if (scores.isEmpty()) Modifier else Modifier.fillMaxWidth())
             }
         }
         Column(Modifier.fillMaxWidth().padding(start = gutter, end = gutter,
@@ -1220,6 +1210,7 @@ private fun AnimeDetailLineRow(
     hasIssues: Boolean,
     active: Boolean,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
     onOpen: () -> Unit,
     onManage: () -> Unit,
 ) {
@@ -1239,11 +1230,12 @@ private fun AnimeDetailLineRow(
     val interaction = remember { MutableInteractionSource() }
     Row(modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(colors.surfaceContainerLow)
+        Row(Modifier.weight(1f).clip(RoundedCornerShape(14.dp))
+            .then(if (compact) Modifier else Modifier.background(colors.surfaceContainerLow))
             .clickable(enabled = active, role = Role.Button, interactionSource = interaction, indication = null,
                 onClickLabel = "查看播放线路", onClick = onOpen)
             .motionPress(interaction, enabled = active)
-            .heightIn(min = 50.dp).padding(horizontal = 12.dp, vertical = 6.dp)
+            .heightIn(min = if (compact) 44.dp else 50.dp).padding(horizontal = if (compact) 4.dp else 12.dp, vertical = 6.dp)
             .semantics(mergeDescendants = true) {
                 if (lastSource != null) stateDescription = "上次使用 ${lastSource.second}"
             }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -1252,9 +1244,11 @@ private fun AnimeDetailLineRow(
             } else if (availability == AnimeEpisodeAvailability.MATCHED && lastSource != null) {
                 AnimeSourceMark(lastSource.first, lastSource.second, size = 17.dp)
             } else Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(episode?.let { "${animeEpisodeLabel(it)}线路" } ?: "播放线路",
-                    style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
+            val lineName = episode?.let { "${animeEpisodeLabel(it)}线路" } ?: "播放线路"
+            if (compact) Text("$lineName · $caption", Modifier.weight(1f), color = colors.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            else Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(lineName, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(caption, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -1336,6 +1330,7 @@ private fun AnimeDetailFollow(
     libraryAvailable: Boolean,
     active: Boolean,
     native: Boolean,
+    iconsOnly: Boolean,
     onFollow: () -> Unit,
     onStatus: (AnimeWatchStatus) -> Unit,
     onTracking: () -> Unit,
@@ -1383,14 +1378,16 @@ private fun AnimeDetailFollow(
                             if (edge > 0f) clipRect(bottom = edge) { this@drawWithContent.drawContent() }
                         }, tint = MaterialTheme.colorScheme.primary)
                     }
-                    Spacer(Modifier.width(4.dp))
-                    val measure = rememberTextMeasurer()
-                    val style = LocalTextStyle.current
-                    val density = LocalDensity.current
-                    val labelWidth = remember(measure, style, density) {
-                        with(density) { measure.measure("已追番", style, maxLines = 1).size.width.toDp() }
+                    if (!iconsOnly) {
+                        Spacer(Modifier.width(4.dp))
+                        val measure = rememberTextMeasurer()
+                        val style = LocalTextStyle.current
+                        val density = LocalDensity.current
+                        val labelWidth = remember(measure, style, density) {
+                            with(density) { measure.measure("已追番", style, maxLines = 1).size.width.toDp() }
+                        }
+                        Text(if (followed) "已追番" else "追番", Modifier.widthIn(min = labelWidth), maxLines = 1)
                     }
-                    Text(if (followed) "已追番" else "追番", Modifier.widthIn(min = labelWidth), maxLines = 1)
                 }
                 MotionIconButton(
                     onClick = { open = true }, enabled = libraryAvailable && active,

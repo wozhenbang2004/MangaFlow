@@ -42,6 +42,7 @@ private class DesktopAnimePlayer(
     override val supportsModelEnhancement = windows
     override val supportsDecoderStartup = windows
     override val onlineStartupWaitMillis = 12_000L.takeIf { windows }
+    override val onlineRebufferWaitMillis = 12_000L.takeIf { windows }
     override val streamCache by lazy { DesktopAnimeStreamCache.get(context) }
     private var warming = true
     private var videoBeforeBackground: String? = null

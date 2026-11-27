@@ -31,7 +31,10 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -77,6 +80,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     protected open val supportsModelEnhancement: Boolean = false
     protected open val supportsDecoderStartup: Boolean = false
     protected open val onlineStartupWaitMillis: Long? = null
+    protected open val onlineRebufferWaitMillis: Long? = null
     protected open val streamCache: AnimeStreamCache? = null
     protected abstract suspend fun createBackend(): MediampPlayer
     protected open suspend fun createDecoderStartup(byteLimit: Long): MediampPlayer? = null
@@ -339,7 +343,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
 
         child.launch(Dispatchers.Main.immediate) {
             native.state.collect { fact ->
-                if (!isCurrent(generation) || engine.value !== native) return@collect
+                if (!isCurrent(generation) || engine.value !== native || state.value.phase == AnimePlayerPhase.ERROR) return@collect
                 if (fact.mediaStatus != MediaStatus.Ready && fact.mediaStatus != MediaStatus.Ended) {
                     bufferSeekCompletion?.cancel()
                     bufferSeekCompletion = null
@@ -371,7 +375,8 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
                     }
                     previous.copy(
                         phase = phase,
-                        playWhenReady = if (phase == AnimePlayerPhase.ERROR) previous.playWhenReady else fact.playWhenReady,
+                        positionMs = loadedPosition(native) ?: previous.positionMs,
+                        playWhenReady = fact.playWhenReady,
                         isBuffering = phase == AnimePlayerPhase.OPENING || fact.isBuffering,
                         error = null,
                         notice = if (phase == AnimePlayerPhase.READY && !fact.isBuffering &&
@@ -386,11 +391,12 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
             }
         }
         child.launch(Dispatchers.Main.immediate) {
-            native.currentPositionMillis.collect { position ->
-                if (native.state.value.mediaStatus in setOf(MediaStatus.Ready, MediaStatus.Ended))
-                    publish(generation) { it.copy(positionMs = position.coerceAtLeast(0L)) }
+            native.currentPositionMillis.collect {
+                val position = loadedPosition(native) ?: return@collect
+                publish(generation) { it.copy(positionMs = position) }
             }
         }
+        if (transport != null) watchOnlineRebuffer(child, native, transport, request, generation)
         child.launch(Dispatchers.Main.immediate) {
             native.mediaProperties.collect { properties ->
                 if (properties != null) publish(generation) { it.copy(
@@ -480,6 +486,53 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
             Subtitle(transport.subtitleUrl(it), it.mimeType, it.language, it.label)
         } else emptyList()
 
+    private fun loadedPosition(native: MediampPlayer): Long? {
+        // MediaMP clears mediaData and resets the clock before publishing Error. Ready alone can still be stale here.
+        if (engine.value !== native || native.mediaData.value == null || state.value.phase == AnimePlayerPhase.ERROR ||
+            bufferSeekCompletion?.isActive == true) return null
+        return when (native.state.value.mediaStatus) {
+            MediaStatus.Ready, MediaStatus.Ended -> native.currentPositionMillis.value.takeIf { it >= 0L }
+            else -> null
+        }
+    }
+
+    private fun watchOnlineRebuffer(child: CoroutineScope, native: MediampPlayer, transport: AnimeStreamBridge,
+        request: AnimePlayerRequest, generation: Long) {
+        val timeout = onlineRebufferWaitMillis ?: return
+        val hasAlternative = request.hasStartupAlternative ?: return
+        child.launch(Dispatchers.Main.immediate) {
+            var playedTimeline: Long? = null
+            state.map { snapshot ->
+                if (snapshot.isPlaying && !snapshot.playbackSuppressed) playedTimeline = snapshot.timelineGeneration
+                snapshot.timelineGeneration.takeIf { timeline ->
+                    timeline == playedTimeline && snapshot.phase == AnimePlayerPhase.READY && snapshot.isBuffering &&
+                        snapshot.playWhenReady && !snapshot.playbackSuppressed && (foreground || snapshot.inPictureInPicture)
+                }
+            }.distinctUntilChanged().collectLatest { timeline ->
+                if (timeline == null) return@collectLatest
+                while (isCurrent(generation) && engine.value === native) {
+                    val before = state.value
+                    val deliveries = transport.mediaDeliveryRevision
+                    delay(timeout)
+                    val current = state.value
+                    val fact = native.state.value
+                    if (!isCurrent(generation) || engine.value !== native || current.timelineGeneration != timeline ||
+                        current.phase != AnimePlayerPhase.READY || !current.isBuffering || !current.playWhenReady ||
+                        current.playbackSuppressed || !(foreground || current.inPictureInPicture) ||
+                        fact.mediaStatus != MediaStatus.Ready || !fact.isBuffering || !fact.playWhenReady) return@collectLatest
+                    if (current.positionMs != before.positionMs || current.bufferedMs != before.bufferedMs ||
+                        transport.mediaDeliveryRevision != deliveries || !hasAlternative()) continue
+                    fail(generation, IllegalStateException("当前线路的播放和缓冲已停滞，可切换本集备用线路"))
+                    if (isCurrent(generation) && engine.value === native) {
+                        runCatching { native.stopPlayback() }
+                        onPlaybackStateNative()
+                    }
+                    return@collectLatest
+                }
+            }
+        }
+    }
+
     private fun watchOnlineStartup(native: MediampPlayer, transport: AnimeStreamBridge,
         request: AnimePlayerRequest, generation: Long) {
         val timeout = onlineStartupWaitMillis ?: return
@@ -527,7 +580,9 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
                     val mayRetry = transport != null && error.code == PlaybackErrorCode.IO &&
                         transport.lastFailureRetryable != false &&
                         (httpStatus == null || httpStatus >= 500 || httpStatus == 408)
-                    if (!mayRetry || state.value.recoveryAttempt >= options.automaticRecoveryAttempts) {
+                    val useAlternative = mayRetry && (foreground || state.value.inPictureInPicture) &&
+                        state.value.playWhenReady && !state.value.playbackSuppressed && request.hasStartupAlternative?.invoke() == true
+                    if (!mayRetry || useAlternative || state.value.recoveryAttempt >= options.automaticRecoveryAttempts) {
                         publish(generation) { it.copy(notice = it.notice.takeUnless { value -> value == recoveryNotice }) }
                         recoveryNotice = null
                         throw IllegalStateException(transport?.lastFailure ?: when (error.code) {
@@ -553,10 +608,18 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
                     if (transport != null && failure == null) watchOnlineStartup(native, transport, request, generation)
                     native.setMediaData(UriMediaData(mediaUrl, extraFiles = MediaExtraFiles(extras)),
                         playWhenReady = state.value.playWhenReady, startPositionMillis = state.value.positionMs)
-                    if (isCurrent(generation)) onMediaReadyNative()
-                    return
+                    if (!isCurrent(generation) || engine.value !== native) return
+                    val immediateError = native.state.value.mediaStatus as? MediaStatus.Error
+                    if (immediateError == null) {
+                        onMediaReadyNative()
+                        return
+                    }
+                    // The observer defers to this load while setMediaData is returning.
+                    cancelStartupWait()
+                    failure = immediateError.error
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (error: PlaybackException) {
+                    if (!isCurrent(generation) || engine.value !== native) return
                     cancelStartupWait()
                     failure = error
                 }
@@ -572,13 +635,21 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
         cancelStartupWait()
         val native = engine.value ?: return
         bufferSeekCompletion?.cancel()
+        val generation = nativeGeneration
+        val timeline = state.value.timelineGeneration
         // Opening only updates the requested start position and need not emit SeekCompleted.
         // Subscribe before an actual seek; a replacement subscription cannot consume an older
         // queued completion. Keep the buffer collector alive, without replaying its last value.
         val pending = when (native.state.value.mediaStatus) {
             MediaStatus.Ready, MediaStatus.Ended -> playerScope.launch(
                 Dispatchers.Main.immediate, start = CoroutineStart.UNDISPATCHED,
-            ) { native.events.first { it is PlaybackEvent.SeekCompleted } }
+            ) {
+                val landing = native.events.first { it is PlaybackEvent.SeekCompleted } as PlaybackEvent.SeekCompleted
+                if (landing.positionMillis >= 0L && isCurrent(generation) && engine.value === native &&
+                    native.mediaData.value != null && state.value.timelineGeneration == timeline &&
+                    state.value.phase != AnimePlayerPhase.ERROR)
+                    publish(generation) { it.copy(positionMs = landing.positionMillis) }
+            }
             else -> null
         }
         bufferSeekCompletion = pending

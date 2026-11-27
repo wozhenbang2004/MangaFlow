@@ -45,6 +45,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -493,14 +494,13 @@ fun LibraryScreen(
                             maxWidth < 420.dp -> 14.dp
                             else -> 22.dp
                         }) else 16.dp
-                        val available = (maxWidth - shelfInset * 2).coerceAtLeast(1.dp)
                         val gap = if (desktop && maxWidth >= 720.dp) 20.dp else 12.dp
                         val minimumWidth = 94.dp * fontScale
                         val maximum = if (maxWidth >= 840.dp) 6 else if (maxWidth >= 600.dp) 4 else 3
                         val perShelf = if (desktop) MangaLayout.columns(maxWidth, 8, 150.dp * fontScale, gap, shelfInset)
                             else MangaLayout.columns(maxWidth, maximum, minimumWidth, gap, 16.dp)
-                        val bookWidth = (available - gap * (perShelf - 1)) / perShelf
-                        val bookHeight = bookWidth / .7f
+                        val decodeSize = if (desktop) density.coverDecodeSize(
+                            (maxWidth - shelfInset * 2 - gap * (perShelf - 1)) / perShelf, .7f) else null
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(perShelf),
                             state = favoritesPosition,
@@ -694,7 +694,8 @@ fun LibraryScreen(
                                                 draggedFavorite = null
                                                 dragPoint = Offset.Unspecified
                                             },
-                                            modifier = Modifier.fillMaxWidth().height(bookHeight),
+                                            modifier = Modifier.fillMaxWidth().aspectRatio(.7f),
+                                            decodeSize = decodeSize,
                                         )
                                     }
                                     if (fromCopy) Row(Modifier.align(Alignment.TopStart).padding(6.dp)
