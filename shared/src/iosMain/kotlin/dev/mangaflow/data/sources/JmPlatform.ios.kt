@@ -16,6 +16,10 @@ actual suspend fun materializeJmPage(
     retry: Boolean,
 ): Page? = null
 
+internal actual suspend fun cachedJmReaderPage(
+    context: PlatformContext, mangaId: String, chapterId: String, page: Page,
+): Page? = null
+
 internal actual suspend fun prefetchJmPage(
     context: PlatformContext, mangaId: String, chapterId: String, page: Page,
     budget: PrefetchByteBudget, work: PrefetchWork,

@@ -203,11 +203,28 @@ internal class PrefetchByteBudget(private val maximum: Long, private val parent:
     // A failed receipt cannot manufacture a parent charge. Existing ordinary windows still
     // remain exhausted for the rest of their lifetime, while close releases only real bytes.
     fun exhaust() = synchronized(lock) { exhausted = true }
-    fun accept(count: Long): Unit = synchronized(lock) {
-        if (closed || exhausted || count < 0L || count > maximum - spent) throw PrefetchBudgetExceeded()
+    // A complete local file stays available even if another in-flight receipt currently
+    // holds the rest of this window. Keep its charge when that other receipt refunds.
+    fun acceptCached(count: Long): Long = synchronized(lock) {
+        if (closed || count <= 0L) return@synchronized 0L
+        val amount = minOf(count, maximum.coerceAtLeast(0L), Long.MAX_VALUE - spent)
+        val recorded = parent?.acceptCached(amount) ?: amount
+        spent += recorded
+        recorded
+    }
+    fun requireRemaining(count: Long) = account(count, charge = false)
+    fun accept(count: Long) = account(count, charge = true)
+
+    private fun account(count: Long, charge: Boolean, replay: Long? = null): Unit = synchronized(lock) {
+        if (closed || count < 0L) throw PrefetchBudgetExceeded()
+        // For a failed child, replay needs its earlier bytes as well as this chunk. A
+        // refund of just this child's own bytes cannot make that same replay affordable.
+        val replayBytes = replay ?: if (parent == null) count else
+            spent + minOf(count, Long.MAX_VALUE - spent)
+        if (exhausted || count > maximum - spent) throw PrefetchWindowShortage(replayBytes)
         // Every nested operation takes child then parent; parents never acquire child locks.
-        parent?.accept(count)
-        spent += count
+        parent?.account(count, charge, replayBytes)
+        if (charge) spent += count
     }
     fun release(count: Long): Unit = synchronized(lock) {
         val released = count.coerceIn(0L, spent)
@@ -224,6 +241,7 @@ internal class PrefetchByteBudget(private val maximum: Long, private val parent:
     }
 }
 internal open class PrefetchBudgetExceeded : IOException("本次预取已达到资源预算")
+internal class PrefetchWindowShortage(val replayBytes: Long) : PrefetchBudgetExceeded()
 internal class PrefetchDiskQuotaDeferred : PrefetchBudgetExceeded()
 /** One transport/materialization attempt; fields are owned by ExperiencePolicyStore's lock. */
 internal class PrefetchResourceOwner {
@@ -241,6 +259,7 @@ internal class PrefetchResourceBusy(
 /** This attempt cannot fit an empty shared pool until its configured/effective cap grows. */
 internal class PrefetchCapacityExceeded(
     val streamingBytes: Long = 0L, val materializationBytes: Long = 0L,
+    val streamingLimitBytes: Long? = null, val materializationLimitBytes: Long? = null,
 ) : PrefetchBudgetExceeded()
 internal fun experienceOrigin(url: String) = url.toHttpUrlOrNull()?.host ?: "local"
 
@@ -330,10 +349,7 @@ internal suspend fun prefetchOriginalPageResult(
             if (result.dataSource != DataSource.NETWORK) {
                 val cachedBytes = inspectReaderPreparedArtifacts(context, page, headers, source,
                     result.diskCacheKey).originalBytes
-                if (cachedBytes != null) work.ifOptional {
-                    try { bytes.accept(cachedBytes) }
-                    catch (_: PrefetchBudgetExceeded) { bytes.exhaust() }
-                }
+                if (cachedBytes != null) work.ifOptional { bytes.acceptCached(cachedBytes) }
             }
             // A real local hit remains usable even when the optional transfer window is full.
             OriginalPagePrefetchResult(true, result.diskCacheKey)
@@ -726,7 +742,7 @@ private class ExperienceImageNetworkClient(
                     val remaining = minOf(policy.state.value.prefetchBytes,
                         request.extras[bytesKey]?.remaining ?: Long.MAX_VALUE)
                     token?.ifOptional {
-                        if (remaining <= 0L) throw PrefetchBudgetExceeded()
+                        request.extras[bytesKey]?.requireRemaining(1L)
                         policy.requirePrefetchWrite()
                     }
                     // Unknown images start with an estimate, not an observed minimum size.
@@ -785,7 +801,10 @@ private class ExperienceImageNetworkClient(
                     requireNotNull(token).ifOptional {
                         policy.requirePrefetchWrite()
                         val length = response.headers["Content-Length"]?.toLongOrNull()
-                        if (length != null && length > (budget?.remaining ?: 0L)) throw PrefetchBudgetExceeded()
+                        if (length != null && length >= 0L) {
+                            val windowReceipt = receipt ?: throw PrefetchBudgetExceeded()
+                            windowReceipt.requireRemaining(length)
+                        }
                     }
                 }
                 val bounded = object : NetworkResponseBody {

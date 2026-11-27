@@ -438,6 +438,10 @@ class SourcePluginStore constructor(context: PlatformContext, val runtime: Javas
         private const val MAX_REPOSITORIES = 16
         private val instanceLock = SynchronizedObject()
         private var instance: SourcePluginStore? = null
+        internal fun forCacheRead(): SourcePluginStore? = synchronized(instanceLock) {
+            instance?.takeIf { it.ready.isCompleted && !it.ready.isCancelled }
+        }
+
         fun get(context: PlatformContext): SourcePluginStore = synchronized(instanceLock) {
             instance ?: SourcePluginStore(context.applicationContext, JavascriptSourceRuntime(context.applicationContext)).also { instance = it }
         }

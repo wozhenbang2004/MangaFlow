@@ -628,7 +628,7 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
         }
         ReaderStatusSection.WORK -> {
             StatusExplanation("进行中只计已获名额的任务，不是线程数；0 表示此刻没有活动任务。完成按页计，不代表预览仍在内存。")
-            StatusExplanation("原图阶段的四项依次是排队、阶段完成、暂缓、失败；画质处理单独显示处理中、等待或排队、当前窗口增强已备。")
+            StatusExplanation("原图依次显示排队、阶段完成、暂缓和失败。「本轮预读额度」显示这个阅读窗口已计入的原图字节和额度上限。")
             FlowRow(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusToken(Icons.Outlined.Link, "解析并发配置", "解析 ${budget.resolveRequests}")
@@ -650,6 +650,7 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
             StatusIconValue(Icons.Outlined.Timer, "过期", "从写入 / 命中起算")
             StatusIconValue(Icons.Outlined.SwapHoriz, "淘汰", "容量不足时先移旧图")
             StatusExplanation("∞ 关闭时间过期。累计回收只计已移出的缓存引用，不代表进程内存已释放；当前画面与磁盘原图另计。")
+            StatusExplanation("原图写入空间显示磁盘缓存用量。当前窗口的预读额度可在「准备任务」的「原图」中查看。")
             StatusExplanation("图片磁盘为共享缓存；独立源文件与离线用量见存储管理。")
         }
     }
@@ -913,7 +914,7 @@ private fun workSummary(state: ReaderPreparationState, counts: ReaderPreparation
 
 private fun workWaitReason(state: ReaderPreparationState, work: ReaderWork, phase: ReaderPreparationPhase): String? {
     val steps = state.pages.map(work::step).filter { it.phase == phase }
-    val reason = steps.mapNotNull { it.reason?.takeIf { reason -> reason != state.pauseReason && reason.isNotBlank() } }
+    val reason = steps.mapNotNull { it.reason?.takeIf(String::isNotBlank) }
         .groupingBy { it }.eachCount().maxByOrNull { it.value } ?: return null
     return if (reason.value == steps.size) reason.key else "${reason.key}（${reason.value} 页）"
 }
@@ -1054,8 +1055,13 @@ private fun PreparationDetails(state: ReaderPreparationState, work: ReaderWork) 
         val received = state.pages.sumOf { it.receivedBytes }
         val expected = state.pages.takeIf { pages -> pages.all { it.expectedBytes != null } }
             ?.sumOf { it.expectedBytes ?: 0L }
-        if (work == ReaderWork.ORIGINAL && received > 0L)
-            StatusToken(Icons.Outlined.CloudDownload, "本窗口已接收", transferLabel(received, expected))
+        if (work == ReaderWork.ORIGINAL) {
+            if (received > 0L)
+                StatusIconValue(Icons.Outlined.CloudDownload, "已接收", transferLabel(received, expected))
+            if (state.windowBytesUsed != null && state.windowBytesLimit != null)
+                StatusIconValue(Icons.Outlined.DataUsage, "本轮预读额度",
+                    statusCacheUsage(state.windowBytesUsed, state.windowBytesLimit))
+        }
         val issues = state.pages.flatMap { page ->
             listOf(work.title to work.step(page)).mapNotNull { (stage, step) ->
                 val reason = step.reason ?: if (step.phase == ReaderPreparationPhase.FAILED) "本次未返回具体原因" else null

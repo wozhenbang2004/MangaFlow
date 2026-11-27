@@ -48,6 +48,7 @@ internal data class ReaderPreparationState(
     val direction: Int = 1, val windowRevision: Long = 0L, val active: Boolean = false,
     val pauseReason: String? = null, val pages: List<ReaderPreparationPage> = emptyList(),
     val observations: ReaderObservationDiagnostics = ReaderObservationDiagnostics(),
+    val windowBytesUsed: Long? = null, val windowBytesLimit: Long? = null,
 ) {
     val aheadTarget get() = pages.count { it.role == ReaderPreparationRole.AHEAD }
     val behindTarget get() = pages.count { it.role == ReaderPreparationRole.BEHIND }
@@ -96,7 +97,8 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
     val state = mutableState.asStateFlow()
 
     fun window(owner: Any, first: Int, last: Int, direction: Int, ahead: List<Int>, behind: List<Int>,
-        network: Set<Int>, decoded: Set<Int>, nearby: Set<Int>, active: Boolean, reason: String?) = synchronized(lock) {
+        network: Set<Int>, decoded: Set<Int>, nearby: Set<Int>, active: Boolean, reason: String?,
+        windowBytesUsed: Long? = null, windowBytesLimit: Long? = null) = synchronized(lock) {
         if (this.owner !== owner) finishScanLocked(interrupted = true)
         this.owner = owner
         val roles = linkedMapOf<Int, ReaderPreparationRole>()
@@ -123,7 +125,8 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         val changed = snapshot.firstVisible != first || snapshot.lastVisible != last ||
             snapshot.direction != direction || snapshot.pages.associate { it.pageIndex to it.role } != roles
         snapshot = snapshot.copy(firstVisible = first, lastVisible = last, direction = direction,
-            windowRevision = snapshot.windowRevision + if (changed) 1 else 0, active = active, pauseReason = reason)
+            windowRevision = snapshot.windowRevision + if (changed) 1 else 0, active = active, pauseReason = reason,
+            windowBytesUsed = windowBytesUsed, windowBytesLimit = windowBytesLimit)
         publishLocked()
     }
     /** Resolution already supplied a local original, so no transfer will be queued.
@@ -163,7 +166,7 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
                     original = retained(PrefetchStage.DOWNLOADING, row.original),
                     decode = retained(PrefetchStage.CHECKING, row.decode))
             }
-            snapshot = snapshot.copy(active = false)
+            snapshot = snapshot.copy(active = false, windowBytesUsed = null, windowBytesLimit = null)
             publishLocked()
         }
     }
@@ -208,7 +211,18 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         reason: String? = null) = synchronized(lock) {
         if (ticket in activeTickets && (tickets[index to stage] ?: Long.MIN_VALUE) <= ticket) {
             tickets[index to stage] = ticket
-            updateStep(index, stage, ReaderPreparationStep(phase, reason)); publishLocked()
+            val result = ReaderPreparationStep(phase, reason)
+            updateStep(index, stage, result)
+            // A source may restore its original under CHECKING on this same request.
+            // Keep an independent preview's ticket and any more specific stage outcome.
+            if (stage == PrefetchStage.DOWNLOADING && reason != null &&
+                (phase == ReaderPreparationPhase.DEFERRED || phase == ReaderPreparationPhase.FAILED) &&
+                tickets[index to PrefetchStage.CHECKING] == ticket) {
+                val decode = rows[index]?.decode
+                if (decode?.phase == ReaderPreparationPhase.DEFERRED && decode.reason == null)
+                    updateStep(index, PrefetchStage.CHECKING, result)
+            }
+            publishLocked()
         }
     }
     fun finish(ticket: Long) = synchronized(lock) { activeTickets.remove(ticket); ticketOwners.remove(ticket) }

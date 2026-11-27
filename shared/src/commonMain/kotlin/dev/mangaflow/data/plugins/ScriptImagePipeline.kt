@@ -62,6 +62,18 @@ val scriptImageEvents = imageEvents.asSharedFlow()
 private data class ImageRequestKey(val sourceId: String, val owner: String, val revision: String,
     val epoch: String, val token: String, val route: String)
 private data class ResolvedImage(val at: Long, val page: Page)
+
+private fun resolutionKey(owner: String, bundle: ScriptSourcePackage, epoch: String, token: String,
+    route: DownloadRouteSnapshot?) =
+    ImageRequestKey(bundle.sourceId, owner, bundle.digest, epoch, token, route?.identity() ?: "reader")
+
+private fun cachedResolution(key: ImageRequestKey): ResolvedImage? = synchronized(imageStateLock) {
+    resolvedImages[key]?.takeIf { wallTimeMillis() - it.at in 0L until 30_000L }
+}
+
+private fun ResolvedImage.forPage(original: Page) =
+    page.copy(index = original.index, width = original.width, height = original.height)
+
 private val imageStateLock = SynchronizedObject()
 private val resolvedImages = linkedMapOf<ImageRequestKey, ResolvedImage>()
 private val failedImageRetries = linkedSetOf<ImageRequestKey>()
@@ -225,12 +237,9 @@ internal suspend fun resolveScriptPage(
     imageState(original.sourceRevision.isNotBlank() && original.sourceRevision == bundle.digest, "图片来源已更新，请刷新本章后重试。")
     val transport = currentCoroutineContext()[ChapterDownloadTransport]
     val selectedRoute = route ?: transport?.route ?: DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId)
-    val routeKey = selectedRoute?.identity() ?: "reader"
-    val key = ImageRequestKey(ref.sourceId, owner, bundle.digest, epoch, original.sourceImageToken, routeKey)
+    val key = resolutionKey(owner, bundle, epoch, original.sourceImageToken, selectedRoute)
     return imageGates[(key.hashCode() and Int.MAX_VALUE) % imageGates.size].withLock {
-        synchronized(imageStateLock) {
-            resolvedImages[key]?.takeIf { wallTimeMillis() - it.at in 0L until 30_000L }?.page
-        }?.let { return@withLock it.copy(index = original.index, width = original.width, height = original.height) }
+        cachedResolution(key)?.let { return@withLock it.forPage(original) }
         try {
             val retryFailure = synchronized(imageStateLock) { failedImageRetries.remove(key) }
             val call: suspend () -> String = { store.runtime.call(bundle, "resolveImage", JSONArray()
@@ -270,6 +279,83 @@ internal suspend fun resolveScriptPage(
     }
 }
 
+private data class ScriptImageFile(val file: StorageFile, val gate: Mutex, val filename: String,
+    val headers: Map<String, String>) {
+    fun localPage(page: Page, epoch: String): Page =
+        page.copy(url = file.toURI(), headers = emptyMap(), transform = "", sourceSessionEpoch = epoch)
+
+    fun cachedPage(page: Page, epoch: String, maxImageBytes: Long): Page? =
+        if (file.isFile && file.length() in 128L..maxImageBytes && storageImageBounds(file) != null)
+            localPage(page, epoch) else null
+}
+
+private fun scriptImageFile(context: PlatformContext, owner: String, nativeChapterId: String, page: Page,
+    bundle: ScriptSourcePackage, epoch: String): ScriptImageFile {
+    imageState(page.sourceRevision.isEmpty() && page.transform.isEmpty() || page.sourceRevision == bundle.digest,
+        "图片来源已更新，请刷新本章后重试。")
+    imageState(page.sourceSessionEpoch.isEmpty() || page.sourceSessionEpoch == epoch, "来源、账号或设置已变化，请刷新本章。")
+    require(page.transform in setOf("", "jm")) { "来源图片变换暂不兼容。" }
+    val url = publicPluginUrl(page.url)
+    val filename = url.pathSegments.lastOrNull().orEmpty()
+    if (page.transform == "jm") {
+        require(bundle.metadata.optString("protocol") == "venera" && bundle.metadata.optString("key") == "jm" &&
+            page.sourceRevision == bundle.digest && nativeChapterId.matches(Regex("[0-9]{1,14}"))) { "图片解码来源身份不一致。" }
+        require(filename.matches(Regex("[A-Za-z0-9_-]{1,100}\\.(?i:jpg|jpeg|png|webp|gif)")) &&
+            url.pathSegments.windowed(2).any { it[0] == "photos" && it[1] == nativeChapterId }) { "图片解码地址与章节不一致。" }
+    }
+    val actualHeaders = checkedScriptImageHeaders(page.headers)
+    val encodedHeaders = JSONObject(actualHeaders.entries.sortedBy { it.key.lowercase() }
+        .associate { it.key.lowercase() to it.value }).toString()
+    val fingerprint = digest(owner + "|" + bundle.digest + "|" + epoch + "|" +
+        page.url + "|" + page.transform + "|" + encodedHeaders)
+    val target = StorageFile(StorageFile(cacheDirectory(context), "script-decoded"), "$fingerprint.img")
+    return ScriptImageFile(target, decodeGates[(fingerprint.hashCode() and Int.MAX_VALUE) % decodeGates.size], filename, actualHeaders)
+}
+
+/** Look only for a published file. Opaque tokens need the live resolver's exact, unexpired receipt. */
+internal suspend fun cachedScriptReaderPage(context: PlatformContext, mangaId: String, chapterId: String,
+    page: Page): Page? = withContext(Dispatchers.IO) {
+    val ref = SourceKeys.decodeChapter(mangaId, chapterId)
+    if (!ref.sourceId.startsWith("js_") || page.url.startsWith("file:") ||
+        page.sourceRouteId.isNotBlank() && page.sourceRouteId != ref.sourceId) return@withContext null
+    val store = SourcePluginStore.forCacheRead() ?: return@withContext null
+    val bundle = store.installed.value.firstOrNull { it.sourceId == ref.sourceId } ?: return@withContext null
+    try {
+        val owner = scriptImageOwner(mangaId, chapterId)
+        val epoch = scriptSourceImageEpoch(context, ref.sourceId)
+        if (page.sourceSessionEpoch.isNotEmpty() && page.sourceSessionEpoch != epoch) return@withContext null
+        val original = restoreScriptPageHeaders(context, owner, page)
+        val transport = currentCoroutineContext()[ChapterDownloadTransport]
+        val routing = DownloadRoutingStore.get(context)
+        val route = transport?.route ?: routing.sourceSnapshot(ref.sourceId)
+        val token = original.sourceImageToken
+        if (token.isNotEmpty() && (token.length > 8192 || original.sourceRevision != bundle.digest))
+            return@withContext null
+        val key = if (token.isEmpty()) null else resolutionKey(owner, bundle, epoch, token, route)
+        val receipt = key?.let { cachedResolution(it) ?: return@withContext null }
+        val resolved = receipt?.forPage(original) ?: original
+        val cacheFile = scriptImageFile(context, owner, ref.chapterId, resolved, bundle, epoch)
+        if (!cacheFile.file.isFile || !cacheFile.gate.tryLock()) return@withContext null
+        try {
+            val release = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
+                dev.mangaflow.storage.CacheBackend.SCRIPT, cacheFile.file, mangaId, chapterId, ref.sourceId,
+                page.index, used = false)
+            try {
+                val hit = cacheFile.cachedPage(resolved, epoch, ExperiencePolicyStore.get(context).state.value.runtime.maxImageBytes)
+                    ?: return@withContext null
+                currentCoroutineContext().ensureActive()
+                hit.takeIf {
+                    scriptSourceImageEpoch(context, ref.sourceId) == epoch &&
+                        store.installed.value.any { it.sourceId == ref.sourceId && it.digest == bundle.digest } &&
+                        (transport != null || routing.sourceSnapshot(ref.sourceId) == route) &&
+                        (key == null || cachedResolution(key) === receipt)
+                }
+            } finally { release() }
+        } finally { cacheFile.gate.unlock() }
+    } catch (cancel: CancellationException) { throw cancel }
+    catch (_: Exception) { null }
+}
+
 /** Script images keep their public-host/redirect boundary before Coil receives an app-private file.
  * Plain images retain their exact bytes. Only the explicitly recognized JM transform is decoded. */
 internal suspend fun materializeScriptPage(
@@ -280,7 +366,7 @@ internal suspend fun materializeScriptPage(
     promoted: () -> Boolean = { false },
     work: PrefetchWork? = null,
     retry: Boolean = false,
-    prefetchRemaining: (() -> Long)? = null,
+    prefetchBudget: PrefetchByteBudget? = null,
 ): Page {
     if (page.url.startsWith("file://")) return page.copy(headers = emptyMap())
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
@@ -292,25 +378,9 @@ internal suspend fun materializeScriptPage(
     store.ready.await()
     val bundle = store.installed.value.firstOrNull { it.sourceId == ref.sourceId }
         ?: throw ScriptImageRefreshRequired("图片来源已移除，请重新安装后刷新本章。")
-    imageState(page.sourceRevision.isEmpty() && page.transform.isEmpty() || page.sourceRevision == bundle.digest,
-        "图片来源已更新，请刷新本章后重试。")
     val epoch = scriptSourceImageEpoch(context, ref.sourceId)
-    imageState(page.sourceSessionEpoch.isEmpty() || page.sourceSessionEpoch == epoch, "来源、账号或设置已变化，请刷新本章。")
-    require(page.transform in setOf("", "jm")) { "来源图片变换暂不兼容。" }
-    val url = publicPluginUrl(page.url)
-    val filename = url.pathSegments.lastOrNull().orEmpty()
-    if (page.transform == "jm") {
-        require(bundle.metadata.optString("protocol") == "venera" && bundle.metadata.optString("key") == "jm" &&
-            page.sourceRevision == bundle.digest && ref.chapterId.matches(Regex("[0-9]{1,14}"))) { "图片解码来源身份不一致。" }
-        require(filename.matches(Regex("[A-Za-z0-9_-]{1,100}\\.(?i:jpg|jpeg|png|webp|gif)")) &&
-            url.pathSegments.windowed(2).any { it[0] == "photos" && it[1] == ref.chapterId }) { "图片解码地址与章节不一致。" }
-    }
-    val actualHeaders = checkedScriptImageHeaders(page.headers)
-    val encodedHeaders = JSONObject(actualHeaders.entries.sortedBy { it.key.lowercase() }
-        .associate { it.key.lowercase() to it.value }).toString()
-    val fingerprint = digest(scriptImageOwner(mangaId, chapterId) + "|" + bundle.digest + "|" + epoch + "|" +
-        page.url + "|" + page.transform + "|" + encodedHeaders)
-    val target = StorageFile(StorageFile(cacheDirectory(context), "script-decoded"), "$fingerprint.img")
+    val cacheFile = scriptImageFile(context, scriptImageOwner(mangaId, chapterId), ref.chapterId, page, bundle, epoch)
+    val target = cacheFile.file
     val policy = ExperiencePolicyStore.get(context)
     val runtime = policy.state.value.runtime
     val maxImageBytes = runtime.maxImageBytes
@@ -327,11 +397,10 @@ internal suspend fun materializeScriptPage(
         // expires when its source route changes; changing layout is not a new owner.
         (!prefetched || transport != null || DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId) == selectedRoute)
     // A key has one writer; unrelated originals no longer hold CPU slots while downloading.
-    return try { decodeGates[(fingerprint.hashCode() and Int.MAX_VALUE) % decodeGates.size].withLock {
+    return try { cacheFile.gate.withLock {
         withContext(Dispatchers.IO) {
             if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
-            if (!retry && target.isFile && target.length() in 128L..maxImageBytes && storageImageBounds(target) != null)
-                return@withContext page.copy(url = target.toURI(), headers = emptyMap(), transform = "", sourceSessionEpoch = epoch)
+            if (!retry) cacheFile.cachedPage(page, epoch, maxImageBytes)?.let { return@withContext it }
             try {
                 val fetch: suspend () -> ByteArray = { withImageSession(context, ref.sourceId, epoch) {
                     val started = monotonicTimeMillis()
@@ -341,7 +410,7 @@ internal suspend fun materializeScriptPage(
                     var failed = false
                     var ignoreFeedback = false
                     try {
-                        fetchScriptImageBytes(context, page.url, actualHeaders, selectedRoute,
+                        fetchScriptImageBytes(context, page.url, cacheFile.headers, selectedRoute,
                             onBytes = { count ->
                                 if (count > 0L) {
                                     if (!current()) throw ScriptImageRefreshRequired("图片来源、账号或预读路由已变化，请刷新本章。")
@@ -351,23 +420,27 @@ internal suspend fun materializeScriptPage(
                                 }
                             }, onResponse = { code, responseHeaders ->
                                 responseCode = code
-                                val encoding = responseHeaders.entries.firstOrNull { it.key.equals("Content-Encoding", true) }?.value
-                                work?.beginBody(if (encoding.isNullOrEmpty() || encoding.equals("identity", true))
-                                    responseHeaders.entries.firstOrNull { it.key.equals("Content-Length", true) }?.value?.toLongOrNull() else null)
                                 retryAfter = responseHeaders.entries.firstOrNull { it.key.equals("Retry-After", true) }?.value
-                                if (prefetched && !promoted()) {
-                                    val length = responseHeaders.entries.firstOrNull { it.key.equals("Content-Length", true) }
-                                        ?.value?.toLongOrNull()
-                                    if (length != null && length > policy.state.value.materializationBytes)
-                                        throw PrefetchCapacityExceeded(streamingBytes = length, materializationBytes = length)
-                                    val encoding = responseHeaders.entries.firstOrNull { it.key.equals("Content-Encoding", true) }
-                                        ?.value?.trim()
-                                    // Darwin's optional image path buffers the HTTP message before
-                                    // decoding gzip. Its inflation is not observable as body chunks.
-                                    // Leave that response to an explicit foreground request.
-                                    if (dev.mangaflow.platform.platformKind == dev.mangaflow.platform.PlatformKind.IOS &&
-                                        !encoding.isNullOrEmpty() && !encoding.equals("identity", true))
-                                        throw PrefetchBudgetExceeded()
+                                if (code in 200..299) {
+                                    val encoding = responseHeaders.entries.firstOrNull { it.key.equals("Content-Encoding", true) }?.value?.trim()
+                                    val identity = encoding.isNullOrEmpty() || encoding.equals("identity", true)
+                                    val length = if (identity) responseHeaders.entries.firstOrNull { it.key.equals("Content-Length", true) }
+                                        ?.value?.trim()?.toLongOrNull()?.takeIf { it >= 0L } else null
+                                    work?.beginBody(length)
+                                    if (prefetched && !promoted()) {
+                                        // Darwin buffers compressed bodies before inflation; only foreground can own those.
+                                        if (!identity && dev.mangaflow.platform.platformKind == dev.mangaflow.platform.PlatformKind.IOS)
+                                            throw PrefetchBudgetExceeded()
+                                        if (length != null) {
+                                            val limits = policy.state.value
+                                            val streamCap = limits.prefetchBytes.takeIf { length > it }
+                                            val materialCap = limits.materializationBytes.takeIf { length > it }
+                                            if (streamCap != null || materialCap != null)
+                                                throw PrefetchCapacityExceeded(streamingBytes = length, materializationBytes = length,
+                                                    streamingLimitBytes = streamCap, materializationLimitBytes = materialCap)
+                                            prefetchBudget?.requireRemaining(length)
+                                        }
+                                    }
                                 }
                             })
                     } catch (failure: Exception) {
@@ -386,9 +459,12 @@ internal suspend fun materializeScriptPage(
                     prefetched -> {
                         if (promoted()) policy.withImageAdmission(reader = true, source = ref.sourceId, onWaiting = waiting) { fetch() }
                         else try {
-                            val remaining = minOf(policy.state.value.prefetchBytes,
-                                prefetchRemaining?.invoke() ?: Long.MAX_VALUE)
-                            if (remaining <= 0L && !promoted()) throw PrefetchBudgetExceeded()
+                            val streamCap = policy.state.value.prefetchBytes
+                            if (!promoted()) {
+                                if (streamCap < 1L) throw PrefetchCapacityExceeded(streamingBytes = 1L, streamingLimitBytes = streamCap)
+                                prefetchBudget?.requireRemaining(1L)
+                            }
+                            val remaining = minOf(streamCap, prefetchBudget?.remaining ?: Long.MAX_VALUE)
                             policy.withPrefetchAdmission(ref.sourceId,
                                 minOf(policy.estimatedPageBytes(page.url), remaining.coerceAtLeast(0L)), promoted, waiting) { fetch() }
                         } catch (_: PrefetchPromoted) {
@@ -406,7 +482,7 @@ internal suspend fun materializeScriptPage(
                 val outputBytes = if (page.transform == "jm") {
                     val decode: suspend () -> ByteArray = { policy.withDecodeAdmission(optional = prefetched, promoted = promoted,
                         onWaiting = { work?.admission(PrefetchStage.CHECKING, it) }) {
-                        withContext(Dispatchers.Default) { decodeScriptJmImage(bytes, ref.chapterId, filename, page.url, page.index,
+                        withContext(Dispatchers.Default) { decodeScriptJmImage(bytes, ref.chapterId, cacheFile.filename, page.url, page.index,
                             runtime.scriptDecodeMiPixels.toLong() * 1_048_576L, maxImageBytes) }
                     } }
                     if (work != null) work.during(PrefetchStage.CHECKING) { decode() } else decode()
@@ -426,7 +502,7 @@ internal suspend fun materializeScriptPage(
                 }
                 if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
                 imageEvents.tryEmit(ScriptImageEvent(ref.sourceId, stage, true, wallTimeMillis()))
-                page.copy(url = target.toURI(), headers = emptyMap(), transform = "", sourceSessionEpoch = epoch)
+                cacheFile.localPage(page, epoch)
             } catch (failure: Exception) {
                 if (failure is CancellationException && failure !is TimeoutCancellationException || failure is PrefetchBudgetExceeded) throw failure
                 imageEvents.tryEmit(ScriptImageEvent(ref.sourceId, stage, false, wallTimeMillis()))
@@ -457,7 +533,7 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
         val resolved = resolveScriptPage(context, mangaId, chapterId, page, route, promoted = { work.isForeground }, work = work)
         val result = materializeScriptPage(context, mangaId, chapterId, resolved, route,
             prefetched = true, promoted = { work.isForeground }, work = work,
-            prefetchRemaining = { receipt.remaining }, onBytes = { count ->
+            prefetchBudget = receipt, onBytes = { count ->
             synchronized(transferLock) {
                 if (closed) throw CancellationException("图片预取已结束。")
                 received += count
@@ -477,8 +553,7 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
         val size = path?.let { StorageFile(it).length() }
         val cacheHit = synchronized(transferLock) { received == 0L }
         if (cacheHit && size != null) work.ifOptional {
-            try { receipt.accept(size) }
-            catch (_: PrefetchBudgetExceeded) { budget.exhaust() }
+            receipt.acceptCached(size)
         }
         policy.recordImage(monotonicTimeMillis() - started, memory = false, disk = cacheHit,
             prefetch = !work.isForeground, key = page.url, bytes = size)

@@ -52,7 +52,10 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.data.ReaderSourceStandby
 import dev.mangaflow.data.approximateReaderPage
 import dev.mangaflow.experience.PrefetchBudgetExceeded
+import dev.mangaflow.experience.PrefetchCapacityExceeded
 import dev.mangaflow.experience.PrefetchDiskQuotaDeferred
+import dev.mangaflow.experience.PrefetchResourceBusy
+import dev.mangaflow.experience.PrefetchWindowShortage
 import dev.mangaflow.experience.PrefetchPromoted
 import dev.mangaflow.experience.ExperienceAdmissionDeferred
 import dev.mangaflow.experience.PrefetchWorkSnapshot
@@ -61,6 +64,9 @@ import dev.mangaflow.experience.PrefetchImageInactivityException
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.data.plugins.ScriptImageRefreshRequired
 import dev.mangaflow.data.sources.JmImageRefreshRequired
+import dev.mangaflow.data.sources.JmPageLimit
+import dev.mangaflow.data.sources.JmPageLimitExceeded
+import dev.mangaflow.ui.experienceCacheSize
 import dev.mangaflow.storage.DownloadStorageException
 import dev.mangaflow.storage.DownloadPhase
 import dev.mangaflow.platform.wallTimeMillis
@@ -127,9 +133,37 @@ internal fun readerPrefetchErrorLabel(failure: Throwable): String {
         chain += current
         cause = current.cause
     }
+    chain.firstNotNullOfOrNull { cause ->
+        when (cause) {
+            is PrefetchDiskQuotaDeferred -> "原图写入空间暂不可用"
+            is PrefetchWindowShortage -> "本轮预读剩余额度不足以容纳本页"
+            is JmPageLimitExceeded -> when (cause.limit) {
+                JmPageLimit.ENCODED_BYTES -> "单页图片大小超过 ${experienceCacheSize(cause.maximum)} 上限"
+                JmPageLimit.RESTORED_PIXELS -> "单页还原超过 ${cause.maximum} 像素上限"
+            }
+            is PrefetchResourceBusy -> when {
+                cause.streamingGeneration != null && cause.materializationGeneration != null -> "等待原图传输和图片处理额度释放"
+                cause.streamingGeneration != null -> "等待原图传输额度释放"
+                cause.materializationGeneration != null -> "等待图片处理内存释放"
+                else -> "等待预读资源释放"
+            }
+            is PrefetchCapacityExceeded -> {
+                val streaming = cause.streamingLimitBytes
+                val processing = cause.materializationLimitBytes
+                when {
+                    streaming != null && processing != null -> "单页所需资源超过传输和图片处理上限"
+                    streaming != null -> "单页需要的传输额度超过 ${experienceCacheSize(streaming)}"
+                    processing != null -> "单页需要的处理内存超过 ${experienceCacheSize(processing)}"
+                    cause.streamingBytes == 0L && cause.materializationBytes > 0L -> "单页需要的内存超过图片处理上限"
+                    cause.materializationBytes == 0L && cause.streamingBytes > 0L -> "单页需要的传输额度超过上限"
+                    else -> "单页所需资源超过预读上限"
+                }
+            }
+            else -> null
+        }
+    }?.let { return it }
     return when {
-        chain.any { it is PrefetchDiskQuotaDeferred } -> "原图缓存暂满，腾出空间后继续"
-        chain.any { it is PrefetchBudgetExceeded } -> "已达本次预取额度"
+        chain.any { it is PrefetchBudgetExceeded } -> "预读达到当前资源上限"
         chain.any { it is ExperienceAdmissionDeferred } -> "资源保护暂缓"
         chain.any { it is PrefetchPromoted } -> "交由当前页继续"
         chain.any { it is OutOfMemoryError } -> "内存保护暂缓"

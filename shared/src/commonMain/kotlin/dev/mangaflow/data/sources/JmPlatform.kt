@@ -3,10 +3,15 @@ package dev.mangaflow.data.sources
 import dev.mangaflow.data.Page
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.experience.PrefetchBudgetExceeded
 import dev.mangaflow.experience.PrefetchByteBudget
 import dev.mangaflow.experience.PrefetchWork
 
 internal class JmImageRefreshRequired(message: String) : Exception(message)
+
+internal enum class JmPageLimit { ENCODED_BYTES, RESTORED_PIXELS }
+
+internal class JmPageLimitExceeded(val limit: JmPageLimit, val maximum: Long) : PrefetchBudgetExceeded()
 
 /** Kotlin JVM adapter available to Android and desktop. iOS does not claim compatibility. */
 expect fun createJmBodySource(context: PlatformContext): BodySource?
@@ -23,6 +28,11 @@ expect suspend fun materializeJmPage(
     context: PlatformContext, mangaId: String, chapterId: String, page: Page,
     onBytes: ((Long) -> Unit)? = null,
     retry: Boolean = false,
+): Page?
+
+/** Look up a completed reader-owned file for this source, session and route. A miss does no network work. */
+internal expect suspend fun cachedJmReaderPage(
+    context: PlatformContext, mangaId: String, chapterId: String, page: Page,
 ): Page?
 
 /** Uses the native reader's exact cache/writer; a visible consumer can promote this same work. */

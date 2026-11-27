@@ -89,24 +89,12 @@ public final class JmImageTool {
             // The Canvas always receives a mutable software bitmap with a known pixel format.
             decryptedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             Canvas canvas = new Canvas(decryptedBitmap);
-            int segmentHeight = height / numSegments;
-            int remainder = height % numSegments;
-            int currentY = 0;
-            for (int i = 0; i < numSegments; i++) {
-                checkInterrupted();
-                int ySrc;
-                int hSrc = segmentHeight;
-                if (i == 0) {
-                    hSrc += remainder;
-                    ySrc = height - hSrc;
-                } else {
-                    ySrc = height - (segmentHeight * (i + 1)) - remainder;
-                }
-                Rect srcRect = new Rect(0, ySrc, width, ySrc + hSrc);
-                Rect destRect = new Rect(0, currentY, width, currentY + hSrc);
-                canvas.drawBitmap(originalBitmap, srcRect, destRect, null);
-                currentY += hSrc;
-            }
+            final Bitmap decoded = originalBitmap;
+            forEachStrip(height, numSegments, (sourceY, destinationY, count) -> {
+                Rect source = new Rect(0, sourceY, width, sourceY + count);
+                Rect destination = new Rect(0, destinationY, width, destinationY + count);
+                canvas.drawBitmap(decoded, source, destination, null);
+            });
 
             checkInterrupted();
             try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
@@ -138,13 +126,31 @@ public final class JmImageTool {
         }
     }
 
+    /** The downloaded-page and file-backed reader paths use the same native strip ordering. */
+    public interface StripConsumer {
+        void draw(int sourceY, int destinationY, int count);
+    }
+
+    public static void forEachStrip(int height, int segments, StripConsumer consumer) {
+        int segmentHeight = height / segments;
+        int remainder = height % segments;
+        int destinationY = 0;
+        for (int i = 0; i < segments; i++) {
+            checkInterrupted();
+            int count = segmentHeight + (i == 0 ? remainder : 0);
+            int sourceY = height - segmentHeight * (i + 1) - remainder;
+            consumer.draw(sourceY, destinationY, count);
+            destinationY += count;
+        }
+    }
+
     private static void checkInterrupted() {
         if (Thread.currentThread().isInterrupted()) {
             throw new CancellationException("JM image restoration was cancelled.");
         }
     }
 
-    private static Bitmap.CompressFormat getCompressFormat(String formatName) {
+    public static Bitmap.CompressFormat getCompressFormat(String formatName) {
         return switch (formatName.toLowerCase()) {
             case "jpeg", "jpg" -> Bitmap.CompressFormat.JPEG;
             case "png" -> Bitmap.CompressFormat.PNG;

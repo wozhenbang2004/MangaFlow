@@ -87,8 +87,11 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var activePrefetch = 0
     private var prefetchReserved = 0L
     private var prefetchStreamingBytes = 0L
-    private var streamingReleaseGeneration = 0L
-    private var materializationReleaseGeneration = 0L
+    // A release or an increased cap can both admit a previously blocked page.
+    private var streamingCapacityGeneration = 0L
+    private var materializationCapacityGeneration = 0L
+    private val mutablePrefetchCapacityChanges = MutableStateFlow(0L)
+    internal val prefetchCapacityChanges: StateFlow<Long> = mutablePrefetchCapacityChanges.asStateFlow()
     private var materializationStreamingBytes = 0L
     private var materializationReservedBytes = 0L
     private var queued = 0
@@ -1041,14 +1044,18 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         val materialNeed = owner.materialization + if (memoryBacked) bytes else 0L
         // Include this attempt's earlier chunks: a too-large image must not become a
         // transient failure merely because its final chunk would fit an empty pool.
-        if (streamNeed > budget.prefetchBytes || memoryBacked && materialNeed > budget.materializationBytes)
-            throw PrefetchCapacityExceeded(streamNeed, if (memoryBacked) materialNeed else 0L)
+        val streamTooLarge = streamNeed > budget.prefetchBytes
+        val materialTooLarge = memoryBacked && materialNeed > budget.materializationBytes
+        if (streamTooLarge || materialTooLarge)
+            throw PrefetchCapacityExceeded(streamNeed, if (memoryBacked) materialNeed else 0L,
+                streamingLimitBytes = budget.prefetchBytes.takeIf { streamTooLarge },
+                materializationLimitBytes = budget.materializationBytes.takeIf { materialTooLarge })
         val streamBlocked = bytes > budget.prefetchBytes - prefetchStreamingBytes
         val materialBlocked = memoryBacked && bytes > budget.materializationBytes -
             materializationStreamingBytes - materializationReservedBytes
         if (streamBlocked || materialBlocked) throw PrefetchResourceBusy(owner,
-            if (streamBlocked) streamingReleaseGeneration - owner.streamingReleases else null,
-            if (materialBlocked) materializationReleaseGeneration - owner.materializationReleases else null,
+            if (streamBlocked) streamingCapacityGeneration - owner.streamingReleases else null,
+            if (materialBlocked) materializationCapacityGeneration - owner.materializationReleases else null,
             streamNeed, materialNeed)
         prefetchStreamingBytes += bytes
         owner.streaming += bytes
@@ -1059,17 +1066,18 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         owner.streaming -= bytes
         if (memoryBacked) { materializationStreamingBytes -= bytes; owner.materialization -= bytes }
         if (bytes > 0L) {
-            streamingReleaseGeneration++; owner.streamingReleases++
-            if (memoryBacked) { materializationReleaseGeneration++; owner.materializationReleases++ }
+            streamingCapacityGeneration++; owner.streamingReleases++
+            if (memoryBacked) { materializationCapacityGeneration++; owner.materializationReleases++ }
+            mutablePrefetchCapacityChanges.value++
         }
     }
     internal fun canRetryPrefetchResource(failure: PrefetchResourceBusy): Boolean = synchronized(lock) {
-        val externalRelease = failure.streamingGeneration?.let {
-            it != streamingReleaseGeneration - failure.owner.streamingReleases
+        val capacityRecovered = failure.streamingGeneration?.let {
+            it != streamingCapacityGeneration - failure.owner.streamingReleases
         } == true || failure.materializationGeneration?.let {
-            it != materializationReleaseGeneration - failure.owner.materializationReleases
+            it != materializationCapacityGeneration - failure.owner.materializationReleases
         } == true
-        externalRelease &&
+        capacityRecovered &&
             (failure.streamingBytes == 0L || failure.streamingBytes <= mutableState.value.prefetchBytes - prefetchStreamingBytes) &&
             (failure.materializationBytes == 0L || failure.materializationBytes <= mutableState.value.materializationBytes -
                 materializationStreamingBytes - materializationReservedBytes)
@@ -1086,10 +1094,11 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         require(bytes >= 0L && bytes <= Long.MAX_VALUE - materializationReservedBytes)
         val needed = owner.materialization + bytes
         if (optional && needed > mutableState.value.materializationBytes)
-            throw PrefetchCapacityExceeded(materializationBytes = needed)
+            throw PrefetchCapacityExceeded(materializationBytes = needed,
+                materializationLimitBytes = mutableState.value.materializationBytes)
         if (optional && bytes > mutableState.value.materializationBytes - materializationStreamingBytes - materializationReservedBytes)
             throw PrefetchResourceBusy(owner, null,
-                materializationReleaseGeneration - owner.materializationReleases, owner.streaming, needed)
+                materializationCapacityGeneration - owner.materializationReleases, owner.streaming, needed)
         // A reservation is not evidence of allocated/resident process memory.
         materializationReservedBytes += bytes
         owner.materialization += bytes
@@ -1100,7 +1109,11 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                     held = false
                     materializationReservedBytes -= bytes
                     owner.materialization -= bytes
-                    if (bytes > 0L) { materializationReleaseGeneration++; owner.materializationReleases++ }
+                    if (bytes > 0L) {
+                        materializationCapacityGeneration++
+                        owner.materializationReleases++
+                        mutablePrefetchCapacityChanges.value++
+                    }
                 }
             }
         }
@@ -1422,8 +1435,14 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     )
 
     private fun publish() {
+        val previous = mutableState.value
         val next = budget()
         mutableState.value = next
+        val streamGrew = next.prefetchBytes > previous.prefetchBytes
+        val materialGrew = next.materializationBytes > previous.materializationBytes
+        if (streamGrew) streamingCapacityGeneration++
+        if (materialGrew) materializationCapacityGeneration++
+        if (streamGrew || materialGrew) mutablePrefetchCapacityChanges.value++
         revision.value++
         val memory = memoryCache
         val retention = mutableOverrides.value.contentCache

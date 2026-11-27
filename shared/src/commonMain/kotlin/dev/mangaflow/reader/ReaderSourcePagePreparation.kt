@@ -9,9 +9,11 @@ import coil3.size.Scale
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.data.plugins.cachedScriptReaderPage
 import dev.mangaflow.data.plugins.materializeScriptPage
 import dev.mangaflow.data.plugins.resolveScriptPage
 import dev.mangaflow.data.plugins.invalidateScriptImage
+import dev.mangaflow.data.sources.cachedJmReaderPage
 import dev.mangaflow.data.sources.materializeJmPage
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.PrefetchStage
@@ -32,6 +34,21 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Downloads keep first claim on a page; private source caches can satisfy the remaining request locally. */
+internal suspend fun resolveReaderPrefetchPage(
+    context: PlatformContext, downloads: DownloadStore, workId: String, owner: String,
+    chapterId: String, sourceId: String, page: Page,
+): Page? {
+    val candidate = downloads.resolvePrefetchPage(workId, chapterId, page) ?: return null
+    if (candidate.url.startsWith("file:") ||
+        candidate.sourceRouteId.isNotBlank() && candidate.sourceRouteId != sourceId) return candidate
+    return when {
+        sourceId == "jmcomic" -> cachedJmReaderPage(context, owner, chapterId, candidate) ?: candidate
+        sourceId.startsWith("js_") -> cachedScriptReaderPage(context, owner, chapterId, candidate) ?: candidate
+        else -> candidate
+    }
+}
 
 /**
  * One foreground target preparation path for an exact single-page repair and a whole-source switch.

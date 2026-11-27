@@ -137,7 +137,7 @@ private fun jmDigest(value: String): String = MessageDigest.getInstance("SHA-256
 private fun jmImageFingerprint(chapterId: String, page: Page, epoch: String, route: DownloadRouteSnapshot): String =
     jmDigest("native-jm-v2|$chapterId:${page.index}:$epoch:${route.identity()}:${page.url}")
 
-private inline fun <T> jmCacheIo(action: () -> T): T = try { action() }
+internal inline fun <T> jmCacheIo(action: () -> T): T = try { action() }
 catch (failure: java.io.IOException) {
     if (failure is DownloadStorageException) throw failure
     throw DownloadStorageException("无法读写禁漫图片缓存，请检查可用空间。", failure)
@@ -150,8 +150,9 @@ catch (failure: java.io.IOException) {
 private suspend fun readJmImageBounds(file: StorageFile, runtime: ExperienceRuntimePreferences,
     policy: ExperiencePolicyStore, owner: PrefetchResourceOwner, optional: Boolean,
 ): androidx.compose.ui.unit.IntSize? {
-    val release = policy.reserveMaterialization(file.length() * 2L, optional, owner)
-    return try { jmCacheIo { readNativeReaderSize(file.path, runtime) } } finally { release() }
+    val bytes = jmHeaderWorkingBytes(file.length())
+    val release = if (bytes > 0L) policy.reserveMaterialization(bytes, optional, owner) else null
+    return try { jmCacheIo { readNativeReaderSize(file.path, runtime) } } finally { release?.invoke() }
 }
 
 /** Guard before upstream getContent() can buffer an unbounded response; count consumed body bytes only. */
@@ -160,7 +161,7 @@ private fun guardedJmImageBody(response: okhttp3.Response, maximumBytes: Long, r
     val body = response.body ?: return response
     if (body.contentLength() > maximumBytes) {
         response.close()
-        if (resourceBound) throw PrefetchBudgetExceeded()
+        if (resourceBound) throw JmPageLimitExceeded(JmPageLimit.ENCODED_BYTES, maximumBytes)
         throw java.io.IOException("图片响应超过当前单图容量设置。")
     }
     val input = object : okio.ForwardingSource(body.source()) {
@@ -172,7 +173,7 @@ private fun guardedJmImageBody(response: okhttp3.Response, maximumBytes: Long, r
             if (count > 0L) {
                 onBytes?.invoke(count)
                 if (count > remaining) {
-                    if (resourceBound) throw PrefetchBudgetExceeded()
+                    if (resourceBound) throw JmPageLimitExceeded(JmPageLimit.ENCODED_BYTES, maximumBytes)
                     throw java.io.IOException("图片响应超过当前单图容量设置。")
                 }
                 received += count
@@ -847,6 +848,35 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     override fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> =
         mapOf("User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36", "Accept" to "image/webp,image/jpeg,*/*")
 
+    /** Look up an already restored page without creating a JM client or admitting another transfer. */
+    suspend fun cachedReaderFile(mangaId: String, chapterId: String, page: Page): StorageFile? = withContext(Dispatchers.IO) {
+        val key = validId(chapterId)
+        if (page.index !in 0..9_999) return@withContext null
+        val session = account
+        if (page.sourceSessionEpoch.isNotBlank() && page.sourceSessionEpoch != session.imageEpoch) return@withContext null
+        val routes = DownloadRoutingStore.get(context)
+        val route = routes.sourceSnapshot(info.id)
+        val path = StorageFile(root, jmImageFingerprint(key, page, session.imageEpoch, route) + ".jpg")
+        if (!path.isFile) return@withContext null
+        val policy = ExperiencePolicyStore.get(context)
+        val runtime = policy.state.value.runtime
+        val storage = dev.mangaflow.storage.StorageCacheStore.get(context)
+        val release = storage.leaseFile(dev.mangaflow.storage.CacheBackend.JM, path,
+            SourceKeys.manga(info.id, mangaId), SourceKeys.chapter(info.id, mangaId, key), info.id,
+            page.index, used = false)
+        try {
+            val bytes = path.length()
+            if (bytes !in 128L..runtime.maxImageBytes) return@withContext null
+            val stamp = path.lastModified()
+            val bounds = readJmImageBounds(path, runtime, policy, PrefetchResourceOwner(), optional = true)
+            currentCoroutineContext().ensureActive()
+            path.takeIf { bounds != null && it.isFile && it.length() == bytes && it.lastModified() == stamp &&
+                account == session && routes.sourceSnapshot(info.id) == route }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { null }
+        finally { release() }
+    }
+
     suspend fun decryptedPageFile(mangaId: String, chapterId: String, page: Page,
         onBytes: ((Long) -> Unit)? = null, retry: Boolean = false,
         budget: PrefetchByteBudget? = null, observedWork: PrefetchWork? = null,
@@ -912,10 +942,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                 if (!retry && target.isFile && target.length() in 128L..maximumBytes &&
                     readJmImageBounds(target, runtime, policy, resourceOwner, !token.isForeground) != null) {
                     current()
-                    token.ifOptional {
-                        try { receipt?.accept(target.length()) }
-                        catch (_: PrefetchBudgetExceeded) { budget?.exhaust() }
-                    }
+                    token.ifOptional { receipt?.acceptCached(target.length()) }
                     policy.recordImage(monotonicTimeMillis() - started, memory = false, disk = true,
                         prefetch = !token.isForeground, key = page.url, bytes = target.length())
                     completed = true
@@ -998,7 +1025,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                                         token.beginBody(response.networkResponse?.header("Content-Length")?.toLongOrNull()
                                             ?: body.contentLength().takeIf { it >= 0L })
                                         token.ifOptional {
-                                            if (receipt != null && body.contentLength() > receipt.remaining) throw PrefetchBudgetExceeded()
+                                            receipt?.requireRemaining(body.contentLength().coerceAtLeast(0L))
                                         }
                                         body.byteStream().use { input ->
                                             val output = jmCacheIo { raw.outputStream() }
@@ -1049,7 +1076,10 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                             if (token.isForeground) policy.withImageAdmission(true, info.id, waiting) { fetch(url) }
                             else try {
                                 val remaining = minOf(policy.state.value.prefetchBytes, receipt?.remaining ?: Long.MAX_VALUE)
-                                token.ifOptional { if (remaining <= 0L) throw PrefetchBudgetExceeded() }
+                                token.ifOptional {
+                                    receipt?.requireRemaining(1L)
+                                    policy.requirePrefetchWrite()
+                                }
                                 policy.withPrefetchAdmission(info.id,
                                     minOf(policy.estimatedPageBytes(page.url), remaining.coerceAtLeast(0L)),
                                     { token.isForeground }, waiting) { fetch(url) }
@@ -1062,45 +1092,48 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                                 current()
                                 val rawLength = raw.length()
                                 if (rawLength < 128L) throw JmImagePayloadException("禁漫图片线路返回了空内容或不完整的图片。")
-                                if (rawLength > maximumBytes || rawLength > Int.MAX_VALUE.toLong())
-                                    throw PrefetchBudgetExceeded()
+                                val inputLimit = minOf(maximumBytes, Int.MAX_VALUE.toLong())
+                                if (rawLength > inputLimit) throw JmPageLimitExceeded(JmPageLimit.ENCODED_BYTES, inputLimit)
                                 val bounds = readJmImageBounds(raw, runtime, policy, resourceOwner, !token.isForeground)
                                     ?: throw JmImagePayloadException("禁漫图片线路返回了无法读取的内容。")
-                                val pixels = bounds.width.toLong() * bounds.height
-                                val restoresPixels = !image.isGif && JmImageTool.calculateNumSegments(
-                                    image.scrambleId.toLong(), image.photoId.toLong(), image.filenameWithoutSuffix) > 0
-                                if (restoresPixels && pixels > runtime.scriptDecodeMiPixels.toLong() * 1_048_576L)
-                                    throw PrefetchBudgetExceeded()
-                                // Input/output pixels plus encoded input/output copies are a conservative
-                                // work reservation, never reported as already-resident process memory.
-                                val reserve = rawLength * 2L + if (restoresPixels) pixels * 24L else 0L
-                                val decodeLease = policy.reserveMaterialization(reserve, !token.isForeground, resourceOwner)
-                                try {
-                                    val bytes = runInterruptible {
-                                        val input = jmCacheIo { raw.readBytes() }
-                                        try { if (image.isGif) input else JmImageTool.decryptImage(input, image) }
-                                        catch (failure: JmComicException) {
-                                            throw JmImagePayloadException("禁漫图片线路返回了无法还原的图片。", failure)
+                                val segments = if (image.isGif) 0 else JmImageTool.calculateNumSegments(
+                                    image.scrambleId.toLong(), image.photoId.toLong(), image.filenameWithoutSuffix)
+                                val ready = if (segments == 0) raw else {
+                                    val pixels = bounds.width.toLong() * bounds.height
+                                    val pixelLimit = runtime.scriptDecodeMiPixels.toLong() * 1_048_576L
+                                    if (pixels > pixelLimit)
+                                        throw JmPageLimitExceeded(JmPageLimit.RESTORED_PIXELS, pixelLimit)
+                                    token.ifOptional { policy.requirePrefetchWrite() }
+                                    val restored = try {
+                                        runInterruptible {
+                                            restoreJmFile(raw, pending, image, segments, pixels, maximumBytes) { bytes ->
+                                                policy.reserveMaterialization(bytes, !token.isForeground, resourceOwner)
+                                            }
                                         }
+                                    } catch (failure: JmComicException) {
+                                        throw JmImagePayloadException("禁漫图片线路返回了无法还原的图片。", failure)
                                     }
                                     current()
-                                    if (bytes.size < 128) throw SourceException("禁漫图片还原结果为空或不完整。")
-                                    if (bytes.size.toLong() > maximumBytes) throw PrefetchBudgetExceeded()
-                                    token.ifOptional {
-                                        policy.requirePrefetchWrite()
-                                        receipt?.let {
-                                            if (it.used < bytes.size) it.accept(bytes.size.toLong() - it.used)
-                                            else it.release(it.used - bytes.size.toLong())
-                                        }
+                                    if (restored == pending) {
+                                        jmCacheIo { syncStorageFile(pending) }
+                                        if (readJmImageBounds(pending, runtime, policy, resourceOwner, !token.isForeground) == null)
+                                            throw SourceException("禁漫图片还原结果不是可读取的图片，请重试本页。")
                                     }
-                                    jmCacheIo { pending.writeBytes(bytes); syncStorageFile(pending) }
-                                    if (readJmImageBounds(pending, runtime, policy, resourceOwner, !token.isForeground) == null)
-                                        throw SourceException("禁漫图片还原结果不是可读取的图片，请重试本页。")
-                                    mutex.withLock {
-                                        current()
-                                        if (!pending.renameTo(target)) throw DownloadStorageException("解码后的图片无法缓存。")
+                                    restored
+                                }
+                                val size = ready.length()
+                                if (size < 128L) throw SourceException("禁漫图片还原结果为空或不完整，请重试本页。")
+                                if (size > maximumBytes) throw JmPageLimitExceeded(JmPageLimit.ENCODED_BYTES, maximumBytes)
+                                token.ifOptional {
+                                    policy.requirePrefetchWrite()
+                                    receipt?.let {
+                                        if (it.used < size) it.accept(size - it.used) else it.release(it.used - size)
                                     }
-                                } finally { decodeLease() }
+                                }
+                                mutex.withLock {
+                                    current()
+                                    if (!ready.renameTo(target)) throw DownloadStorageException("解码后的图片无法缓存。")
+                                }
                             }
                         }
                     }
@@ -1206,6 +1239,16 @@ actual suspend fun materializeJmPage(
     if (ref.sourceId != "jmcomic" || page.url.startsWith("file:")) return null
     val file = JmNativeSourceProvider.get(context).decryptedPageFile(ref.mangaId, ref.chapterId, page, onBytes, retry,
         observedWork = currentCoroutineContext()[ReaderPreparationWorkContext]?.work)
+    return page.copy(url = file.toURI())
+}
+
+internal actual suspend fun cachedJmReaderPage(
+    context: PlatformContext, mangaId: String, chapterId: String, page: Page,
+): Page? {
+    val ref = SourceKeys.decodeChapter(mangaId, chapterId)
+    if (ref.sourceId != "jmcomic" || page.url.startsWith("file:")) return null
+    val file = JmNativeSourceProvider.get(context).cachedReaderFile(ref.mangaId, ref.chapterId, page)
+        ?: return null
     return page.copy(url = file.toURI())
 }
 
