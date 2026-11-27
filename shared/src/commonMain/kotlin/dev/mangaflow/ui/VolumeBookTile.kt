@@ -1,5 +1,9 @@
 package dev.mangaflow.ui
 
+import androidx.compose.material.icons.outlined.AutoStories
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Tune
 import dev.mangaflow.experience.sourceNetwork
 
 import dev.mangaflow.ui.platform.*
@@ -8,6 +12,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +24,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Refresh
@@ -99,12 +107,23 @@ internal fun VolumeBookTile(
     val desktop = platformKind == PlatformKind.DESKTOP
     val quietLoading = platformKind == PlatformKind.ANDROID
     val desktopActions = listOf(
-        DesktopMenuAction("阅读这一卷", enabled = enabled, onClick = onRead),
-        DesktopMenuAction("选择来源下载", enabled = enabled, onClick = onDownload),
-        DesktopMenuAction("选择章节来源", enabled = enabled && sourcesEnabled, onClick = onSources),
-        DesktopMenuAction("章节信息", enabled = enabled, onClick = onActions),
+        DesktopMenuAction("阅读这一卷", icon = Icons.Outlined.AutoStories, enabled = enabled, onClick = onRead),
+        DesktopMenuAction("选择来源下载", icon = Icons.Outlined.Download, enabled = enabled, onClick = onDownload),
+        DesktopMenuAction("选择章节来源", icon = Icons.Outlined.Tune, enabled = enabled && sourcesEnabled, onClick = onSources),
+        DesktopMenuAction("章节信息", icon = Icons.Outlined.Info, enabled = enabled, onClick = onActions),
     )
     val interaction = remember(mangaId, chapter.id) { MutableInteractionSource() }
+    val desktopPaper = if (desktop) {
+        val hovered by interaction.collectIsHoveredAsState()
+        val focused by interaction.collectIsFocusedAsState()
+        val colors = MaterialTheme.colorScheme
+        val ink = if (current) colors.primary else colors.onSurface
+        Modifier.background(ink.copy(alpha = when {
+            focused || hovered -> .085f
+            current -> .07f
+            else -> 0f
+        }), RoundedCornerShape(10.dp)).padding(6.dp)
+    } else Modifier
     val nativeJm = remember(mangaId, chapter.id) { SourceKeys.decodeChapter(mangaId, chapter.id).sourceId == "jmcomic" }
     val scriptSource = remember(mangaId, chapter.id) { SourceKeys.decodeChapter(mangaId, chapter.id).sourceId.startsWith("js_") }
     var resolvedCover by remember(mangaId, chapter.id, cover.page, cover.attempt) { mutableStateOf<Page?>(
@@ -140,14 +159,14 @@ internal fun VolumeBookTile(
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopStart) {
         DesktopContextMenuArea(desktopActions) {
             Column(
-                (if (desktop) Modifier.widthIn(max = 184.dp) else Modifier).fillMaxWidth().combinedClickable(
+                (if (desktop) Modifier.widthIn(max = 196.dp) else Modifier).fillMaxWidth().combinedClickable(
                     interactionSource = interaction, indication = null, enabled = enabled,
                     role = Role.Button,
                     onClickLabel = if (downloadMode) "下载这一卷" else "阅读这一卷",
                     onLongClickLabel = "单行本详情和操作",
                     onClick = if (downloadMode) onDownload else onRead,
                     onLongClick = if (desktop) null else onActions,
-                ).motionPress(interaction, enabled = enabled).semantics {
+                ).motionPress(interaction, enabled = enabled).then(desktopPaper).semantics {
                     contentDescription = chapter.title + "，" + chapter.group
                     stateDescription = listOfNotNull(
                         chapterReadingStatus(progress, progressKnown),
@@ -175,7 +194,8 @@ internal fun VolumeBookTile(
                         color = DetailMuted, strokeWidth = 1.5.dp)
                 }
                 Text(chapter.title, color = if (current) DetailForeground else DetailSecondary,
-                    fontSize = 12.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    fontSize = if (desktop) 14.sp else 12.sp, lineHeight = if (desktop) 20.sp else 18.sp,
+                    maxLines = if (desktop) 2 else 1, overflow = TextOverflow.Ellipsis,
                     fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp))
                 Row(Modifier.fillMaxWidth().padding(horizontal = 1.dp), verticalAlignment = Alignment.CenterVertically,

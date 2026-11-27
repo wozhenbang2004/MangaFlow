@@ -1,5 +1,8 @@
 package dev.mangaflow.ui
 
+import androidx.compose.material.icons.outlined.AutoStories
+import androidx.compose.material.icons.outlined.BookmarkRemove
+import androidx.compose.material.icons.outlined.ViewList
 import dev.mangaflow.typography.MangaFontScene
 
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -294,6 +297,7 @@ fun LibraryScreen(
         UnifiedShelfScope.SITE -> siteBooksPosition ?: localBooksPosition
     }
     val historyPosition = rememberLazyListState()
+    var desktopHistoryBook by rememberSaveable(adultProfile) { mutableStateOf<String?>(null) }
     LaunchedEffect(active, showHistory, shelfScope, siteSource?.id) {
         if (!active || showHistory || shelfScope != UnifiedShelfScope.LOCAL) localBooksPosition.stopScroll()
         if (!active || showHistory || shelfScope != UnifiedShelfScope.COPY) copyBooksPosition.stopScroll()
@@ -411,6 +415,8 @@ fun LibraryScreen(
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val shelfWidth = (maxWidth - 140.dp).coerceAtMost((if (adultProfile) 284 else 196).dp).coerceAtLeast(112.dp)
     val historyInset = 16.dp + ((maxWidth - if (desktop) 1040.dp else MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp)
+    val splitHistory = desktop && maxWidth >= 720.dp * density.fontScale.coerceAtLeast(1f) &&
+        maxHeight - headerPadding > 300.dp && visibleHistory.isNotEmpty()
     Box(Modifier.fillMaxSize().mangaHazeSource(backdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
         wallpaper()
@@ -418,7 +424,15 @@ fun LibraryScreen(
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (!libraryReady) LibraryRestoreStatus(libraryStore, Modifier.padding(top = headerPadding))
             else MotionTabContent(if (showHistory) 1 else 0, Modifier.fillMaxSize()) { tab ->
-                if (tab == 1) {
+                if (tab == 1 && splitHistory) {
+                    DesktopReadingHistory(visibleHistory, repository, libraryStore, historyPosition, active && showHistory,
+                        onContinue, ::removeHistoryWithUndo, Modifier.fillMaxSize().padding(start = 20.dp, end = 20.dp,
+                            top = headerPadding + 8.dp, bottom = 16.dp + bottomInset), desktopHistoryBook,
+                        { desktopHistoryBook = it }, onDetails,
+                        header = if (copyNotice != null && importCopy != null) ({
+                            CopyShelfImportHint(copyNotice, active && showHistory, importCopy)
+                        }) else null)
+                } else if (tab == 1) {
                     val today = localToday()
                     val dates = remember(visibleHistory) {
                         visibleHistory.groupBy { if (it.updatedAt > 0L) localDateAt(it.updatedAt) else null }
@@ -449,10 +463,10 @@ fun LibraryScreen(
                             }
                             items(books, key = { "history-${it.manga.id}" }, contentType = { "reading-history" }) { progress ->
                                 val historyActions = listOf(
-                                    DesktopMenuAction("继续阅读") { onContinue(progress) },
-                                    DesktopMenuAction("详情与目录") { onDetails(progress.manga) },
-                                    DesktopMenuAction("章节记录") { chapterHistoryManga = progress.manga },
-                                    DesktopMenuAction("移除阅读记录") { removeHistoryWithUndo(progress.manga.id) })
+                                    DesktopMenuAction("继续阅读", icon = Icons.Outlined.AutoStories) { onContinue(progress) },
+                                    DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList) { onDetails(progress.manga) },
+                                    DesktopMenuAction("章节记录", icon = Icons.Outlined.History) { chapterHistoryManga = progress.manga },
+                                    DesktopMenuAction("移除阅读记录", icon = Icons.Outlined.DeleteOutline, destructive = true) { removeHistoryWithUndo(progress.manga.id) })
                                 DesktopContextMenuArea(historyActions) {
                                 Box {
                                 SwipeToRemove(enabled = !desktop, onRemove = { removeHistoryWithUndo(progress.manga.id) }, label = "删除阅读记录",
@@ -489,8 +503,8 @@ fun LibraryScreen(
                             else MangaLayout.columns(maxWidth, maximum, minimumWidth, gap, 16.dp)
                         val bookWidth = (available - gap * (perShelf - 1)) / perShelf
                         val bookHeight = bookWidth / .7f
-                        val resumeColumns = if (desktop) MangaLayout.columns(maxWidth, 3, 270.dp * fontScale, gap, 16.dp) else 1
-                        val resumeWidth = ((available - gap * (resumeColumns - 1)) / resumeColumns).coerceAtMost(480.dp * fontScale)
+                        val wideResume = desktop && available >= 680.dp * fontScale
+                        val resumeColumns = if (wideResume) 3 else 1
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(perShelf),
                             state = favoritesPosition,
@@ -509,27 +523,16 @@ fun LibraryScreen(
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                         Text("继续阅读", Modifier.weight(1f).semantics { heading() },
                                             style = MaterialTheme.typography.titleLarge)
-                                        TextButton(onClick = { onCancelOpen(); showHistory = true },
+                                        if (!desktop) TextButton(onClick = { onCancelOpen(); showHistory = true },
                                             enabled = active,
                                             colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
                                             Text("阅读记录", style = MaterialTheme.typography.labelMedium)
                                         }
                                     }
-                                    if (desktop) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(gap)) {
-                                        recent.forEach { progress -> key(progress.manga.id) {
-                                            Box(Modifier.width(resumeWidth)) {
-                                                val actions = if (active) listOf(
-                                                    DesktopMenuAction("继续阅读") { onContinue(progress) },
-                                                    DesktopMenuAction("详情与目录") { onDetails(progress.manga) },
-                                                    DesktopMenuAction("章节记录") { chapterHistoryManga = progress.manga },
-                                                ) else emptyList()
-                                                DesktopContextMenuArea(actions) {
-                                                    ContinueRow(progress, repository, onContinue = { if (active) onContinue(it) },
-                                                        onHistory = { if (active) chapterHistoryManga = progress.manga }, prominent = true)
-                                                }
-                                            }
-                                        } }
-                                    } else ContinueRow(recent.first(), repository, prominent = true,
+                                    if (wideResume) DesktopResumeShelf(recent, repository, active, onContinue, onDetails,
+                                        onHistory = { chapterHistoryManga = it })
+                                    else ContinueRow(recent.first(), repository, prominent = true,
+                                        onHistory = if (desktop) ({ if (active) chapterHistoryManga = recent.first().manga }) else null,
                                         onContinue = { if (active) onContinue(it) })
                                 }
                             }
@@ -644,15 +647,15 @@ fun LibraryScreen(
                                 var bookMenuOpen by remember(manga.id) { mutableStateOf(false) }
                                 val desktopTools = desktop && (hovered || cardFocused || bookMenuOpen)
                                 val bookActions = listOf(
-                                    DesktopMenuAction(if (hasContinuation) "继续阅读" else "开始阅读") { onOpen(manga) },
-                                    DesktopMenuAction("详情与目录") { onCancelOpen(); onDetails(manga) },
-                                    DesktopMenuAction("章节记录") { onCancelOpen(); chapterHistoryManga = manga },
+                                    DesktopMenuAction(if (hasContinuation) "继续阅读" else "开始阅读", icon = Icons.Outlined.AutoStories) { onOpen(manga) },
+                                    DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList) { onCancelOpen(); onDetails(manga) },
+                                    DesktopMenuAction("章节记录", icon = Icons.Outlined.History) { onCancelOpen(); chapterHistoryManga = manga },
                                     when {
-                                        allowLocalRemoval -> DesktopMenuAction("移出本机收藏") { removeFavoriteWithUndo(manga) }
-                                        !local && addBook != null -> DesktopMenuAction("加入本机收藏") { addBook(manga) }
+                                        allowLocalRemoval -> DesktopMenuAction("移出本机收藏", icon = Icons.Outlined.BookmarkRemove, destructive = true) { removeFavoriteWithUndo(manga) }
+                                        !local && addBook != null -> DesktopMenuAction("加入本机收藏", icon = Icons.Outlined.BookmarkAdd) { addBook(manga) }
                                         else -> null
                                     },
-                                    if (remote) DesktopMenuAction("移出站点收藏") { removeSiteBook(manga) } else null,
+                                    if (remote) DesktopMenuAction("移出站点收藏", icon = Icons.Outlined.BookmarkRemove, destructive = true) { removeSiteBook(manga) } else null,
                                 ).filterNotNull()
                                 DesktopContextMenuArea(bookActions) {
                                 Column(Modifier.fillMaxWidth().then(if (desktop) Modifier
@@ -777,7 +780,7 @@ fun LibraryScreen(
                     }
                 }
             }
-            if (desktop && libraryReady) {
+            if (desktop && libraryReady && (!showHistory || !splitHistory)) {
                 val track = Modifier.align(Alignment.CenterEnd).padding(top = headerPadding, bottom = bottomInset)
                 if (showHistory) DesktopVerticalScrollbar(historyPosition, track)
                 else DesktopVerticalScrollbar(favoritesPosition, track)
@@ -829,6 +832,15 @@ fun LibraryScreen(
                 } else if (hasShelfTabs) scopeTabs(if (stackedTools) Modifier.width(240.dp * density.fontScale.coerceIn(1f, 1.5f))
                     else Modifier.widthIn(max = 280.dp).weight(1f, fill = false), 36.dp)
                 if (!stackedTools) Spacer(Modifier.weight(1f))
+                if (!showHistory) {
+                    val openHistory = { onCancelOpen(); showHistory = true }
+                    if (stackedTools) MotionIconButton(onClick = openHistory, enabled = active, modifier = Modifier.size(36.dp),
+                        tooltip = "阅读记录") { Icon(Icons.Outlined.History, "阅读记录", Modifier.size(19.dp)) }
+                    else TextButton(onClick = openHistory, enabled = active) {
+                        Icon(Icons.Outlined.History, null, Modifier.size(16.dp))
+                        Text("阅读记录", Modifier.padding(start = 5.dp), maxLines = 1)
+                    }
+                }
                 val accountLabel = if (adultProfile) "来源账号" else "拷贝账号"
                 if (onOpenAccount != null) MotionIconButton(onClick = onOpenAccount,
                     modifier = Modifier.size(36.dp), tooltip = accountLabel) {

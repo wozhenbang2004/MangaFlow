@@ -1,5 +1,6 @@
 package dev.mangaflow.ui
 
+import androidx.compose.material.icons.outlined.ViewList
 import dev.mangaflow.anime.ui.AnimeWorkspace
 import dev.mangaflow.anime.ui.AnimeWorkspaceDestination
 import androidx.compose.material.icons.outlined.Tv
@@ -200,6 +201,43 @@ private enum class Section(val title: String, val icon: ImageVector) {
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
 }
+/** Only committed root pages enter this trail. Reader, work details and anime own their inner routes. */
+private class DesktopSectionTrail(initial: SidebarDestination, private val home: SidebarDestination) {
+    private var pages by mutableStateOf(listOf(initial))
+    private var cursor by mutableIntStateOf(0)
+    private var requested: Int? = null
+
+    fun target(step: Int): SidebarDestination? = pages.getOrNull(cursor + step)
+        ?: home.takeIf { step == -1 && cursor == 0 && pages.first() != home }
+
+    fun request(step: Int): SidebarDestination? {
+        val index = cursor + step
+        val destination = target(step) ?: return null
+        // A restored or directly opened section can still return to its own home. Only
+        // create that history entry when requested, preserving Forward to the restored page.
+        if (index < 0) {
+            pages = listOf(home) + pages.take(31)
+            cursor = 1
+            requested = 0
+        } else requested = index
+        return destination
+    }
+
+    fun arrive(section: SidebarDestination) {
+        val replay = requested
+        if (replay != null && pages.getOrNull(replay) == section) {
+            cursor = replay
+            requested = null
+        } else if (pages[cursor] != section) {
+            pages = (pages.take(cursor + 1) + section).takeLast(32)
+            cursor = pages.lastIndex
+            requested = null
+        }
+    }
+
+    fun cancelReplay() { requested = null }
+}
+
 private val Section.usesCatalogueVeil: Boolean
     get() = this == Section.DISCOVER || this == Section.ANIME || this == Section.LIBRARY || this == Section.BOARDS
 
@@ -243,6 +281,14 @@ private val mangaSidebarHeadings = mapOf(
     SidebarDestination(Section.DISCOVER) to "浏览",
     SidebarDestination(Section.LIBRARY) to "我的漫画",
 )
+
+/** These destinations are real pages. Downloads, account settings and sources in Anime are overlays. */
+private fun AnimeWorkspaceDestination.desktopPage(): AnimeWorkspaceDestination? = when (this) {
+    AnimeWorkspaceDestination.SEASON -> AnimeWorkspaceDestination.CALENDAR
+    AnimeWorkspaceDestination.DOWNLOADS, AnimeWorkspaceDestination.TRACKING, AnimeWorkspaceDestination.SOURCES,
+    AnimeWorkspaceDestination.GENRES -> null
+    else -> this
+}
 
 // Saved/programmatic destinations can outlive their individual sidebar entries.
 private fun AnimeWorkspaceDestination.sidebarEntry(): AnimeWorkspaceDestination? = when (this) {
@@ -606,6 +652,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var animeBrowseRequest by rememberSaveable { mutableIntStateOf(0) }
     var animeBackRequest by rememberSaveable { mutableIntStateOf(0) }
     var animeImmersive by remember { mutableStateOf(false) }
+    var animeNestedBack by remember(section, contentProfile) { mutableStateOf(false) }
     var tagSearchVisible by rememberSaveable { mutableStateOf(false) }
     var recentReadingOpen by rememberSaveable { mutableStateOf(false) }
     val ordinaryBrowse = remember(model) { StandardBrowseActions(model) }
@@ -847,9 +894,40 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             else null)
     }
     val sidebarHeadings = if (animeMode) animeSidebarHeadings else mangaSidebarHeadings
-    val desktopDestinations = remember(profileSections, contentProfile) {
-        profileSections.map { DesktopDestination(it.title(contentProfile), it.icon, sidebarHeadings[it],
-            utility = it.section == Section.SETTINGS) }
+    val desktopSections = remember(desktop, profileSections, contentProfile) {
+        when {
+            !desktop -> emptyList()
+            contentProfile == ContentProfile.ORDINARY -> profileSections + SidebarDestination(Section.ACCOUNT)
+            else -> profileSections
+        }
+    }
+    val desktopAccountName = if (desktop && contentProfile == ContentProfile.ORDINARY)
+        account.profile?.let { it.nickname.ifBlank { it.username } }?.takeIf { it.isNotBlank() } else null
+    val desktopDestinations = remember(desktopSections, contentProfile, desktopAccountName) {
+        desktopSections.map { destination ->
+            val accountEntry = destination.section == Section.ACCOUNT || destination.anime == AnimeWorkspaceDestination.TRACKING
+            val title = when {
+                destination.section == Section.DISCOVER -> "发现"
+                destination.section == Section.ACCOUNT && restrictedMode -> "来源账号"
+                else -> destination.title(contentProfile)
+            }
+            DesktopDestination(title, destination.icon, sidebarHeadings[destination],
+                utility = destination.section == Section.SETTINGS || accountEntry, account = accountEntry,
+                accountName = if (accountEntry) desktopAccountName else null)
+        }
+    }
+    val desktopSelection = pendingSidebarDestination ?: if (section == Section.ACCOUNT) SidebarDestination(Section.ACCOUNT)
+        else highlightedSection
+    val desktopTrail = if (desktop) remember(contentProfile) {
+        val initial = if (section == Section.ANIME) AnimeWorkspaceDestination.entries
+            .firstOrNull { it.name == animeDestinationName }?.desktopPage() ?: AnimeWorkspaceDestination.HOME else null
+        val home = if (animeMode) SidebarDestination(Section.ANIME, AnimeWorkspaceDestination.HOME)
+            else SidebarDestination(Section.DISCOVER)
+        DesktopSectionTrail(SidebarDestination(section, initial), home)
+    } else null
+    // Anime reports its committed root from inside the workspace after its restore/request finishes.
+    if (desktopTrail != null && section != Section.ANIME) LaunchedEffect(desktopTrail, section) {
+        desktopTrail.arrive(SidebarDestination(section))
     }
     CopyShelfSyncOverlay(
         model = model, snapshot = copyShelfSyncSnapshot,
@@ -999,11 +1077,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             onSourceChanged = { profileSourceChanged(id) }, initiallyShowLogin = sourceDetailsLogin)
     } }
     val openDesktopSearch: () -> Unit = {
+        desktopTrail?.cancelReplay()
         if (animeMode) {
             if (section != Section.ANIME) changeSection(Section.ANIME)
             animeSearchRequest++
         } else {
             // The regular reader/detail close paths retain their own positions and cancellation.
+            copyExploreOpen = false
+            copyExploreReturnManga = null
             if (section == Section.ANIME) model.services.anime.closePlayback()
             model.closeReader()
             model.closeDetail()
@@ -1110,39 +1191,85 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         LocalMangaMetrics provides displayedMetrics,
         LocalWallpaperActive provides (frame is Frame.Root && hasWallpaper && !(section == Section.ANIME && animeImmersive)),
     ) {
+    val desktopShortcutsActive = desktop && !drawerVisible && !rootHandoff && sourceManagement == null &&
+        sourceResumeChoice == null && authorWorks == null && !recentReadingOpen && !tagSearchVisible &&
+        !experienceOpen && !profileSourcesOpen && !sourceSettingsOpen && sourceDetailsId == null && !copySyncOpen &&
+        !lanReadingSyncOpen && !mangaTrackingOpen && !adultProgressOpen
+    val previousSection = desktopTrail?.target(-1)
+    val nextSection = desktopTrail?.target(1)
+    val animeOwnsBack = section == Section.ANIME && (animeNestedBack || animeImmersive)
+    val canReturnDesktop = reading != null || detail != null || copyExploreOpen || animeOwnsBack ||
+        section == Section.DISCOVER && searchExpanded || previousSection != null
+    val canAdvanceDesktop = frame is Frame.Root && !animeOwnsBack &&
+        (section != Section.DISCOVER || !searchExpanded) && nextSection != null
+    val openDesktopRoot: (SidebarDestination) -> Unit = { destination ->
+        destination.anime?.let(navigateAnime) ?: changeSection(destination.section)
+    }
+    val desktopBack: () -> Unit = {
+        when {
+            reading != null -> model.returnToMangaDetail()
+            detail != null -> model.closeDetail()
+            copyExploreOpen -> backFromCopyExplore()
+            animeOwnsBack -> animeBackRequest++
+            section == Section.DISCOVER && searchExpanded -> {
+                searchExpanded = false
+                browseActions.suspendBrowseSearch()
+                focus.clearFocus(force = true)
+            }
+            else -> {
+                val target = desktopTrail?.request(-1)
+                if (target != null) openDesktopRoot(target)
+            }
+        }
+    }
+    val desktopForward: () -> Unit = { desktopTrail?.request(1)?.let(openDesktopRoot) }
+    val desktopBackAction = desktopBack.takeIf { desktopShortcutsActive && canReturnDesktop }
+    val desktopForwardAction = desktopForward.takeIf { desktopShortcutsActive && canAdvanceDesktop }
+    val desktopNavigation: @Composable (State<Float>, Boolean) -> Unit = { labels, floating ->
+        DesktopNavigationPane(labels, contentProfile, desktopDestinations, desktopSections.indexOf(desktopSelection),
+            onSelectProfile = requestProfile, onNavigate = { index ->
+                val destination = desktopSections[index]
+                desktopTrail?.cancelReplay()
+                if (destination.experience) {
+                    if (floating) drawerAction = DrawerAction(DrawerValue.Closed, openExperience = true)
+                    else experienceOpen = true
+                } else {
+                    copyExploreOpen = false
+                    copyExploreReturnManga = null
+                    model.closeDetail()
+                    tagSearchVisible = false
+                    recentReadingOpen = false
+                    if (destination.anime != null) navigateAnime(destination.anime)
+                    else {
+                        if (!animeMode) searchExpanded = destination.section == Section.DISCOVER && browse.isSearch
+                        changeSection(destination.section)
+                    }
+                }
+            }, onManageSources = {
+                if (floating) drawerAction = DrawerAction(DrawerValue.Closed)
+                manageProfileSources()
+            },
+            onSearch = if (!floating && frame is Frame.Root &&
+                (section == Section.DISCOVER || section == Section.ANIME && !animeOwnsBack)) null else ({
+                openDesktopSearch()
+                if (floating && drawerAction?.target != DrawerValue.Closed) drawerAction = DrawerAction(DrawerValue.Closed)
+            }),
+            onBack = desktopBackAction, onForward = desktopForwardAction,
+            showHistory = !floating,
+            toggleLabel = when { floating -> "关闭导航"; !desktopNavigationCanExpand -> null
+                desktopNavigationWide -> "收起导航"; else -> "展开导航" },
+            onToggle = { if (floating) drawerAction = DrawerAction(DrawerValue.Closed)
+                else desktopNavigationMode = if (desktopNavigationWide) 2 else 1 },
+            floating = floating, enabled = !floating || drawerCanSelect)
+    }
     DesktopNavigationWorkspace(
-        visible = desktopNavigationVisible, expanded = desktopNavigationWide,
-        canExpand = desktopNavigationCanExpand, sidebarWidth = desktopNavigationWidth,
-        destinations = desktopDestinations,
-        selectedIndex = profileSections.indexOf(pendingSidebarDestination ?: highlightedSection)
-            .let { if (animeMode) it else it.coerceAtLeast(0) },
-        version = "MangaFlow $appVersion", backdrop = drawerBackdrop,
-        workspaceBackdrop = desktopWorkspaceBackdrop,
+        visible = desktopNavigationVisible, expanded = desktopNavigationWide, sidebarWidth = desktopNavigationWidth,
+        backdrop = drawerBackdrop, workspaceBackdrop = desktopWorkspaceBackdrop,
         wallpaper = {
             if (desktopRoot && hasWallpaper) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
                 active = !recentReadingOpen && !tagSearchVisible, underCatalogue = section.usesCatalogueVeil)
-        },
-        onToggle = { desktopNavigationMode = if (desktopNavigationWide) 2 else 1 },
-        onNavigate = { index ->
-            val destination = profileSections[index]
-            if (destination.experience) experienceOpen = true
-            else {
-                model.closeDetail()
-                tagSearchVisible = false
-                recentReadingOpen = false
-                if (destination.anime != null) navigateAnime(destination.anime)
-                else {
-                    if (!animeMode) searchExpanded = destination.section == Section.DISCOVER && browse.isSearch
-                    changeSection(destination.section)
-                }
-            }
-        },
-        onSearch = openDesktopSearch,
-        profileControl = { compact ->
-            ContentProfileSwitch(contentProfile, requestProfile, manageProfileSources,
-                compact = compact, enabled = !rootHandoff)
-        },
-        modifier = Modifier.then(if (!preferHighRefresh) Modifier else
+        }, navigation = { desktopNavigation(it, false) },
+        modifier = Modifier.desktopHistoryButtons(desktopBackAction, desktopForwardAction).then(if (!preferHighRefresh) Modifier else
             Modifier.preferredFrameRate(FrameRateCategory.High)).pointerInput(experience) {
             awaitPointerEventScope {
                 while (true) {
@@ -1152,36 +1279,33 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             }
         }.onPreviewKeyEvent { event ->
             if (event.type == KeyEventType.KeyDown) experience.noteInteraction()
-            if (desktop && event.isCtrlPressed && !event.isAltPressed && !event.isShiftPressed && !event.isMetaPressed &&
+            if (desktopShortcutsActive && event.isCtrlPressed && !event.isAltPressed && !event.isShiftPressed && !event.isMetaPressed &&
                 (event.key == Key.K || event.key == Key.F)) {
                 if (event.type == KeyEventType.KeyDown) {
                     val findInBook = event.key == Key.F && (frame is Frame.Reader ||
                         frame is Frame.Detail && frame.state.rankedWork == null)
                     if (findInBook) {
-                        if (sourceManagement == null && sourceResumeChoice == null && !drawerVisible && !rootHandoff) {
-                            desktopFindOwner = frame.key
-                            desktopFindRequest++
-                        }
+                        desktopFindOwner = frame.key
+                        desktopFindRequest++
                     } else openDesktopSearch()
                 }
                 true
             } else false
         }.onKeyEvent { event ->
             // A focused control or temporary popup gets first refusal.
-            val canGoBack = desktop && event.isAltPressed && event.key == Key.DirectionLeft &&
-                sourceManagement == null && sourceResumeChoice == null && authorWorks == null &&
-                !recentReadingOpen && !tagSearchVisible && !drawerVisible
-            if (canGoBack) {
-                if (event.type == KeyEventType.KeyUp) when {
-                    reading != null -> model.returnToMangaDetail()
-                    detail != null -> model.closeDetail()
-                    copyExploreOpen -> backFromCopyExplore()
-                    section == Section.ANIME -> animeBackRequest++
-                    searchExpanded -> { searchExpanded = false; browseActions.suspendBrowseSearch(); focus.clearFocus(force = true) }
-                    section != Section.DISCOVER -> changeSection(Section.DISCOVER)
+            val historyKey = desktopShortcutsActive && event.isAltPressed && !event.isCtrlPressed &&
+                !event.isShiftPressed && !event.isMetaPressed
+            when {
+                historyKey && event.key == Key.DirectionLeft && desktopBackAction != null -> {
+                    if (event.type == KeyEventType.KeyUp) desktopBackAction()
+                    true
                 }
-                true
-            } else false
+                historyKey && event.key == Key.DirectionRight && desktopForwardAction != null -> {
+                    if (event.type == KeyEventType.KeyUp) desktopForwardAction()
+                    true
+                }
+                else -> false
+            }
         },
     ) {
     ModalNavigationDrawer(
@@ -1213,14 +1337,18 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         drawerContent = {
             ModalDrawerSheet(
                 modifier = Modifier.width(drawerWidth).onSizeChanged { measuredDrawerWidth = it.width.toFloat() }
-                    .padding(start = 8.dp, top = 10.dp, bottom = 10.dp),
-                drawerShape = RoundedCornerShape(26.dp),
+                    .then(if (desktop) Modifier else Modifier.padding(start = 8.dp, top = 10.dp, bottom = 10.dp)),
+                drawerShape = RoundedCornerShape(if (desktop) 0.dp else 26.dp),
                 drawerContainerColor = Color.Transparent,
                 drawerTonalElevation = 0.dp,
                 windowInsets = WindowInsets(0, 0, 0, 0),
             ) {
                 // The full-size shell keeps the native swipe anchors even while its contents are off-screen.
-                if (drawerVisible && frame is Frame.Root) {
+                if (desktop && drawerVisible && frame is Frame.Root) {
+                    Box(Modifier.fillMaxSize().onGloballyPositioned { drawerSheet = it }) {
+                        desktopNavigation(remember { mutableFloatStateOf(1f) }, true)
+                    }
+                } else if (drawerVisible && frame is Frame.Root) {
                     LiquidGlassSurface(drawerBackdrop, Modifier.fillMaxSize()
                         .onGloballyPositioned { drawerSheet = it }, cornerRadius = 26.dp,
                         role = GlassSurfaceRole.DRAWER, elevation = 0.dp) {
@@ -1368,10 +1496,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 MotionBackHandler(
                     enabled = current.key == frame.key && !drawerVisible && libraryOpening == null &&
                         !recentReadingOpen && authorWorks == null &&
-                        (reading != null || detail != null || copyExploreOpen || section != Section.DISCOVER && section != Section.ANIME),
+                        (if (desktop) desktopBackAction != null && (section != Section.ANIME || current !is Frame.Root)
+                         else reading != null || detail != null || copyExploreOpen || section != Section.DISCOVER && section != Section.ANIME),
                     state = currentBack,
                 ) {
                     when {
+                        desktop -> desktopBackAction?.invoke()
                         reading != null -> model.returnToMangaDetail()
                         detail != null -> model.closeDetail()
                         copyExploreOpen -> backFromCopyExplore()
@@ -1664,8 +1794,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             Section.SETTINGS -> MangaLayout.SettingsWidth
                             Section.ACCOUNT -> MangaLayout.AccountWidth
                             Section.DOWNLOADS -> MangaLayout.ListWidth
-                            Section.DISCOVER -> if (desktop)
-                                MangaLayout.desktopBrowseWidth(windowSize.width) else MangaLayout.BrowseWidth
+                            Section.DISCOVER -> when {
+                                !desktop -> MangaLayout.BrowseWidth
+                                LocalMangaWindow.current.width < 760.dp -> LocalMangaWindow.current.width
+                                else -> MangaLayout.desktopBrowseWidth(windowSize.width)
+                            }
                             else -> MangaLayout.BrowseWidth
                         }
                         BoxWithConstraints(Modifier
@@ -1794,12 +1927,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                     onClearCopyGroupTerms = if (copyGroupEnabled) model::clearRecentCopyGroupTerms else null,
                                                     desktopMainContent = true,
                                                     desktopActions = { manga -> listOf(
-                                                        DesktopMenuAction("详情与目录", onClick = {
+                                                        DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList, onClick = {
                                                             if (copyGroupEnabled) model.noteCopyGroupResultOpened(manga)
                                                             model.openManga(manga)
                                                         }),
-                                                        DesktopMenuAction(if (favorites.any { it.id == manga.id }) "移出书架" else "加入书架",
-                                                            onClick = { model.toggleFavorite(manga) }),
+                                                        desktopShelfAction(favorites.any { it.id == manga.id }) { model.toggleFavorite(manga) },
                                                     ) },
                                                     onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
                                                     onTarget = browseActions::setSearchTarget, onTag = browseActions::toggleSearchTag,
@@ -1824,7 +1956,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         navigationRequest = animeNavigationRequest,
                                         onDestinationChange = {
                                             if (it != AnimeWorkspaceDestination.SOURCES) animeDestinationName = it.name
+                                            it.desktopPage()?.let { page ->
+                                                desktopTrail?.arrive(SidebarDestination(Section.ANIME, page))
+                                            }
                                         },
+                                        onNestedBackChange = { if (desktop) animeNestedBack = it },
                                         onPlaybackVisibility = { animeImmersive = it },
                                         onOpenMangaDownloads = {
                                             model.services.anime.closePlayback()
@@ -2014,9 +2150,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     modifier = Modifier.align(Alignment.TopCenter)
                                         .onSizeChanged { chromeHeightPx = it.height }
                                         .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top)),
+                                    navigation = navigation,
                                 ) {
                                     Spacer(Modifier.weight(1f))
-                                    navigation()
                                     if (!desktopNavigationVisible) MotionIconButton(
                                         onClick = openDesktopSearch, modifier = Modifier.size(36.dp),
                                         tooltip = "搜索 · Ctrl+K",
@@ -2033,15 +2169,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         .padding(horizontal = 8.dp, vertical = 2.dp))
                             } else if (current.section == Section.DISCOVER && desktop) {
                                 DesktopDiscoveryHeader(
-                                    searching = desktopSearchContent, backdrop = searchBackdrop, tabLabels = discoveryLabels,
-                                    onLeaveSearch = closeSearch, navigation = navigation,
-                                    tabs = { tabModifier ->
-                                        BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryLabels, searchBackdrop,
-                                            tabModifier) { index ->
-                                            closeSearch()
-                                            browseActions.selectDiscovery(discoveryModes[index], clearQuery = true)
-                                        }
-                                    },
+                                    title = if (restrictedMode) "成人漫画" else "发现漫画",
+                                    searching = desktopSearchContent, tabLabels = discoveryLabels,
+                                    selectedTab = discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0),
+                                    onSelectTab = { index ->
+                                        closeSearch()
+                                        browseActions.selectDiscovery(discoveryModes[index], clearQuery = true)
+                                    }, onLeaveSearch = closeSearch, navigation = navigation,
                                     input = { inputModifier ->
                                         DesktopSearchField(
                                             query = browse.query, target = browse.searchTarget,
@@ -2053,7 +2187,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                     if (it) desktopSearchAppliedRequest = request
                                                 }
                                             },
-                                            backdrop = searchBackdrop, modifier = inputModifier,
+                                            modifier = inputModifier,
                                             showScopeSelector = true, translationGroupAvailable = !restrictedMode,
                                             onOpen = { browseActions.resumeBrowseSearch(); searchExpanded = true },
                                             onQuery = browseActions::setQuery,
@@ -2080,8 +2214,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     },
                                     modifier = Modifier.align(Alignment.TopCenter)
                                         .onSizeChanged { chromeHeightPx = it.height }
-                                        .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
-                                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                                        .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top)),
                                 )
                             } else if (current.section == Section.DISCOVER) {
                                 SegmentedGlassHeader(searchBackdrop, navigation,

@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import dev.mangaflow.ui.motion.motionPress
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -135,7 +137,7 @@ internal fun ChapterHistorySheet(manga: Manga, library: LibraryStore,
 
 @Composable
 internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
-    onContinue: (ReadingProgress) -> Unit, onBack: (() -> Unit)? = null) {
+    onContinue: (ReadingProgress) -> Unit, onBack: (() -> Unit)? = null, embedded: Boolean = false) {
     val context = LocalContext.current.applicationContext
     val revision by library.chapterHistoryRevision.collectAsStateWithLifecycle()
     var records by remember(manga.id) { mutableStateOf<List<ChapterHistoryRow>?>(null) }
@@ -188,21 +190,25 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
         catch (_: Exception) { failed = true }
     }
     Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 16.dp, bottom = 8.dp),
+        Row(Modifier.fillMaxWidth().padding(start = if (embedded) 0.dp else if (onBack == null) 16.dp else 8.dp,
+            end = 16.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) MotionIconButton(onClick = onBack, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回最近阅读", Modifier.size(20.dp))
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("章节记录", style = MaterialTheme.typography.labelMedium, color = secondary)
-                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                Text("章节记录", style = if (embedded) MaterialTheme.typography.titleMedium else MaterialTheme.typography.labelMedium,
+                    color = if (embedded) MaterialTheme.colorScheme.onSurface else secondary)
+                if (!embedded) Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                     style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             records?.let { Text(it.size.toString(), color = secondary, style = mangaMetricValueStyle(),
                 modifier = Modifier.padding(start = 8.dp)) }
         }
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
+        val list = rememberLazyListState()
+        Box(Modifier.fillMaxWidth()) {
+        LazyColumn(Modifier.fillMaxWidth().then(if (embedded) Modifier else Modifier.heightIn(max = 480.dp).navigationBarsPadding()),
+            state = list, contentPadding = PaddingValues(start = if (embedded) 0.dp else 16.dp, end = 16.dp, bottom = 16.dp)) {
             if (failed) item(key = "retry") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("章节记录暂未读取", fontSize = 13.sp, color = secondary, modifier = Modifier.weight(1f))
@@ -236,6 +242,8 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
                     Icon(Icons.Outlined.PlayArrow, null, Modifier.size(17.dp), tint = secondary)
                 }
             }
+        }
+        if (platformKind == PlatformKind.DESKTOP) DesktopVerticalScrollbar(list, Modifier.align(Alignment.CenterEnd))
         }
     }
 }

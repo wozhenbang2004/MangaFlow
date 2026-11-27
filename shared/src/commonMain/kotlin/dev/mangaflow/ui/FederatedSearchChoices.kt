@@ -9,12 +9,14 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +45,8 @@ import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.data.federatedMangaIdentity
 import dev.mangaflow.data.sourceDisplayName
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -56,6 +60,7 @@ internal fun SearchSourceMarks(
     onSource: ((List<Manga>) -> Unit)? = null,
     alignedSources: List<Manga> = emptyList(),
     tagSearch: Boolean = false,
+    showNames: Boolean = false,
 ) {
     val grouped = remember(matches, alignedSources) {
         (matches + alignedSources).distinctBy(::federatedMangaIdentity).groupBy { it.sourceId }.values.toList()
@@ -63,6 +68,35 @@ internal fun SearchSourceMarks(
     val directSources = remember(matches) { matches.mapTo(mutableSetOf()) { it.sourceId } }
     val sources = grouped.map { it.first() }
     if (sources.isEmpty()) return
+    if (showNames && onSource != null) {
+        val first = sources.first()
+        val name = first.sourceName.ifBlank { sourceDisplayName(first.sourceId) }
+        val additional = sources.size - 1
+        val interaction = remember(first.sourceId) { MutableInteractionSource() }
+        Row(modifier.heightIn(min = 34.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f, fill = false).heightIn(min = 32.dp).clip(RoundedCornerShape(6.dp))
+                .clickable(interactionSource = interaction, indication = null, role = Role.Button,
+                    onClickLabel = "查看${name}的正文条目", onClick = { onSource(grouped.first()) })
+                .motionPress(interaction, pressedScale = .98f).padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                ChapterSourceLogo(first.sourceId, name, Modifier.size(15.dp), muted = true)
+                Text(name, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (first.sourceId !in directSources) Icon(Icons.Outlined.Link, null, Modifier.size(12.dp))
+                if (grouped.first().size > 1) DesktopIndexNote(grouped.first().size.toString())
+            }
+            if (additional > 0) {
+                val more = remember { MutableInteractionSource() }
+                Text("+$additional", Modifier.clip(RoundedCornerShape(6.dp)).clickable(interactionSource = more,
+                    indication = null, role = Role.Button, onClickLabel = "选择其他正文来源",
+                    onClick = { onSource(grouped.flatten()) }).motionPress(more, pressedScale = .97f)
+                    .semantics { contentDescription = "另有 $additional 个正文来源，选择条目" }
+                    .padding(horizontal = 7.dp, vertical = 8.dp),
+                    style = mangaMetricValueStyle(12.sp, 16.sp), color = MaterialTheme.colorScheme.primary)
+            }
+        }
+        return
+    }
     if (onSource != null) {
         val configuration = LocalViewConfiguration.current
         val compactTargets = remember(configuration) {
@@ -126,6 +160,7 @@ internal fun SearchSourceSummary(
     sources: Map<String, FederatedSearchSource>,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
+    showNames: Boolean = false,
 ) {
     if (sources.isEmpty()) return
     val colors = MaterialTheme.colorScheme
@@ -136,7 +171,7 @@ internal fun SearchSourceSummary(
         sources.values.forEach { source ->
             val failed = !source.loading && source.error != null
             val interaction = remember(source.sourceId) { MutableInteractionSource() }
-            Box(Modifier.size(24.dp)
+            Row(Modifier.then(if (showNames) Modifier.heightIn(min = 32.dp).padding(end = 8.dp) else Modifier.size(24.dp))
                 .then(if (failed) Modifier.clickable(enabled = !busy,
                     interactionSource = interaction, indication = null, role = Role.Button,
                     onClickLabel = "重试搜索", onClick = onRetry)
@@ -147,13 +182,18 @@ internal fun SearchSourceSummary(
                         failed -> "，查询失败，" + source.error + "，点按重试搜索"
                         else -> "，已完成"
                     }
-                }, contentAlignment = Alignment.Center) {
+                }, horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
                 ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(15.dp), muted = source.loading)
                 if (source.loading) MotionBusyIndicator(Modifier.align(Alignment.BottomEnd).size(7.dp),
                     color = colors.onSurfaceVariant, strokeWidth = 1.dp)
                 else Icon(if (failed) Icons.Outlined.ErrorOutline else Icons.Outlined.Check, null,
                     Modifier.align(Alignment.BottomEnd).size(9.dp),
                     tint = if (failed) colors.error else colors.onSurfaceVariant)
+                }
+                if (showNames) Text(source.sourceName + when { source.loading -> " · 查询中"; failed -> " · 重试"; else -> "" },
+                    color = if (failed) colors.error else colors.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall, maxLines = 1)
             }
         }
     }
@@ -176,6 +216,8 @@ internal fun FederatedSearchChoices(
     LaunchedEffect(Unit) { focus.clearFocus(); keyboard?.hide() }
     val frozen = remember(matches) { matches.distinctBy(::federatedMangaIdentity) }
     val entries = remember(frozen) { searchEntryPresentations(frozen) }
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val list = rememberLazyListState()
     val heading = frozen.firstOrNull()?.title.orEmpty()
     var pendingOpen by remember { mutableStateOf<Manga?>(null) }
     MotionBottomSheet(onDismissRequest = {
@@ -191,7 +233,8 @@ internal fun FederatedSearchChoices(
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 MotionIconButton(onClick = dismiss) { Icon(Icons.Outlined.Close, "关闭搜索结果选择", Modifier.size(20.dp)) }
             }
-            LazyColumn(Modifier.weight(1f, fill = false).fillMaxWidth(),
+            Box(Modifier.weight(1f, fill = false).fillMaxWidth()) {
+            LazyColumn(Modifier.fillMaxWidth(), state = list,
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 items(entries, key = { federatedMangaIdentity(it.manga) }, contentType = { "native-search-choice" }) { entry ->
@@ -229,8 +272,16 @@ internal fun FederatedSearchChoices(
                                 maxLines = if (identityVisible) 3 else 1,
                                 overflow = if (identityVisible) TextOverflow.Ellipsis else TextOverflow.MiddleEllipsis)
                         }
+                        if (desktop) MotionIconButton(onClick = { identityVisible = !identityVisible },
+                            modifier = Modifier.size(34.dp), tooltip = if (identityVisible) "收起来源标识" else "查看来源标识") {
+                            Icon(Icons.Outlined.Info, if (identityVisible) "收起来源标识" else "查看来源标识", Modifier.size(16.dp))
+                        }
                     }
                 }
+            }
+            if (desktop) Box(Modifier.matchParentSize()) {
+                DesktopVerticalScrollbar(list, Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(5.dp))
+            }
             }
         }
     }

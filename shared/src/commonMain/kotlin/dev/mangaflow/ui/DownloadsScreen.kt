@@ -25,6 +25,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
@@ -41,6 +42,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -117,6 +119,7 @@ import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -244,6 +247,7 @@ fun DownloadsScreen(
     var inspectedTaskId by remember { mutableStateOf<String?>(null) }
     // A retained tab/menu callback cannot act after leaving this page or changing content ownership.
     val desktopScope = remember(store, adultProfile, includedSourceIds, excludedSourceIds, active) { Any() }
+    var chapterFieldFocused by remember(desktopScope) { mutableStateOf(false) }
     val currentDesktopScope by rememberUpdatedState(desktopScope)
     var desktopInspection by remember(desktopScope) { mutableStateOf<DesktopDownloadInspection?>(null) }
     var desktopQualityReturn by remember(desktopScope) { mutableStateOf<DesktopDownloadInspection?>(null) }
@@ -681,7 +685,8 @@ fun DownloadsScreen(
 
     BoxWithConstraints(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
         // An inspection owns text selection, including the frame before its pane is drawn.
-        if (!active || !desktop || desktopInspection != null || desktopTask != null || event.type != KeyEventType.KeyDown) false
+        if (!active || !desktop || chapterFieldFocused || desktopInspection != null || desktopTask != null ||
+            event.type != KeyEventType.KeyDown) false
         else if ((event.isCtrlPressed || event.isMetaPressed) && event.key == Key.A && manageableEntries.isNotEmpty()) {
             val currentEntries = when (filter) {
                 DownloadFilter.ALL -> manageableEntries
@@ -701,7 +706,9 @@ fun DownloadsScreen(
         val filterWidth = preferredFilterWidth.coerceAtMost(
             (maxWidth - if (managing) 224.dp else 180.dp).coerceAtLeast(70.dp))
         val contentInset = MangaLayout.sidePadding(maxWidth)
-        val desktopSplit = desktop && maxWidth >= 1040.dp && orderedBooks.getValue(filter).isNotEmpty()
+        val desktopScale = density.fontScale.coerceAtLeast(1f)
+        val desktopSplit = desktop && maxWidth >= 780.dp * desktopScale && orderedBooks.getValue(filter).isNotEmpty()
+        val directoryWidth = (maxWidth * .38f).coerceIn(292.dp * desktopScale, 440.dp * desktopScale)
         // A short wide window also needs the original scrollable dialog rather than a clipped inspector.
         val inPane = desktopSplit && maxHeight - contentTopPadding - bottomInset >= 240.dp * density.fontScale.coerceAtLeast(1f)
         val paneFilter = filter
@@ -722,7 +729,7 @@ fun DownloadsScreen(
             wallpaper()
             // Work selection and chapter disclosure share the current filtered queue.
             Row(Modifier.fillMaxSize()) {
-            Box(Modifier.weight(if (desktopSplit) .46f else 1f).fillMaxSize()) {
+            Box(Modifier.then(if (desktopSplit) Modifier.width(directoryWidth) else Modifier.weight(1f)).fillMaxSize()) {
             MotionTabContent(filter.ordinal, Modifier.fillMaxSize()) { index ->
                 val pageFilter = DownloadFilter.entries[index]
                 val visible = when (pageFilter) {
@@ -740,8 +747,17 @@ fun DownloadsScreen(
                 }
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(), state = scroll,
-                    contentPadding = PaddingValues(start = contentInset, end = contentInset, top = contentTopPadding, bottom = 32.dp + bottomInset),
+                    contentPadding = PaddingValues(start = if (desktopSplit) 16.dp else contentInset,
+                        end = if (desktopSplit) 10.dp else contentInset, top = contentTopPadding, bottom = 32.dp + bottomInset),
                 ) {
+                    if (desktopSplit) item(key = "download-directory-heading") {
+                        Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 6.dp, top = 8.dp, bottom = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("作品", style = MaterialTheme.typography.titleMedium)
+                            Text(orderedBooks.getValue(pageFilter).size.toString(), style = mangaMetricValueStyle(),
+                                color = colors.onSurfaceVariant)
+                        }
+                    }
                     if (pageFilter != DownloadFilter.SAVED && localImportAllowed && importOperation != null &&
                         (importOperation.active || importOperation.phase == ApplicationOperationPhase.FAILED ||
                             importOperation.phase == ApplicationOperationPhase.INTERRUPTED)) item(key = "local-import-operation") {
@@ -913,16 +929,19 @@ fun DownloadsScreen(
             }, Modifier.align(Alignment.CenterEnd).padding(top = contentTopPadding, bottom = bottomInset))
             }
             if (desktopSplit) {
+                Box(Modifier.padding(top = contentTopPadding, bottom = bottomInset).fillMaxHeight().width(1.dp)
+                    .background(colors.outlineVariant.copy(alpha = .45f)))
                 DesktopDownloadChapterPane(
-                    entries = inspectedChapters, managing = managing, selectedIds = selectedIds,
+                    entries = inspectedChapters, managing = managing, selectedIds = selectedIds, repository = repository,
                     refreshingIds = refreshingIds, resumeChapterId = inspectedBook?.let { historyById[it]?.chapterId },
                     topPadding = contentTopPadding,
                     bottomPadding = 32.dp + bottomInset,
-                    modifier = Modifier.weight(.54f).fillMaxSize(),
+                    modifier = Modifier.weight(1f).fillMaxSize(),
                     onRead = onRead, onSelect = { toggleSelection(listOf(it)) },
                     onManage = { managing = true; selectedIds = setOf(it.id) },
                     onRemove = { pendingDeletion = listOf(it) },
                     onPause = { store.pause(it.id) }, onRetry = onRetry,
+                    onFindFocus = { chapterFieldFocused = it },
                     active = active, onInspect = { entry ->
                         if (entry.manga.id == selectedWork(desktopInspection?.mangaId)) {
                             inspectDownload(entry, paneFilter, selectWork = true)
@@ -1237,6 +1256,7 @@ private fun LocalImportChoice(
 @Composable
 private fun DesktopDownloadChapterPane(
     entries: List<DownloadEntry>,
+    repository: MangaRepository,
     managing: Boolean,
     selectedIds: Set<String>,
     refreshingIds: Set<String>,
@@ -1254,20 +1274,42 @@ private fun DesktopDownloadChapterPane(
     onInspect: (DownloadEntry) -> Unit,
     enhancementTasks: List<ReaderChapterEnhancementTask>,
     inspection: (@Composable () -> Unit)?,
+    onFindFocus: (Boolean) -> Unit,
 ) {
     val workId = entries.firstOrNull()?.manga?.id
     // The exact work owns its chapter offset even while its list is not mounted.
     val scroll = key(workId) { rememberLazyListState() }
+    var query by remember(workId) { mutableStateOf("") }
+    var focusRequest by remember(workId) { mutableIntStateOf(0) }
+    val canFind = entries.size >= 6 || query.isNotEmpty()
+    val visible = if (query.isBlank()) entries else {
+        val matches = rememberMatchingChapters(entries.map { it.chapter }, query)
+        val ids = remember(matches) { matches.map { it.id }.toSet() }
+        entries.filter { it.chapter.id in ids }
+    }
     val colors = MaterialTheme.colorScheme
-    Column(modifier.padding(start = 16.dp, end = 20.dp, top = topPadding)) {
-        Row(Modifier.fillMaxWidth().padding(bottom = 12.dp),
+    Column(modifier.onPreviewKeyEvent { event ->
+        if (active && inspection == null && canFind && event.type == KeyEventType.KeyDown &&
+            (event.isCtrlPressed || event.isMetaPressed) && event.key == Key.F) {
+            focusRequest++
+            true
+        } else false
+    }.padding(start = 18.dp, end = 20.dp, top = topPadding)) {
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            entries.firstOrNull()?.manga?.let { manga ->
+                val cover = Modifier.size(46.dp, 66.dp).mangaCoverCard(7.dp)
+                if (manga.sourceUrl == LOCAL_SOURCE_URL)
+                    coil3.compose.AsyncImage(manga.coverUrl, null, cover, contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                else MangaCover(manga, repository, cover)
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(entries.firstOrNull()?.manga?.title.orEmpty(),
                     fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleLarge,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text("${entries.size} 话 · ${downloadBytes(entries.sumOf { it.downloadedBytes })}",
+                val saved = entries.count { it.status == DownloadStatus.COMPLETED }
+                Text("已保存 $saved / ${entries.size} 话 · ${downloadBytes(entries.sumOf { it.downloadedBytes })}",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
             if (entries.isNotEmpty() && !managing && inspection == null) TextButton(onClick = {
@@ -1275,9 +1317,15 @@ private fun DesktopDownloadChapterPane(
                     ?: entries.firstOrNull { it.status == DownloadStatus.COMPLETED }
                     ?: entries.firstOrNull { it.completedPages > 0 } ?: entries.first()
                 onRead(target)
-            }) { Text("阅读") }
+            }) { Text(if (resumeChapterId != null) "继续阅读" else "阅读") }
         }
         HorizontalDivider(color = colors.onSurface.copy(alpha = .06f))
+        if (inspection == null && canFind) {
+            DisposableEffect(workId) { onDispose { onFindFocus(false) } }
+            ChapterSearchField(query, { query = it }, focusRequest, active,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp).onFocusChanged { onFindFocus(it.hasFocus) }.focusGroup(),
+                onOpenMatch = visible.firstOrNull()?.takeIf { !managing && query.isNotBlank() }?.let { entry -> { onInspect(entry) } })
+        }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (inspection != null) {
                 Box(Modifier.fillMaxSize().padding(top = 10.dp, bottom = bottomPadding)) { inspection() }
@@ -1285,7 +1333,11 @@ private fun DesktopDownloadChapterPane(
                 LazyColumn(Modifier.fillMaxSize(), state = scroll,
                     contentPadding = PaddingValues(top = 10.dp, bottom = bottomPadding),
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(entries, key = DownloadEntry::id, contentType = { "desktop-download-chapter" }) { entry ->
+                    if (visible.isEmpty() && query.isNotBlank()) item {
+                        Text("没有匹配的章节", Modifier.padding(vertical = 12.dp), style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant)
+                    }
+                    items(visible, key = DownloadEntry::id, contentType = { "desktop-download-chapter" }) { entry ->
                         DownloadChapterRow(entry, managing, entry.id in selectedIds, refreshingIds,
                             onRead = { onRead(entry) }, onSelect = { onSelect(entry) },
                             onManage = { onManage(entry) }, onPause = onPause, onRetry = onRetry,

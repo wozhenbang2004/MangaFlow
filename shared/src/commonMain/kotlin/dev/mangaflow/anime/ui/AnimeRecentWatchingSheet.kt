@@ -14,9 +14,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -24,7 +26,10 @@ import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.AnimeLibraryEntry
 import dev.mangaflow.anime.AnimeSubject
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.CompactMenuAction
+import dev.mangaflow.ui.DesktopVerticalScrollbar
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
@@ -45,7 +50,7 @@ internal fun AnimeRecentWatchingSheet(
         if (unavailable) emptyList() else entries.filter { it.resume != null }.sortedByDescending { it.resume?.updatedAt }
     }
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background,
-        backdrop = backdrop) { dismiss ->
+        backdrop = backdrop, desktopWidth = if (recent.size > 1) 900.dp else 560.dp) { dismiss ->
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("最近观看", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge)
@@ -55,17 +60,30 @@ internal fun AnimeRecentWatchingSheet(
                 Icon(Icons.Outlined.Close, "关闭最近观看", Modifier.size(18.dp))
             }
         }
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).weight(1f, fill = false), state = scroll,
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            if (unavailable) item(key = "unavailable") {
-                AnimeMessage("观看记录暂时无法读取", "本地记录已保留。")
-            } else if (recent.isEmpty()) item(key = "empty") {
-                AnimeMessage("还没有观看记录", "打开一部番剧后，随时可以从这里接着看。")
+        BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max = 480.dp).weight(1f, fill = false)) {
+            val desktop = platformKind == PlatformKind.DESKTOP
+            val columns = if (desktop && recent.size > 1 && maxWidth >= 700.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)) 2 else 1
+            val rows = remember(recent, columns) { recent.chunked(columns) }
+            LazyColumn(Modifier.fillMaxWidth(), state = scroll,
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                if (unavailable) item(key = "unavailable") {
+                    AnimeMessage("观看记录暂时无法读取", "本地记录已保留。")
+                } else if (recent.isEmpty()) item(key = "empty") {
+                    AnimeMessage("还没有观看记录", "打开一部番剧后，随时可以从这里接着看。")
+                }
+                items(rows, key = { it.first().subject.id }) { row ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        row.forEach { entry -> key(entry.subject.id) {
+                            AnimeLibraryWorkRow(entry, continuationLabel(entry), modifier = Modifier.weight(1f),
+                                onOpen = { onChoose(entry); dismiss() })
+                        } }
+                        if (row.size < columns) Spacer(Modifier.weight(1f))
+                    }
+                }
             }
-            items(recent, key = { it.subject.id }) { entry ->
-                AnimeLibraryWorkRow(entry, continuationLabel(entry),
-                    onOpen = { onChoose(entry); dismiss() })
+            if (desktop) Box(Modifier.matchParentSize()) {
+                DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
             }
         }
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 4.dp),

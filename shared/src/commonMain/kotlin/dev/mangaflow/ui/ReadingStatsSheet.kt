@@ -19,6 +19,13 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -53,6 +60,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -146,7 +157,7 @@ internal fun ReadingStatsSheet(
     }
     val rankGutter = with(LocalDensity.current) { rankWidth.toDp() + 8.dp }
 
-    MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background) { dismiss ->
+    MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background, desktopWidth = 980.dp) { dismiss ->
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Text("阅读统计",
@@ -156,30 +167,27 @@ internal fun ReadingStatsSheet(
                 Icon(Icons.Outlined.Close, "关闭阅读统计", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
             }
         }
-        LazyColumn(
-            modifier = Modifier.fillMaxWidth().heightIn(max = 620.dp).navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp),
-        ) {
-            item(key = "period") {
-                MotionTabs(periodIndex, ReadingPeriod.entries.map { it.label }, { periodIndex = it },
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                    treatment = MotionTabTreatment.Soft, controlHeight = 40.dp,
-                    fontSize = 12.sp, muted = colors.onSurfaceVariant)
-            }
-            item(key = "summary") {
-                ReadingTimeSummary(visibleTotal, activeDays, ordered.size,
-                    period.label,
-                    average = if (period != ReadingPeriod.ALL && period != ReadingPeriod.DAY)
-                        visibleTotal / (daysBetween(rangeStart, today) + 1L) else null)
-            }
-            item(key = "daily-time") {
-                val datePattern = if (rangeStart.year != today.year) "yyyy/M/d" else "M/d"
-                val format = datePattern
-                Text(if (rangeStart == today) "今天" else "${formatUiDate(rangeStart, format)} – ${formatUiDate(today, format)}",
-                    color = colors.onSurfaceVariant, fontSize = 11.sp,
-                    modifier = Modifier.padding(bottom = 8.dp))
-                ReadingHeatmap(activity, rangeStart, today)
-            }
+        val periods: @Composable () -> Unit = {
+            MotionTabs(periodIndex, ReadingPeriod.entries.map { it.label }, { periodIndex = it },
+                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                treatment = MotionTabTreatment.Soft, controlHeight = 40.dp,
+                fontSize = 12.sp, muted = colors.onSurfaceVariant)
+        }
+        val summary: @Composable () -> Unit = {
+            ReadingTimeSummary(visibleTotal, activeDays, ordered.size,
+                period.label,
+                average = if (period != ReadingPeriod.ALL && period != ReadingPeriod.DAY)
+                    visibleTotal / (daysBetween(rangeStart, today) + 1L) else null)
+        }
+        val calendar: @Composable () -> Unit = {
+            val datePattern = if (rangeStart.year != today.year) "yyyy/M/d" else "M/d"
+            val format = datePattern
+            Text(if (rangeStart == today) "今天" else "${formatUiDate(rangeStart, format)} – ${formatUiDate(today, format)}",
+                color = colors.onSurfaceVariant, fontSize = 11.sp,
+                modifier = Modifier.padding(bottom = 8.dp))
+            ReadingHeatmap(activity, rangeStart, today)
+        }
+        val ranks: LazyListScope.() -> Unit = {
             if (ordered.isNotEmpty()) item(key = "ranking-heading") {
                 Text("${period.label}排行", color = colors.onSurface, style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(top = 22.dp, bottom = 6.dp))
@@ -204,6 +212,40 @@ internal fun ReadingStatsSheet(
                     onOpenManga(entry.manga)
                     dismiss()
                 }
+            }
+        }
+        BoxWithConstraints(Modifier.fillMaxWidth().weight(1f, fill = false)) {
+            val wide = desktop && maxWidth >= 710.dp * LocalDensity.current.fontScale.coerceAtLeast(1f) && maxHeight >= 310.dp
+            if (wide) {
+                Column(Modifier.fillMaxWidth().height(maxHeight.coerceAtMost(548.dp)).padding(horizontal = 20.dp)) {
+                    periods()
+                    Row(Modifier.weight(1f).fillMaxWidth().padding(bottom = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        val metricsScroll = rememberScrollState()
+                        Box(Modifier.weight(1.15f).fillMaxHeight()) {
+                            Column(Modifier.fillMaxSize().padding(end = 10.dp).verticalScroll(metricsScroll)) {
+                                summary()
+                                calendar()
+                            }
+                            DesktopVerticalScrollbar(metricsScroll, Modifier.align(Alignment.CenterEnd))
+                        }
+                        Box(Modifier.width(1.dp).fillMaxHeight().background(colors.outlineVariant.copy(alpha = .45f)))
+                        val rankingScroll = rememberLazyListState()
+                        LaunchedEffect(period) { rankingScroll.scrollToItem(0) }
+                        Box(Modifier.weight(1f).fillMaxHeight()) {
+                            LazyColumn(Modifier.fillMaxSize().padding(end = 8.dp), state = rankingScroll, content = ranks)
+                            DesktopVerticalScrollbar(rankingScroll, Modifier.align(Alignment.CenterEnd))
+                        }
+                    }
+                }
+            } else LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 620.dp).navigationBarsPadding(),
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp),
+            ) {
+                item(key = "period") { periods() }
+                item(key = "summary") { summary() }
+                item(key = "daily-time") { calendar() }
+                ranks()
             }
         }
     }
@@ -284,6 +326,9 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
     val selectedMillis = daily[selectedDay.toString()] ?: 0L
     val selectedBooks = activity.count { (it.days[selectedDay.toString()] ?: 0L) > 0L }
     val scroll = rememberScrollState()
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val chartFocus = remember { FocusRequester() }
+    var chartFocused by remember { mutableStateOf(false) }
     val ink = lerp(colors.primary, mangaStatusColors().activity, .38f)
     val strong = LocalPlatformAccessibilityPreferences.current.increaseContrast
     val levels = listOf(lerp(colors.surface, colors.onSurface, if (strong) .12f else .065f),
@@ -327,7 +372,30 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
                 strength.animateTo(1f, tween(MangaMotion.Quick))
             }
         }
-        LaunchedEffect(firstDay, today, scroll.maxValue) { scroll.scrollTo(scroll.maxValue) }
+        LaunchedEffect(firstDay, today, scroll.maxValue, if (desktop) selectedDay else null) {
+            if (!desktop) scroll.scrollTo(scroll.maxValue) else {
+                val left = with(density) { (step * target.x).roundToPx() }
+                val right = left + with(density) { block.roundToPx() }
+                val available = with(density) { viewport.roundToPx() }
+                val next = if (left < scroll.value) left else if (right > scroll.value + available) right - available else scroll.value
+                if (next != scroll.value) scroll.scrollTo(next.coerceIn(0, scroll.maxValue))
+            }
+        }
+        val keyboard = if (!desktop) Modifier else Modifier.focusRequester(chartFocus).onFocusChanged { chartFocused = it.isFocused }
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) false else {
+                    val date = when (event.key) {
+                        Key.MoveHome -> firstDay
+                        Key.MoveEnd -> today
+                        Key.DirectionLeft -> selectedDay.minusDays(if (compactCalendar) 1L else 7L)
+                        Key.DirectionRight -> selectedDay.plusDays(if (compactCalendar) 1L else 7L)
+                        Key.DirectionUp -> selectedDay.minusDays(if (compactCalendar) 7L else 1L)
+                        Key.DirectionDown -> selectedDay.plusDays(if (compactCalendar) 7L else 1L)
+                        else -> null
+                    }
+                    if (date == null) false else { selectDay(date.coerceIn(firstDay, today)); true }
+                }
+            }.focusable()
         Row(Modifier.fillMaxWidth()) {
             if (!compactCalendar) Canvas(Modifier.width(weekdayWidth).height(chartHeight)) {
                 listOf(0 to "一", 2 to "三", 4 to "五").forEach { (row, label) ->
@@ -336,7 +404,7 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
                 }
             }
             Box(Modifier.weight(1f).horizontalScroll(scroll)) {
-                Canvas(Modifier.width(chartWidth).height(chartHeight)
+                Canvas(Modifier.width(chartWidth).height(chartHeight).then(keyboard)
                     .pointerInput(calendarStart, firstDay, today, step, labelHeight, feedback) {
                         detectTapGestures { position ->
                             val column = (position.x / step.toPx()).toInt()
@@ -347,7 +415,10 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
                                 column in 0 until columns && row in 0 until rows) {
                                 val index = if (compactCalendar) row * 7L + column else column * 7L + row
                                 val date = calendarStart.plusDays(index)
-                                if (!date.isBefore(firstDay) && !date.isAfter(today)) selectDay(date)
+                                if (!date.isBefore(firstDay) && !date.isAfter(today)) {
+                                    if (desktop) chartFocus.requestFocus()
+                                    selectDay(date)
+                                }
                             }
                         }
                     }.semantics {
@@ -381,7 +452,7 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
                     }
                 }
                 Canvas(Modifier.width(chartWidth).height(chartHeight)) {
-                    val stroke = if (strong) 2.dp.toPx() else 1.3.dp.toPx()
+                    val stroke = if (strong || chartFocused) 2.dp.toPx() else 1.3.dp.toPx()
                     val position = marker.value * step.toPx() + Offset(stroke / 2f, labelHeight.toPx() + stroke / 2f)
                     val side = block.toPx() - stroke
                     drawRoundRect(colors.onSurface.copy(alpha = .9f * strength.value), position,

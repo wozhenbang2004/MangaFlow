@@ -44,16 +44,17 @@ import dev.mangaflow.ui.platform.*
 import kotlin.math.roundToInt
 
 @Composable
-internal fun DetailAppearanceSettings() {
+internal fun DetailAppearanceSettings(headerModifier: Modifier = Modifier, openRequest: Int = 0) {
     val context = LocalMangaContext.current
     val store = remember(context) { DetailAppearanceStore.get(context) }
     val state by store.state.collectAsStateWithLifecycle()
     var expanded by rememberSaveable { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(openRequest) { if (openRequest > 0) expanded = true }
     val interaction = remember { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
     DisposableEffect(store) { onDispose { store.save() } }
     Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+        Row(headerModifier.fillMaxWidth().heightIn(min = 48.dp)
             .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = if (expanded) "收起封面氛围调节" else "调节详情封面氛围",
                 onClick = { expanded = !expanded }).motionPress(interaction),

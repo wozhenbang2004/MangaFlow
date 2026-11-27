@@ -517,7 +517,7 @@ private fun CloudAccountItem(
 ) {
     val colors = MaterialTheme.colorScheme
     val canManage = !local
-    val actions = if (canManage) listOf(DesktopMenuAction("加入本机书架", onClick = onAdd)) else emptyList()
+    val actions = if (canManage) listOf(DesktopMenuAction("加入本机书架", icon = Icons.Outlined.BookmarkAdd, onClick = onAdd)) else emptyList()
     var previousLocal by remember(manga.id) { mutableStateOf(local) }
     var addedFeedback by remember(manga.id) { mutableStateOf(false) }
     LaunchedEffect(local) {

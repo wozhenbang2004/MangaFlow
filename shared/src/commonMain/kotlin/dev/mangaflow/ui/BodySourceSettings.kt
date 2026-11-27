@@ -154,7 +154,7 @@ internal fun BodySourceSettingsSheet(
         }
     }
 
-    MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop,
+    MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop, desktopWidth = 760.dp,
         containerColor = colors.surface.copy(alpha = .97f)) { dismiss ->
         Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height * .78f)
             .navigationBarsPadding()) {

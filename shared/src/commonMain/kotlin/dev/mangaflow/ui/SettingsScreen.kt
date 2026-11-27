@@ -1,6 +1,8 @@
 package dev.mangaflow.ui
 
 import dev.mangaflow.anime.AnimeController
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import dev.mangaflow.anime.ui.AnimeSourceManager
 import dev.mangaflow.background.ApplicationOperations
 import dev.mangaflow.background.ApplicationOperation
@@ -177,6 +179,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun SettingsScreen(
     updateManager: UpdateManager,
@@ -268,6 +271,22 @@ fun SettingsScreen(
     }
     var showNetworkDownloads by remember { mutableStateOf(false) }
     var showExperience by remember { mutableStateOf(false) }
+    val foundHeader = remember { BringIntoViewRequester() }
+    var foundSetting by remember { mutableStateOf<String?>(null) }
+    var findRequest by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    fun openSetting(key: String) {
+        expandedSetting = key
+        foundSetting = key
+        findRequest++
+    }
+    fun searchTarget(key: String): Modifier =
+        if (desktop && key == foundSetting) Modifier.bringIntoViewRequester(foundHeader) else Modifier
+    LaunchedEffect(findRequest) {
+        if (findRequest > 0) {
+            androidx.compose.runtime.withFrameNanos { }
+            foundHeader.bringIntoView()
+        }
+    }
     val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
     LaunchedEffect(screenActive, openWebDavSettings, backupBusy) {
         if (screenActive && openWebDavSettings && (backupBusy == null || backupBusy.startsWith("webdav-"))) {
@@ -404,7 +423,7 @@ fun SettingsScreen(
                         ReadingMode.VERTICAL -> "纵向滚动"
                         ReadingMode.LEFT_TO_RIGHT -> "从左至右"
                         ReadingMode.RIGHT_TO_LEFT -> "从右至左"
-                    }, Icons.Outlined.SwapVert, expandedSetting == "mode", { toggleSetting("mode") }) {
+                    }, Icons.Outlined.SwapVert, expandedSetting == "mode", { toggleSetting("mode") }, headerModifier = searchTarget("mode")) {
                         SettingsChoices(
                             choices = listOf(ReadingMode.VERTICAL to "纵向",
                                 ReadingMode.LEFT_TO_RIGHT to "左至右", ReadingMode.RIGHT_TO_LEFT to "右至左"),
@@ -416,7 +435,7 @@ fun SettingsScreen(
                         PageTurnGesture.FOLLOW_READING_ORDER -> "跟随阅读顺序"
                         PageTurnGesture.SWIPE_LEFT_NEXT -> "左滑下一页"
                         PageTurnGesture.SWIPE_RIGHT_NEXT -> "右滑下一页"
-                    }, Icons.Outlined.SwapHoriz, expandedSetting == "page-turn", { toggleSetting("page-turn") }) {
+                    }, Icons.Outlined.SwapHoriz, expandedSetting == "page-turn", { toggleSetting("page-turn") }, headerModifier = searchTarget("page-turn")) {
                         SettingsChoices(choices = listOf(
                             PageTurnGesture.FOLLOW_READING_ORDER to "跟随顺序",
                             PageTurnGesture.SWIPE_LEFT_NEXT to "左滑下一页",
@@ -428,26 +447,26 @@ fun SettingsScreen(
                         ReaderTheme.PAPER -> "纸白"
                         ReaderTheme.SEPIA -> "暖纸"
                         ReaderTheme.INK -> "墨黑"
-                    }, Icons.Outlined.Palette, expandedSetting == "paper", { toggleSetting("paper") }) {
+                    }, Icons.Outlined.Palette, expandedSetting == "paper", { toggleSetting("paper") }, headerModifier = searchTarget("paper")) {
                         PaperThemePicker(preferences.theme) { theme ->
                             libraryStore.updatePreferences(preferences.copy(theme = theme))
                         }
                     }
                     Column {
-                        SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn, Icons.Outlined.LightMode) {
+                        Box(searchTarget("awake")) { SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn, Icons.Outlined.LightMode) {
                             libraryStore.updatePreferences(preferences.copy(keepScreenOn = it))
-                        }
-                        SettingsToggle("图片之间留白", preferences.pageGap, Icons.Outlined.ViewDay) {
+                        } }
+                        Box(searchTarget("page-gap")) { SettingsToggle("图片之间留白", preferences.pageGap, Icons.Outlined.ViewDay) {
                             libraryStore.updatePreferences(preferences.copy(pageGap = it))
-                        }
+                        } }
                     }
                 }
                 }
                 RetainedSettingsCategory(1, selected) {
                 SettingsSection("外观", sourceBackdrop) {
-                    DetailAppearanceSettings()
+                    DetailAppearanceSettings(searchTarget("cover-tone"), if (foundSetting == "cover-tone") findRequest else 0)
                     SettingsDisclosure("字体", "", Icons.Outlined.TextFields,
-                        expandedSetting == "fonts", { toggleSetting("fonts") }) {
+                        expandedSetting == "fonts", { toggleSetting("fonts") }, headerModifier = searchTarget("fonts")) {
                         FontSettings()
                     }
                     SettingsDisclosure("壁纸", when {
@@ -456,7 +475,7 @@ fun SettingsScreen(
                         wallpaper.items.size > 1 -> "${wallpaper.items.size} 张 · 手动切换"
                         else -> wallpaper.name.ifBlank { "本地壁纸" }
                     }, Icons.Outlined.Image,
-                        expandedSetting == "wallpaper", { toggleSetting("wallpaper") }) {
+                        expandedSetting == "wallpaper", { toggleSetting("wallpaper") }, headerModifier = searchTarget("wallpaper")) {
                         WallpaperSettings(store = wallpaperStore, backdrop = sourceBackdrop)
                     }
                 }
@@ -494,7 +513,7 @@ fun SettingsScreen(
                         desktop -> "漫画账号 · 阅读备份"
                         else -> "设备 · 漫画账号 · 阅读备份"
                     },
-                        Icons.Outlined.CloudSync, expandedSetting == "backup", { toggleSetting("backup") }) {
+                        Icons.Outlined.CloudSync, expandedSetting == "backup", { toggleSetting("backup") }, headerModifier = searchTarget("backup")) {
                         Column {
                             if (!desktop) lanReadingSyncEntry()
                             onOpenMangaTracking?.let { open ->
@@ -550,7 +569,7 @@ fun SettingsScreen(
                                 UpdatePhase.ERROR -> "重试检查更新"
                                 else -> "检查更新"
                             }
-                            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Row(searchTarget("updates").fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
                                 SettingsRowIcon(Icons.Outlined.SystemUpdate)
                                 Spacer(Modifier.width(12.dp))
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -629,7 +648,7 @@ fun SettingsScreen(
                         DownloadRouteControl(DownloadCategory.UPDATES,
                             modifier = Modifier.padding(start = 24.dp),
                             enabled = update.phase !in setOf(UpdatePhase.DOWNLOADING, UpdatePhase.VERIFYING), backdrop = sourceBackdrop)
-                        Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                        Column(searchTarget("update-options").fillMaxWidth().padding(top = 4.dp)) {
                             SettingsToggle("自动检查更新", automatic, Icons.Outlined.Update) {
                                 automatic = it
                                 updateManager.setAutomatic(it)
@@ -646,7 +665,7 @@ fun SettingsScreen(
                             )
                         }
                     }
-                    Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    Box(searchTarget("project").fillMaxWidth().padding(horizontal = 16.dp)) {
                         SettingsLinkRow("项目主页", "", Icons.Outlined.Code, external = true, compact = true) { if (!openUrl(context, "https://github.com/${UpdateManager.REPOSITORY}")) showPlatformMessage(context, "暂时无法打开项目主页") }
                     }
                 }
@@ -661,7 +680,28 @@ fun SettingsScreen(
     }
     }
     if (desktop) {
-        DesktopSettingsLayout(settingsCategory, { settingsCategory = it }, contentTopPadding, settingsContent)
+        val links = buildList {
+            add(DesktopSettingsLink(0, "阅读顺序", "纵向 横向 左右 翻页") { openSetting("mode") })
+            add(DesktopSettingsLink(0, "横向翻页手势", "方向 左滑 右滑 翻页") { openSetting("page-turn") })
+            add(DesktopSettingsLink(0, "阅读底色", "主题 纸白 暖纸 墨黑 背景") { openSetting("paper") })
+            add(DesktopSettingsLink(0, "阅读时保持亮屏", "屏幕 常亮 熄屏") { openSetting("awake") })
+            add(DesktopSettingsLink(0, "图片之间留白", "页面 间距 空隙") { openSetting("page-gap") })
+            add(DesktopSettingsLink(1, "封面氛围", "详情 模糊 亮度 背景") { openSetting("cover-tone") })
+            add(DesktopSettingsLink(1, "字体", "字形 排版 导入") { openSetting("fonts") })
+            add(DesktopSettingsLink(1, "壁纸", "图片 桌面 轮换 背景") { openSetting("wallpaper") })
+            add(DesktopSettingsLink(2, "备份与同步", "恢复 导出 WebDAV 进度") { openSetting("backup") })
+            add(DesktopSettingsLink(2, "存储管理", "缓存 清理 离线 下载 模型") { showStorage = true })
+            onOpenLanReadingSync?.let { add(DesktopSettingsLink(2, "局域网阅读同步", "设备 配对 书签", it)) }
+            onOpenMangaTracking?.let { add(DesktopSettingsLink(2, "漫画账号同步", "Bangumi AniList 追踪", it)) }
+            if (sourceRegistry != null) add(DesktopSettingsLink(2, "漫画源", "来源 站点 插件") { showBodySources = true })
+            if (animeController != null) add(DesktopSettingsLink(2, "动漫源", "来源 播放") { showAnimeSources = true })
+            add(DesktopSettingsLink(3, "体验策略", "画质 补帧 缓冲 预读") { showExperience = true })
+            add(DesktopSettingsLink(3, "网络与下载", "线路 代理 网络 下载") { showNetworkDownloads = true })
+            add(DesktopSettingsLink(3, "软件更新", "版本 安装 检查 下载") { openSetting("updates") })
+            add(DesktopSettingsLink(3, "自动检查与更新提醒", "通知 提醒 开关") { openSetting("update-options") })
+            add(DesktopSettingsLink(3, "项目主页", "GitHub 仓库 源代码") { openSetting("project") })
+        }
+        DesktopSettingsLayout(settingsCategory, { settingsCategory = it }, contentTopPadding, links, settingsContent)
     } else settingsContent(contentTopPadding)
 
     if (showBodySources && sourceRegistry != null) {
@@ -1090,6 +1130,16 @@ internal fun PreferenceHeading(title: String, modifier: Modifier = Modifier, max
 @Composable
 private fun SettingsSection(title: String, backdrop: HazeState?, content: @Composable ColumnScope.() -> Unit) {
     val colors = MaterialTheme.colorScheme
+    if (platformKind == PlatformKind.DESKTOP) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.semantics { heading() })
+            Column(Modifier.fillMaxWidth().background(colors.surfaceContainerLow, RoundedCornerShape(12.dp))
+                .padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp),
+                content = content)
+        }
+        return
+    }
     val shape = RoundedCornerShape(22.dp)
     val body: @Composable () -> Unit = {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -1117,6 +1167,7 @@ internal fun SettingsDisclosure(
     onToggle: () -> Unit,
     compact: Boolean = false,
     modified: Boolean = false,
+    headerModifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -1126,7 +1177,7 @@ internal fun SettingsDisclosure(
         if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(), label = "setting-disclosure")
     Column(Modifier.fillMaxWidth()) {
         val header: @Composable (Boolean) -> Unit = { stacked ->
-            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            Row(headerModifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                 .semantics(mergeDescendants = compact) {
                     stateDescription = listOf(if (compact) "" else value,
                         if (modified) "已自定义" else "", if (expanded) "已展开" else "已收起")

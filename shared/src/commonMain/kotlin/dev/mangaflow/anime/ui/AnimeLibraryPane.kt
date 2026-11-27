@@ -36,6 +36,15 @@ import androidx.compose.runtime.saveable.SaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
@@ -47,6 +56,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.text.style.TextAlign
@@ -70,11 +81,13 @@ internal class AnimeLibraryViewState internal constructor(
     filterState: MutableIntState,
     folderState: MutableState<String?>,
     orderState: MutableIntState,
+    previewState: MutableState<String?>,
     val positions: SaveableStateHolder,
 ) {
     var filter by filterState
     var folder by folderState
     var order by orderState
+    var previewId by previewState
 }
 
 /** Keep view choices above the retained route so details and sibling columns cannot reset them. */
@@ -83,8 +96,9 @@ internal fun rememberAnimeLibraryViewState(): AnimeLibraryViewState {
     val filter = rememberSaveable { mutableIntStateOf(0) }
     val folder = rememberSaveable { mutableStateOf<String?>(null) }
     val order = rememberSaveable { mutableIntStateOf(0) }
+    val preview = rememberSaveable { mutableStateOf<String?>(null) }
     val positions = rememberSaveableStateHolder()
-    return remember(filter, folder, order, positions) { AnimeLibraryViewState(filter, folder, order, positions) }
+    return remember(filter, folder, order, preview, positions) { AnimeLibraryViewState(filter, folder, order, preview, positions) }
 }
 
 
@@ -215,8 +229,17 @@ internal fun AnimeLibrary(
     val listBackground = remember(surface) {
         Brush.verticalGradient(listOf(surface.copy(alpha = .40f), surface.copy(alpha = .65f)))
     }
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-        Column(Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val split = platformKind == PlatformKind.DESKTOP && !state.libraryReadUnavailable &&
+            maxWidth >= 825.dp * scale && maxHeight >= 385.dp * scale
+        val preview = if (split) entries.firstOrNull { it.subject.id == viewState.previewId } ?: continuation ?: entries.firstOrNull() else null
+        val historyByWork = if (preview == null) emptyMap() else remember(state.episodeProgress) {
+            state.episodeProgress.values.groupBy { it.subjectId }
+        }
+        Row(Modifier.widthIn(max = if (preview != null) 1400.dp else MangaLayout.ListWidth).fillMaxSize(),
+            horizontalArrangement = Arrangement.spacedBy(if (preview != null) 20.dp else 0.dp)) {
+        Column(Modifier.weight(1f).fillMaxHeight()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 MotionTabs(filter, filterLabels, onSelect = { viewState.filter = it },
@@ -277,10 +300,12 @@ internal fun AnimeLibrary(
                             item(key = continuation.subject.id, contentType = "resume-feature") {
                                 val target = controller.continuationEpisode(continuation.subject.id)
                                 AnimeLibraryWorkRow(continuation, animeContinuationLabel(continuation, target),
-                                    onOpen = { onResume(continuation) },
+                                    onOpen = { if (split) viewState.previewId = continuation.subject.id else onResume(continuation) },
+                                    onActivate = ({ onResume(continuation) }).takeIf { split },
                                     modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
                                         placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null),
-                                    featured = true, active = contentActive,
+                                    featured = !split, active = contentActive,
+                                    previewSelected = if (split) preview?.subject?.id == continuation.subject.id else null,
                                     onManage = { entryPresent = true; selectedId = continuation.subject.id })
                             }
                         }
@@ -329,6 +354,12 @@ internal fun AnimeLibrary(
                                 }
                                 else -> historyPlayback.label
                             }
+                            val activate = {
+                                if (historyRecord != null && historyPlayback != AnimeHistoryPlayback.UNAVAILABLE)
+                                    playHistoryEpisode(entry, historyRecord)
+                                else if (record == null || showingHistory) onOpen(entry.subject)
+                                else onResume(entry)
+                            }
                             SwipeToRemove(onRemove = {
                                 if (showingHistory) removeHistory(entry)
                                 else controller.setFollowed(entry.subject, false)
@@ -337,17 +368,14 @@ internal fun AnimeLibrary(
                                 enabled = contentActive && !state.libraryReadUnavailable && filter != 0,
                                 label = if (showingHistory) "移除观看记录" else "取消追番", transparentBackground = true) {
                                 AnimeLibraryWorkRow(entry, action,
-                                    onOpen = {
-                                        if (historyRecord != null && historyPlayback != AnimeHistoryPlayback.UNAVAILABLE)
-                                            playHistoryEpisode(entry, historyRecord)
-                                        else if (record == null || showingHistory) onOpen(entry.subject)
-                                        else onResume(entry)
-                                    },
+                                    onOpen = { if (split) viewState.previewId = entry.subject.id else activate() },
+                                    onActivate = activate.takeIf { split },
                                     onHistory = if (historyRecord != null) {
                                         { historyId = entry.subject.id }
                                     } else null,
                                     onManage = { entryPresent = true; selectedId = entry.subject.id },
-                                    showRatings = !showingHistory, active = contentActive, historyPlayback = historyPlayback)
+                                    showRatings = !showingHistory && !split, active = contentActive, historyPlayback = historyPlayback,
+                                    previewSelected = if (split) preview?.subject?.id == entry.subject.id else null)
                             }
                         }
                         if (showingHistory && works.isNotEmpty()) item(key = "visible-watch-time") {
@@ -362,6 +390,25 @@ internal fun AnimeLibrary(
                         Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp))
                 }
             }
+        }
+        if (preview != null) key(preview.subject.id) {
+            val record = preview.resume
+            val playback = record?.takeIf { showingHistory }?.let {
+                animeHistoryPlayback(preview, it, state.episodeProgress, state.detail)
+            }
+            val canResume = record != null && playback != AnimeHistoryPlayback.UNAVAILABLE
+            val records = historyByWork[preview.subject.id].takeUnless { preview.subject.id in pendingHistory }.orEmpty()
+            AnimeDesktopLibraryPreview(preview, records, state.episodeProgress, state.detail, contentActive,
+                actionLabel = if (canResume) playback?.label ?: animeContinuationLabel(preview, controller.continuationEpisode(preview.subject.id)) else null,
+                onPlay = {
+                    if (contentActive && record != null) {
+                        if (showingHistory) playHistoryEpisode(preview, record) else onResume(preview)
+                    }
+                }, onOpen = { onOpen(preview.subject) },
+                onEpisode = { playHistoryEpisode(preview, it) },
+                modifier = Modifier.width((minOf(maxWidth, 1400.dp) * .43f).coerceIn(330.dp, 516.dp * scale))
+                    .fillMaxHeight().padding(end = 18.dp))
+        }
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp)
             .padding(bottom = contentBottomPadding))
@@ -411,6 +458,8 @@ internal fun AnimeLibraryWorkRow(
     active: Boolean = true,
     historyPlayback: AnimeHistoryPlayback? = null,
     modifier: Modifier = Modifier,
+    previewSelected: Boolean? = null,
+    onActivate: (() -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val resume = entry.resume
@@ -427,12 +476,27 @@ internal fun AnimeLibraryWorkRow(
         ).joinToString(" · ")
     }
     Row(modifier.fillMaxWidth().clip(shape)
-        .then(if (featured) Modifier.background(lerp(colors.surface, colors.primary, .07f)) else Modifier),
+        .then(when {
+            previewSelected == true -> Modifier.background(colors.secondaryContainer)
+            featured -> Modifier.background(lerp(colors.surface, colors.primary, .07f))
+            else -> Modifier
+        }),
         verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.weight(1f).clip(shape).motionPress(interaction, enabled = active, pressedScale = .99f)
-            .combinedClickable(enabled = active, interactionSource = interaction, indication = null, role = Role.Button,
-                onClickLabel = actionLabel, onClick = onOpen,
+        val keyboard = if (onActivate == null) Modifier else Modifier
+            .onFocusChanged { if (it.isFocused && active && previewSelected == false) onOpen() }
+            .onPreviewKeyEvent { event ->
+                if (active && event.key == Key.Enter && !event.isAltPressed && !event.isCtrlPressed && !event.isMetaPressed) {
+                    if (event.type == KeyEventType.KeyUp) onActivate()
+                    true
+                } else false
+            }
+        Row(Modifier.weight(1f).clip(shape).then(keyboard).motionPress(interaction, enabled = active, pressedScale = .99f)
+            .combinedClickable(enabled = active, interactionSource = interaction, indication = null,
+                role = if (previewSelected == null) Role.Button else Role.Tab,
+                onClickLabel = if (previewSelected == null) actionLabel else "预览这部番剧", onClick = onOpen,
+                onDoubleClick = onActivate,
                 onLongClickLabel = if (onManage != null) "管理番剧" else null, onLongClick = onManage)
+            .then(if (previewSelected == null) Modifier else Modifier.semantics { selected = previewSelected })
             .padding(start = if (featured) 8.dp else 4.dp, end = 4.dp,
                 top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {

@@ -1,5 +1,6 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -116,12 +117,13 @@ internal fun AnimeWorkspace(
     navigationRequest: Int = 0,
     onDestinationChange: (AnimeWorkspaceDestination) -> Unit = {},
     onOpenMangaDownloads: () -> Unit = {},
+    onNestedBackChange: (Boolean) -> Unit = {},
 ) {
     AnimeRatingHost(controller, backdrop, active,
         listOf(navigationRequest, searchRequest, backRequest, requestedDestination)) {
         AnimeWorkspaceContent(controller, backdrop, navigation, navigationVisible, modifier, active,
             searchRequest, backRequest, browseRequest, onBrowseRequestConsumed, onPlaybackVisibility,
-            requestedDestination, navigationRequest, onDestinationChange, onOpenMangaDownloads)
+            requestedDestination, navigationRequest, onDestinationChange, onOpenMangaDownloads, onNestedBackChange)
     }
 }
 
@@ -143,6 +145,7 @@ private fun AnimeWorkspaceContent(
     navigationRequest: Int = 0,
     onDestinationChange: (AnimeWorkspaceDestination) -> Unit = {},
     onOpenMangaDownloads: () -> Unit = {},
+    onNestedBackChange: (Boolean) -> Unit = {},
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
     val playbackPhase by controller.playbackPhase.collectAsStateWithLifecycle()
@@ -264,6 +267,10 @@ private fun AnimeWorkspaceContent(
         else -> baseDestination
     }
     val currentDestinationChange by rememberUpdatedState(onDestinationChange)
+    val nestedBackChange by rememberUpdatedState(onNestedBackChange)
+    val nestedBack = active && (playing || route.depth > 0 || directoryDetailOpen || overlayVisible || searchExpanded || searchPresent)
+    LaunchedEffect(nestedBack) { nestedBackChange(nestedBack) }
+    DisposableEffect(controller) { onDispose { nestedBackChange(false) } }
     LaunchedEffect(active, displayedDestination, navigationRequest, consumedNavigationRequest) {
         if (active && navigationRequest == consumedNavigationRequest) currentDestinationChange(displayedDestination)
     }
@@ -816,7 +823,9 @@ private fun AnimeWorkspaceContent(
                             val actionsWidth = 88.dp // Recent watching and the overlaid search trigger.
                             val headerRoom = maxWidth - 16.dp - actionsWidth - if (navigationVisible) 56.dp else 6.dp
                             val tabsWidth = headerRoom.coerceIn(112.dp * fontScale, 184.dp * fontScale)
-                            val stackDesktopTabs = workspaceTabs && !navigationVisible && headerRoom < tabsWidth
+                            val desktopBar = platformKind == PlatformKind.DESKTOP && !navigationVisible
+                            val stackDesktopTabs = workspaceTabs && !navigationVisible &&
+                                (headerRoom < tabsWidth || desktopBar && headerRoom < tabsWidth + 100.dp * fontScale)
                             val controlsAlpha = {
                                 1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f)
                             }
@@ -829,12 +838,16 @@ private fun AnimeWorkspaceContent(
                                 else -> "返回${baseDestination.label}"
                             }
                             val primaryTabs: @Composable () -> Unit = {
-                                MotionTabs(if (fromBroadcast) 1 else 0, animePrimaryLabels,
-                                    onSelect = { if (rootActive) when (it) {
+                                val select: (Int) -> Unit = { index ->
+                                    if (rootActive) when (index) {
                                         0 -> selectDiscovery(AnimeDiscoveryTab.HOME)
                                         1 -> selectBroadcast()
                                         else -> Unit
-                                    } },
+                                    }
+                                }
+                                if (desktopBar) DesktopSectionTabs(if (fromBroadcast) 1 else 0, animePrimaryLabels, select,
+                                    Modifier.width(tabsWidth).motionInputGate(rootActive))
+                                else MotionTabs(if (fromBroadcast) 1 else 0, animePrimaryLabels, onSelect = select,
                                     modifier = Modifier.motionInputGate(rootActive),
                                     treatment = MotionTabTreatment.Capsule,
                                     selectionBackdrop = backdrop,
@@ -844,6 +857,7 @@ private fun AnimeWorkspaceContent(
                             Column {
                                 AnimeWorkspaceHeader(root = shown.depth == 0 && !directoryDetailOpen && !rankingPage,
                                     title = if (shown.depth == 0) (if (directoryDetailOpen) sourceBrowseState.selectedTitle?.title.orEmpty()
+                                        else if (desktopBar) (if (workspaceTabs) "番剧" else baseDestination.label)
                                         else "番剧 · ${baseDestination.label}") else
                                         shownDetail?.subject?.title ?: openingSubject?.title ?: "番剧详情",
                                     backdrop = backdrop, navigationVisible = navigationVisible,
@@ -880,7 +894,10 @@ private fun AnimeWorkspaceContent(
                                             Spacer(Modifier.size(44.dp))
                                         }
                                     }))
-                                if (stackDesktopTabs) HeaderGlassSurface(backdrop,
+                                if (stackDesktopTabs && desktopBar) Box(Modifier.fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surface).padding(horizontal = 20.dp)
+                                    .graphicsLayer { alpha = controlsAlpha() }) { primaryTabs() }
+                                else if (stackDesktopTabs) HeaderGlassSurface(backdrop,
                                     Modifier.fillMaxWidth().padding(horizontal = 8.dp)
                                         .graphicsLayer { alpha = controlsAlpha() },
                                     quietShadow = true, ink = rememberBrowseTabInk(animePrimaryLabels, animePrimaryTypeSize, 0.dp)) {
@@ -1047,8 +1064,26 @@ private fun AnimeWorkspaceContent(
                         info.visibleItemsInfo.any { it.key in trailingKeys } &&
                             (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 5
                     }, onMore = controller::loadMoreCatalog)
-                Box(Modifier.fillMaxWidth().heightIn(max = height)) {
-                LazyColumn(Modifier.align(Alignment.TopCenter).widthIn(max = MangaLayout.ListWidth)
+                BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max = height)) {
+                val searchScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+                val twoColumns = desktop && maxWidth >= 720.dp * searchScale && height >= 246.dp * searchScale
+                val previousColumns = remember(searchScroll, search.query) { mutableStateOf(twoColumns) }
+                val anchor = remember(twoColumns, searchScroll, search.query) {
+                    if (!desktop || !ownsResults || previousColumns.value == twoColumns) null else {
+                        val first = searchScroll.layoutInfo.visibleItemsInfo.firstOrNull { it.index == searchScroll.firstVisibleItemIndex }
+                        val index = search.groups.indexOfFirst { it.key == first?.key }
+                        if (index < 0) null else {
+                            val headingCount = if (matchingReference) 2 else 1
+                            val columns = if (twoColumns) 2 else 1
+                            (headingCount + index / columns) to searchScroll.firstVisibleItemScrollOffset
+                        }
+                    }
+                }
+                LaunchedEffect(twoColumns, searchScroll, search.query) {
+                    previousColumns.value = twoColumns
+                    anchor?.let { (row, offset) -> searchScroll.requestScrollToItem(row, offset) }
+                }
+                LazyColumn(Modifier.align(Alignment.TopCenter).widthIn(max = if (twoColumns) 1100.dp else MangaLayout.ListWidth)
                     .fillMaxWidth().heightIn(max = height).motionInputGate(inputActive)
                     .then(if (desktop) Modifier else Modifier.bottomPullLoad(searchPull)),
                     state = searchScroll, userScrollEnabled = inputActive,
@@ -1077,7 +1112,8 @@ private fun AnimeWorkspaceContent(
                         }
                         else -> animeSearchResults(search, controller, matchingReference, inputActive,
                             onOpenGroup = { openSearchResult(it) }, onManage = ::showWorkActions,
-                            onShowSources = { releaseSearchInput(); searchProgressVisible = true }, pull = searchPull)
+                            onShowSources = { releaseSearchInput(); searchProgressVisible = true }, pull = searchPull,
+                            twoColumns = twoColumns)
                     }
                 }
                 if (desktop) Box(Modifier.matchParentSize()) {
@@ -1204,6 +1240,23 @@ private fun AnimeWorkspaceHeader(root: Boolean, title: String, backdrop: HazeSta
     actions: (@Composable () -> Unit)?) {
     val headerModifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
         .padding(horizontal = 8.dp, vertical = 2.dp)
+    if (platformKind == PlatformKind.DESKTOP && !navigationVisible) {
+        Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
+            .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
+            .heightIn(min = 48.dp).padding(start = if (root) 20.dp else 8.dp, end = 8.dp)
+            .semantics { paneTitle = title }, verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (!root) navigation()
+            if (primary != null) {
+                DesktopPageHeading(title)
+                Box(Modifier.weight(1f).graphicsLayer { alpha = controlsAlpha() }) { primary() }
+            } else Box(Modifier.weight(1f)) {
+                if (root || showTitle) DesktopPageHeading(title)
+            }
+            if (actions != null) Box(Modifier.graphicsLayer { alpha = controlsAlpha() }) { actions() }
+        }
+        return
+    }
     if (root && primary != null && actions != null) {
         val tabInk = rememberBrowseTabInk(animePrimaryLabels, animePrimaryTypeSize, 0.dp)
         if (navigationVisible) {

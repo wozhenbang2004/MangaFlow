@@ -9,6 +9,7 @@ enum class ReaderKeyboardAction(val label: String) {
     PREVIOUS_PAGE("上一页"), NEXT_PAGE("下一页"),
     SCROLL_UP("向上滚动"), SCROLL_DOWN("向下滚动"),
     FIRST_PAGE("本章首页"), LAST_PAGE("本章末页"), TOGGLE_CONTROLS("显示／隐藏控制栏"),
+    PAGE_NAVIGATOR("定位书页"),
 }
 
 class ReaderKeyboardConfiguration(

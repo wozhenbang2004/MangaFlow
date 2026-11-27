@@ -2,6 +2,7 @@
 
 package dev.mangaflow.ui
 
+import androidx.compose.material.icons.outlined.ViewList
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
@@ -94,6 +95,7 @@ import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionInputGate
 
@@ -115,6 +117,7 @@ internal fun CopyExploreScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     var directoryOpen by rememberSaveable { mutableStateOf(false) }
     var topicQuery by rememberSaveable { mutableStateOf("") }
+    var indexView by rememberSaveable { mutableStateOf(false) }
     var actionsId by remember { mutableStateOf<String?>(null) }
     val positions = rememberSaveable(saver = CopyExplorePositionsSaver) {
         LinkedHashMap<String, LazyGridState>()
@@ -137,7 +140,9 @@ internal fun CopyExploreScreen(
     // An inner topic return keeps this route alive; do not complete the outer frame's back state.
     MotionBackHandler(enabled = active && state.topic != null && !directoryOpen, state = null, onBack = goBack)
 
-    Box(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    BoxWithConstraints(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        val wide = fitsDesktopIndex(maxWidth, 880.dp)
+        val openDirectory = { if (active) { releaseInput(); directoryOpen = true } }
         Column(Modifier.fillMaxSize().screenFitViewport()
             .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
             .mangaHazeSource(backdrop).motionInputGate(active)
@@ -173,10 +178,10 @@ internal fun CopyExploreScreen(
                     else Icon(Icons.Outlined.Refresh, "刷新当前内容", Modifier.size(20.dp))
                 }
             }
-            if (state.section == CopyExploreSection.CATALOG) {
+            if (state.section == CopyExploreSection.CATALOG && !wide) {
                 CopyCatalogControls(state, controller, backdrop, active,
-                    onDirectory = { if (active) { releaseInput(); directoryOpen = true } })
-            } else if (state.topic == null) {
+                    onDirectory = openDirectory)
+            } else if (state.section == CopyExploreSection.TOPICS && state.topic == null && !wide) {
                 CopyExploreKeyword(topicQuery, { topicQuery = it }, "查找已加载专题",
                     active, Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
                 Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
@@ -189,7 +194,11 @@ internal fun CopyExploreScreen(
                 }
             }
 
-            MotionTabContent(selected = state, modifier = Modifier.weight(1f).fillMaxWidth(),
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+            if (wide && state.section == CopyExploreSection.CATALOG) DesktopCopyFilters(state, controller,
+                enabled = active && !directoryOpen, onDirectory = openDirectory,
+                modifier = Modifier.width(214.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)))
+            MotionTabContent(selected = state, modifier = Modifier.weight(1f).fillMaxHeight(),
                 contentKey = { it.contentKey }, order = {
                     if (it.section == CopyExploreSection.CATALOG) 0 else if (it.topic == null) 1 else 2
                 }, soft = true) { pane ->
@@ -203,29 +212,55 @@ internal fun CopyExploreScreen(
                     }
                 }
                 val positionKey = pane.contentKey + if (topicList) ":query:$query" else ""
-                val grid = positions.getOrPut(positionKey) { LazyGridState() }
-                while (positions.size > CopyExplorePositionLimit) {
-                    val oldest = positions.keys.firstOrNull { it != positionKey } ?: break
-                    positions.remove(oldest)
+                val savedGrid = remember(positions, positionKey) { positions.positionFor(positionKey) }
+                val initial = pane.loading && (if (topicList) pane.topics.isEmpty() else pane.items.isEmpty())
+                val grid = if (initial) remember(positionKey) { LazyGridState() } else savedGrid
+                Column(Modifier.fillMaxSize()) {
+                val index = wide && !topicList && indexView
+                if (wide) {
+                    Row(Modifier.fillMaxWidth().padding(start = 22.dp, end = 20.dp, top = 8.dp, bottom = 9.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(when { topicList -> "专题目录"; pane.topic != null -> "专题作品";
+                                else -> pane.selection.theme?.name ?: pane.selection.original?.name ?: "分类目录" },
+                                style = browseTitleStyle(24.sp, 31.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val count = if (topicList) topics.size else pane.items.size
+                            val summary = when {
+                                topicList && query.isNotEmpty() -> "匹配 $count 个，共 ${pane.topics.size} 个已载入专题"
+                                topicList -> "已载入 $count 个专题 · 来源顺序"
+                                else -> listOfNotNull("已载入 $count 部", pane.selection.scope?.name,
+                                    pane.directory.orderings.firstOrNull { pane.topic == null && it.path == pane.selection.ordering }?.name)
+                                    .joinToString(" · ")
+                            }
+                            DesktopIndexNote(summary)
+                        }
+                        if (topicList) Box(Modifier.width(242.dp)) {
+                            CopyExploreKeyword(topicQuery, { if (paneActive) topicQuery = it }, "查找已加载专题", paneActive)
+                        } else MotionTabs(if (indexView) 1 else 0, listOf("封面", "列表"),
+                            onSelect = { if (paneActive) indexView = it == 1 }, modifier = Modifier.width(116.dp).motionInputGate(paneActive),
+                            controlHeight = 36.dp, fullWidthIndicator = true, indicatorHeight = 30.dp,
+                            treatment = MotionTabTreatment.Soft)
+                    }
+                    if (index) DesktopIndexLabels("最新章节", "热度与评分", modifier = Modifier.padding(start = 16.dp, end = 22.dp))
                 }
-                BoxWithConstraints(Modifier.fillMaxSize()) {
+                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                     val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-                    val columns = MangaLayout.columns(maxWidth, if (maxWidth >= 600.dp) 4 else 3,
-                        83.dp * scale, 10.dp, 16.dp)
-                    val listColumns = if (topicList) MangaLayout.columns(maxWidth, 3, 280.dp * scale, 10.dp, 16.dp)
+                    val columns = if (wide) MangaLayout.automaticDesktopColumns(maxWidth, scale, 14.dp, 20.dp)
+                        else MangaLayout.columns(maxWidth, if (maxWidth >= 600.dp) 4 else 3, 83.dp * scale, 10.dp, 16.dp)
+                    val listColumns = if (index) 1 else if (topicList) MangaLayout.columns(maxWidth, 3, 280.dp * scale, 10.dp, 16.dp)
                         else columns
                     LazyVerticalGrid(columns = GridCells.Fixed(listColumns), state = grid,
                         modifier = Modifier.fillMaxSize().motionInputGate(paneActive),
-                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp,
+                        contentPadding = PaddingValues(start = 16.dp, end = if (wide) 22.dp else 16.dp, top = if (index) 0.dp else 10.dp,
                             bottom = 28.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(if (topicList) 24.dp else 18.dp)) {
+                        horizontalArrangement = Arrangement.spacedBy(if (wide) 14.dp else 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(if (index) 0.dp else if (topicList) 24.dp else 18.dp)) {
                         pane.topic?.let { topic ->
                             item(key = "topic-heading", span = { GridItemSpan(maxLineSpan) }) {
                                 CopyTopicHeading(topic, repository, paneActive)
                             }
                         }
-                        if (pane.loading && (if (topicList) pane.topics.isEmpty() else pane.items.isEmpty())) {
+                        if (initial) {
                             item(key = "loading", span = { GridItemSpan(maxLineSpan) }) {
                                 QuietLoading(if (topicList) "正在读取专题…" else "正在读取漫画…")
                             }
@@ -239,10 +274,21 @@ internal fun CopyExploreScreen(
                             } else items(pane.items, key = { "comic:" + it.id },
                                 contentType = { "copy-comic" }) { manga ->
                                 Box {
-                                    CoverTile(manga, repository, dense = true, narrow = columns >= 4,
-                                        placement = "copy-explore-${pane.contentKey}",
+                                    val open = { if (paneActive) { releaseInput(); onOpen(manga) } }
+                                    val placement = "copy-explore-${pane.contentKey}"
+                                    val commands = if (wide) listOf(DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList, onClick = open),
+                                        desktopShelfAction(isFavorite(manga), "加入本机书架", "移出本机书架") {
+                                            if (paneActive) onToggleFavorite(manga)
+                                        }) else emptyList()
+                                    DesktopBrowseActions(commands, paneActive) {
+                                    if (index) DesktopBrowseIndexRow(manga, repository, placement,
+                                        detail = { DesktopIndexNote(manga.latestChapter.ifBlank { "—" }) },
+                                        figure = { MangaMetricBadges(manga, compact = true, plain = true, showMore = false) },
+                                        onLongClick = { if (paneActive) actionsId = manga.id }, onOpen = open)
+                                    else CoverTile(manga, repository, dense = true, narrow = columns >= 4, placement = placement,
                                         onLongClick = { if (paneActive) actionsId = manga.id },
-                                        onClick = { if (paneActive) { releaseInput(); onOpen(manga) } })
+                                        onClick = open)
+                                    }
                                     CompactGlassPopover(visible = paneActive && actionsId == manga.id,
                                         backdrop = backdrop, onDismiss = { actionsId = null }) {
                                         Text(manga.title, Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -276,7 +322,10 @@ internal fun CopyExploreScreen(
                             }
                         }
                     }
+                    if (wide) DesktopVerticalScrollbar(grid, Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(7.dp))
                 }
+                }
+            }
             }
         }
 
@@ -286,6 +335,48 @@ internal fun CopyExploreScreen(
                 if (active) { controller.selectTheme(tag); directoryOpen = false; releaseInput() }
             },
             onRetry = { if (active) controller.refreshDirectory() })
+    }
+}
+
+@Composable
+private fun DesktopCopyFilters(state: CopyExploreState, controller: CopyExploreController, enabled: Boolean,
+    onDirectory: () -> Unit, modifier: Modifier) {
+    val selection = state.selection
+    DesktopCatalogueSidebar(modifier) {
+        val themes = remember(state.directory.themes, selection.theme) {
+            (state.directory.themes.filter { copyConventionNumber(it) == null }.take(6) + listOfNotNull(selection.theme))
+                .distinctBy { it.path }
+        }
+        Column {
+            if (themes.isNotEmpty()) {
+                val choices = listOf<MangaTag?>(null) + themes
+                DesktopFilterOptions("题材", choices.map { it?.name ?: "全部" },
+                    choices.indexOfFirst { it?.path == selection.theme?.path }, enabled) { controller.selectTheme(choices[it]) }
+            } else DesktopFilterHeading("题材")
+            MotionTextButton(onClick = onDirectory, enabled = enabled, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(15.dp))
+                Text("全部题材与展会", Modifier.padding(start = 5.dp), style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        if (state.directory.scopes.isNotEmpty()) {
+            val scopes = listOf<MangaTag?>(null) + state.directory.scopes
+            DesktopFilterOptions("漫画范围", scopes.map { it?.name ?: "全部" },
+                scopes.indexOfFirst { it?.path == selection.scope?.path }, enabled) {
+                controller.applyScopeAndOrdering(scopes[it], selection.ordering)
+            }
+        }
+        if (state.directory.orderings.isNotEmpty()) {
+            val options = state.directory.orderings
+            DesktopFilterOptions("排序", options.map { it.name }, options.indexOfFirst { it.path == selection.ordering },
+                enabled) { controller.applyScopeAndOrdering(selection.scope, options[it].path) }
+        }
+        selection.original?.let { DesktopIndexNote("原作 · " + it.name) }
+        if (state.directoryLoading) QuietLoading("读取分类目录…")
+        state.directoryError?.let { CopyExploreNotice("目录未更新", it, enabled && !state.directoryLoading, controller::refreshDirectory) }
+        if (selection != CopyCatalogSelection()) MotionTextButton(onClick = controller::resetFilters, enabled = enabled) {
+            Icon(Icons.Outlined.RestartAlt, null, Modifier.size(16.dp))
+            Text("重置分类筛选", Modifier.padding(start = 5.dp), style = MaterialTheme.typography.labelMedium)
+        }
     }
 }
 
@@ -436,7 +527,9 @@ private fun CopyDirectoryDialog(
         val resolved = copyTagForName(text, all)?.path
         all.filter { text.isEmpty() || it.name.contains(text, true) || it.path.contains(text, true) || it.path == resolved }
     }
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 560.dp,
+    val desktop = fitsDesktopIndex(LocalMangaWindow.current.width, 850.dp)
+    val positions = rememberSaveable(saver = CopyExplorePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
+    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = if (desktop) 792.dp else 560.dp,
         properties = DialogProperties(usePlatformDefaultWidth = false)) {
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
             // Capture the outer BoxWithConstraints receiver before entering the glass lambda.
@@ -449,6 +542,8 @@ private fun CopyDirectoryDialog(
                             onSelect = { if (visible) group = it }, modifier = Modifier.width(160.dp),
                             controlHeight = 40.dp, fontSize = 12.sp, fullWidthIndicator = true)
                         Spacer(Modifier.weight(1f))
+                        if (desktop && !state.directoryLoading) DesktopIndexNote(if (query.isBlank()) "共 ${all.size} 项"
+                            else "匹配 ${matches.size} 项")
                         MotionIconButton(onDismiss, Modifier.size(44.dp), enabled = visible, tooltip = "关闭目录") {
                             Icon(Icons.Outlined.Close, "关闭目录", Modifier.size(20.dp))
                         }
@@ -461,12 +556,17 @@ private fun CopyDirectoryDialog(
                     state.directoryError?.let { message ->
                         CopyExploreNotice("目录更新失败", message, visible && !state.directoryLoading, onRetry)
                     }
-                    val grid = rememberLazyGridState()
-                    LazyVerticalGrid(columns = GridCells.Fixed(if (directoryWidth >= 440.dp) 3 else 2),
-                        state = grid, modifier = Modifier.weight(1f).fillMaxWidth(),
+                    val key = "${group}:${query.trim()}"
+                    val grid = if (desktop) remember(positions, key) { positions.positionFor(key) } else rememberLazyGridState()
+                    val columnCount = if (desktop) MangaLayout.columns(directoryWidth, 5,
+                        140.dp * LocalDensity.current.fontScale.coerceAtLeast(1f), 4.dp, 14.dp)
+                        else if (directoryWidth >= 440.dp) 3 else 2
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                    LazyVerticalGrid(columns = GridCells.Fixed(columnCount),
+                        state = grid, modifier = Modifier.fillMaxSize(),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
-                        contentPadding = PaddingValues(bottom = 10.dp)) {
+                        contentPadding = PaddingValues(end = if (desktop) 8.dp else 0.dp, bottom = 10.dp)) {
                         if (state.selection.theme != null || state.selection.original != null) item(
                             key = "current-selection", span = { GridItemSpan(maxLineSpan) }) {
                             SelectionContainer {
@@ -493,6 +593,8 @@ private fun CopyDirectoryDialog(
                             }, Modifier.padding(vertical = 24.dp), style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                    }
+                    if (desktop) DesktopVerticalScrollbar(grid, Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp))
                     }
                 }
             }
@@ -719,6 +821,12 @@ private fun copyTopicPlainText(value: String): String = value
     .replace("&quot;", "\"").replace("&#39;", "'").trim()
 
 private const val CopyExplorePositionLimit = 24
+private fun LinkedHashMap<String, LazyGridState>.positionFor(key: String): LazyGridState {
+    val grid = remove(key) ?: LazyGridState()
+    put(key, grid)
+    while (size > CopyExplorePositionLimit) remove(keys.first())
+    return grid
+}
 private val CopyExplorePositionsSaver = listSaver<LinkedHashMap<String, LazyGridState>, Any>(
     save = { positions -> positions.entries.flatMap { (key, state) ->
         listOf(key, state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset)

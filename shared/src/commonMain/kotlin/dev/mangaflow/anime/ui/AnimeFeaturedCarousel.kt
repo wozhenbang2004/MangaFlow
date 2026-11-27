@@ -13,6 +13,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PageSize
 import androidx.compose.foundation.pager.PagerDefaults
@@ -28,6 +34,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
@@ -57,6 +64,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -104,23 +112,28 @@ internal fun AnimeFeaturedCarousel(
     onSelected: (String) -> Unit,
     onOpenScores: (AnimeFeaturedEntry) -> Unit,
     onOpen: (AnimeFeaturedEntry) -> Unit,
+    hasCompanion: Boolean = false,
 ) {
     if (entries.isEmpty()) return
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val galleryWidth = maxWidth
         val density = LocalDensity.current
         val motion = LocalMotionEnabled.current
         val window = LocalMangaWindow.current
         val desktop = platformKind == PlatformKind.DESKTOP
         val fontScale = density.fontScale.coerceAtLeast(1f)
-        val galleryInset = ((galleryWidth - 700.dp) / 2f).coerceAtLeast(0.dp)
-        val peek = if (entries.size > 1) 18.dp else 0.dp
+        val indexVisible = desktop && !hasCompanion && entries.size > 1 && maxWidth >= 820.dp * fontScale
+        val indexWidth = if (indexVisible) (maxWidth * .32f).coerceIn(246.dp, 348.dp) else 0.dp
+        val indexSpace = if (indexVisible) indexWidth + 22.dp else 0.dp
+        val galleryWidth = maxWidth - indexSpace
+        val galleryInset = if (indexVisible || hasCompanion) 0.dp else ((galleryWidth - 700.dp) / 2f).coerceAtLeast(0.dp)
+        val peek = if (entries.size > 1 && !indexVisible) 18.dp else 0.dp
         val preferredWidth = (galleryWidth - galleryInset * 2 - peek).coerceAtLeast(1.dp)
         val compactLayout = preferredWidth < 272.dp * fontScale || fontScale > 1.35f
         val footerHeight = if (entries.size == 1) 0.dp else if (desktop) 44.dp else 10.dp
         val itemHeight = when {
             compactLayout -> 110.dp + 82.dp * fontScale
             window.shortHeight -> (window.height * .42f).coerceIn(136.dp, 192.dp)
+            indexVisible || hasCompanion -> (window.height * .33f).coerceIn(194.dp, 316.dp)
             else -> (preferredWidth * .63f).coerceIn(174.dp, 270.dp)
         }
         val galleryHeight = itemHeight + footerHeight + 8.dp
@@ -165,7 +178,7 @@ internal fun AnimeFeaturedCarousel(
         }
         val imageWidthPx = decodePixels(preferredWidth)
         val imageHeightPx = decodePixels(itemHeight)
-        Column(Modifier.fillMaxWidth().height(galleryHeight)
+        Column(Modifier.fillMaxWidth().padding(end = indexSpace).height(galleryHeight)
             .onPreviewKeyEvent { event ->
                 if (!active || entries.size <= 1 || event.type != KeyEventType.KeyDown ||
                     event.isAltPressed || event.isCtrlPressed || event.isMetaPressed) false
@@ -249,6 +262,36 @@ internal fun AnimeFeaturedCarousel(
                     enabled = active && state.currentPage < entries.lastIndex, modifier = Modifier.size(44.dp),
                     tooltip = "下一部番剧") {
                     Icon(Icons.AutoMirrored.Outlined.ArrowForward, "下一部番剧", Modifier.size(18.dp))
+                }
+            }
+        }
+        if (indexVisible) {
+            val colors = MaterialTheme.colorScheme
+            val list = rememberLazyListState()
+            LaunchedEffect(state.settledPage, entries.size) {
+                val selected = state.settledPage.coerceIn(entries.indices)
+                if (list.layoutInfo.visibleItemsInfo.none { it.index == selected }) list.scrollToItem(selected)
+            }
+            LazyColumn(Modifier.align(Alignment.TopEnd).width(indexWidth).height(galleryHeight).selectableGroup(),
+                state = list, userScrollEnabled = active, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                itemsIndexed(entries, key = { _, entry -> entry.key }) { index, entry ->
+                    val selected = index == state.settledPage
+                    val interaction = remember(entry.key) { MutableInteractionSource() }
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        .then(if (selected) Modifier.background(colors.surfaceContainerHigh) else Modifier)
+                        .motionPress(interaction, enabled = active, pressedScale = .99f)
+                        .selectable(selected, interaction, indication = null, enabled = active, role = Role.Tab,
+                            onClick = { selectPage(index) }).padding(horizontal = 8.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        AnimePoster(entry.coverUrl, Modifier.size(33.dp, 48.dp), sourceId = entry.sourceId, title = entry.title)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(entry.title, style = MaterialTheme.typography.titleSmall,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                color = colors.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (entry.caption.isNotBlank()) Text(entry.caption, style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
                 }
             }
         }

@@ -1,5 +1,8 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -311,7 +314,7 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
             onLongClick = onManage, onClick = onOpen)
         .semantics(mergeDescendants = true) { contentDescription = description }
     DesktopContextMenuArea(if (onManage != null) listOf(
-        DesktopMenuAction("查看详情", onClick = onOpen), DesktopMenuAction("番剧操作", onClick = onManage)) else emptyList()) {
+        DesktopMenuAction("查看详情", icon = Icons.Outlined.Info, onClick = onOpen), DesktopMenuAction("番剧操作", icon = Icons.Outlined.MoreHoriz, onClick = onManage)) else emptyList()) {
     if (list) {
         Row(click.fillMaxWidth().heightIn(min = 48.dp).padding(vertical = 4.dp, horizontal = 2.dp),
             verticalAlignment = Alignment.CenterVertically,

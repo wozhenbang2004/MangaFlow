@@ -135,8 +135,8 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                 val visibleFeed = if (staleWeek && feed != null) feed.copy(items = emptyList(), hasMore = false,
                     error = if (feed.loading) null else feed.error ?: "上次记录不是本周番表，请刷新。") else feed
                 // Controls scroll with the works; only workspace navigation stays floating.
-                val catalogueHeader: (@Composable (Dp) -> Unit)? = if (today != null || feed != null) {
-                    { gridWidth ->
+                val catalogueHeader: (@Composable (Dp, Boolean) -> Unit)? = if (today != null || feed != null) {
+                    { gridWidth, inRail ->
                         val gridActions: @Composable () -> Unit = {
                             AnimeCatalogueGridActions(gridWidth, state.discoveryColumns, backdrop, contentActive,
                                 controller::setDiscoveryColumns,
@@ -159,13 +159,13 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                                     live.discoveryFeeds[key]?.query == feed?.query) {
                                     controller.configureDiscovery(nextTab, query)
                                 }
-                            }, gridActions = gridActions)
+                            }, gridActions = gridActions, weekdayList = inRail)
                         else if (feed != null) AnimeDiscoveryControls(tab, feed.query, tabActive, showFilters,
                             onOpenFilters = { if (ownsCurrentFeed()) showFilters = true },
                             onConfigure = ::configure, gridActions = gridActions)
                     }
                 } else null
-                val grid: @Composable (Modifier, Dp) -> Unit = { modifier, topInset ->
+                val grid: @Composable (Modifier, Dp, Boolean) -> Unit = { modifier, topInset, pinnedControls ->
                     AnimeDiscoveryFeedGrid(key, visibleFeed, state.discoveryColumns, scrolls, contentBottomPadding,
                         modifier = modifier.mangaHazeSource(backdrop).motionInputGate(contentActive), active = contentActive,
                         onOpen = { if (ownsCurrentFeed()) onOpenItem(it) },
@@ -187,18 +187,40 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                         onMore = { if (ownsCurrentFeed()) controller.loadMoreDiscovery(key) },
                         onClearTag = { feed?.let { configure(it.query.withTags(emptyList())) } },
                         onShowFullWeek = { feed?.let { configure(it.query.copy(weekday = null)) } },
-                        catalogueHeader = catalogueHeader, contentTopPadding = topInset, calendarDate = calendarDate)
+                        catalogueHeader = if (pinnedControls || catalogueHeader == null) null else ({ width -> catalogueHeader(width, false) }),
+                        contentTopPadding = topInset, calendarDate = calendarDate)
                 }
-                if (ranking && feed != null) {
-                    Column(Modifier.fillMaxSize()) {
-                        // Keep the source switch visible when the site's existing query returns
-                        // to a scrolled position. Sorting/filters still travel with the list.
-                        AnimeRankingProviderBar(feed.query.provider, state.discoveryColumns, contentActive, contentTopPadding) { provider ->
+                val providers: @Composable (Dp) -> Unit = { inset ->
+                    if (ranking && feed != null)
+                        AnimeRankingProviderBar(feed.query.provider, state.discoveryColumns, contentActive, inset) { provider ->
                             if (provider != feed.query.provider && ownsCurrentFeed()) controller.selectRankingProvider(provider)
                         }
-                        grid(Modifier.fillMaxWidth().weight(1f), 0.dp)
-                    }
-                } else grid(Modifier.fillMaxSize(), contentTopPadding)
+                }
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+                    val pinned = platformKind == PlatformKind.DESKTOP && (broadcast || ranking) &&
+                        maxWidth >= 924.dp * scale && maxHeight - contentTopPadding >= 348.dp * scale
+                    if (pinned && catalogueHeader != null) {
+                        val railWidth = (maxWidth * .29f).coerceIn(278.dp * scale, 338.dp * scale)
+                        val gridWidth = maxWidth - railWidth - 36.dp
+                        Row(Modifier.fillMaxSize().padding(start = 20.dp, top = contentTopPadding + 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            val controlScroll = rememberScrollState()
+                            Box(Modifier.width(railWidth).fillMaxHeight()) {
+                                Column(Modifier.fillMaxWidth().verticalScroll(controlScroll).padding(end = 8.dp, bottom = 18.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    providers(0.dp)
+                                    catalogueHeader(gridWidth, true)
+                                }
+                                DesktopVerticalScrollbar(controlScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                            }
+                            grid(Modifier.weight(1f).fillMaxHeight(), 0.dp, true)
+                        }
+                    } else if (ranking && feed != null) Column(Modifier.fillMaxSize()) {
+                        providers(contentTopPadding)
+                        grid(Modifier.fillMaxWidth().weight(1f), 0.dp, false)
+                    } else grid(Modifier.fillMaxSize(), contentTopPadding, false)
+                }
                 // A restored query can scroll off the lazy header as soon as Apply
                 // runs. The editor must stay mounted long enough to actually close.
                 if (tabActive && showFilters && feed != null) androidx.compose.runtime.key(feed.query.provider.takeIf { ranking }) {
@@ -254,14 +276,16 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
         onClearTag = { controller.configureDiscovery(AnimeDiscoveryTab.HOME, query.withTags(emptyList())) },
         featured = featured, contentTopPadding = contentTopPadding,
         watchShelf = if (recent.isEmpty()) null else {
-            { AnimeDiscoveryWatchShelf(recent, scrolls.watchHistory, contentActive, onOpenHistory,
+            { besideGallery -> AnimeDiscoveryWatchShelf(recent, scrolls.watchHistory, contentActive, onOpenHistory,
                 continuationLabel = { entry -> animeContinuationLabel(entry, controller.continuationEpisode(entry.subject.id)) },
-                onResume = onResume) }
+                onResume = onResume, besideGallery = besideGallery) }
         },
+        homeShortcuts = if (onOpenSchedule == null && onOpenRanking == null) null else ({
+            AnimeHomeDiscoveryShortcuts(state.discoveryFeeds[animeDiscoveryFeedKey(AnimeDiscoveryTab.CALENDAR)],
+                animeCalendarToday(contentActive), contentActive, onOpenSchedule, onOpenRanking)
+        }),
         catalogueHeader = { gridWidth ->
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                AnimeHomeDiscoveryShortcuts(state.discoveryFeeds[animeDiscoveryFeedKey(AnimeDiscoveryTab.CALENDAR)],
-                    animeCalendarToday(contentActive), contentActive, onOpenSchedule, onOpenRanking)
                 AnimeHomeCatalogueHeader(query, backdrop, contentActive, refreshing = feed?.loading == true && feed.items.isNotEmpty(),
                     onOrder = { controller.configureDiscovery(AnimeDiscoveryTab.HOME, query.copy(order = it)) },
                     onFilter = { showFilters = true },
@@ -281,10 +305,18 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
 @Composable
 private fun AnimeDiscoveryWatchShelf(entries: List<AnimeLibraryEntry>, scroll: LazyListState, active: Boolean,
     onOpenHistory: () -> Unit, continuationLabel: (AnimeLibraryEntry) -> String,
-    onResume: (AnimeLibraryEntry) -> Unit) {
+    onResume: (AnimeLibraryEntry) -> Unit, besideGallery: Boolean) {
     Column(Modifier.fillMaxWidth()) {
         AnimeDiscoverySectionHeading("最近观看", "", onMore = onOpenHistory.takeIf { active },
             moreLabel = "全部观看历史")
+        if (besideGallery) {
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                entries.take(2).forEach { entry -> key(entry.subject.id) {
+                    AnimeDiscoveryResumeRow(entry, continuationLabel(entry), active, Modifier.fillMaxWidth(), onResume)
+                } }
+            }
+            return@Column
+        }
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             // At narrow widths, let the next real card peek rather than showing a fake second slot.
             val width = if (entries.size == 1) minOf(maxWidth, 290.dp) else
@@ -544,7 +576,8 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
     onManage: (AnimeSubject) -> Unit, onRefresh: () -> Unit,
     onRetry: () -> Unit, onMore: () -> Unit, onClearTag: () -> Unit, onShowFullWeek: (() -> Unit)? = null,
     featured: List<AnimeFeaturedEntry> = emptyList(),
-    watchShelf: (@Composable () -> Unit)? = null, catalogueHeader: (@Composable (Dp) -> Unit)? = null,
+    watchShelf: (@Composable (Boolean) -> Unit)? = null, homeShortcuts: (@Composable () -> Unit)? = null,
+    catalogueHeader: (@Composable (Dp) -> Unit)? = null,
     contentTopPadding: Dp = 0.dp, calendarDate: LocalDate? = null) {
     val retainedScroll = scrolls.grid(key, feed?.query)
     // The query's completed page range is restored by AnimeDiscoveryLoads before this state is used.
@@ -585,6 +618,10 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val columns = animeDiscoveryColumns(maxWidth, preference)
         val inset = animeDiscoveryInset(maxWidth, preference, columns)
+        val readableWidth = maxWidth - inset * 2
+        val besideGallery = desktop && featured.isNotEmpty() && watchShelf != null &&
+            readableWidth >= 820.dp * LocalDensity.current.fontScale.coerceAtLeast(1f) &&
+            maxHeight - contentTopPadding >= 390.dp
         if (desktop) {
             val trailingKeys = remember(works, columns) { works.takeLast(columns * 2).map { it.key }.toSet() }
             AnimeBrowsePagination(key = key to feed?.query, refreshKey = feed?.fetchedAt,
@@ -608,14 +645,27 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
                 else -> 16.dp
             })) {
             if (featured.isNotEmpty()) item(key = "featured", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeFeaturedCarousel(featured, active = active, visible = active && galleryInView,
-                    selectedKey = scrolls.featuredKey, onSelected = { scrolls.featuredKey = it },
-                    onOpenScores = { entry -> if (active) onScores(entry.discoveryItem) },
-                    onOpen = { entry -> if (active) onOpen(entry.discoveryItem) })
+                val gallery: @Composable () -> Unit = {
+                    AnimeFeaturedCarousel(featured, active = active, visible = active && galleryInView,
+                        selectedKey = scrolls.featuredKey, onSelected = { scrolls.featuredKey = it },
+                        onOpenScores = { entry -> if (active) onScores(entry.discoveryItem) },
+                        onOpen = { entry -> if (active) onOpen(entry.discoveryItem) }, hasCompanion = besideGallery)
+                }
+                if (besideGallery) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+                    Box(Modifier.weight(1f)) { gallery() }
+                    Column(Modifier.width((readableWidth * .32f).coerceIn(264.dp, 344.dp)),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        watchShelf?.invoke(true)
+                        homeShortcuts?.invoke()
+                    }
+                } else gallery()
             }
-            if (watchShelf != null) item(key = "continue-watching", span = { GridItemSpan(maxLineSpan) }) { watchShelf() }
-            if (catalogueHeader != null) item(key = "discovery-heading", span = { GridItemSpan(maxLineSpan) }) {
-                catalogueHeader(maxWidth)
+            if (!besideGallery && watchShelf != null) item(key = "continue-watching", span = { GridItemSpan(maxLineSpan) }) { watchShelf(false) }
+            if (catalogueHeader != null || homeShortcuts != null && !besideGallery) item(key = "discovery-heading", span = { GridItemSpan(maxLineSpan) }) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (!besideGallery) homeShortcuts?.invoke()
+                    catalogueHeader?.invoke(maxWidth)
+                }
             }
             if (feed?.error != null && !hasScopedErrors) item(key = "error", span = { GridItemSpan(maxLineSpan) }) {
                 val listName = when (key) {
@@ -824,7 +874,8 @@ private val useAnimeBroadcastDial: Boolean
 private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDate,
     seasonQuery: AnimeDiscoveryQuery?, calendarQuery: AnimeDiscoveryQuery?, active: Boolean,
     filtersOpen: Boolean, onOpenFilters: () -> Unit,
-    onConfigure: (AnimeDiscoveryTab, AnimeDiscoveryQuery) -> Unit, gridActions: @Composable () -> Unit) {
+    onConfigure: (AnimeDiscoveryTab, AnimeDiscoveryQuery) -> Unit, gridActions: @Composable () -> Unit,
+    weekdayList: Boolean = false) {
     val current = today.animeQuarterIndex()
     val season = seasonQuery ?: AnimeDiscoveryQuery().withAnimeQuarter(current)
     val calendar = calendarQuery ?: AnimeDiscoveryQuery(calendar = true)
@@ -920,7 +971,8 @@ private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDat
             exit = shrinkVertically(
                 animationSpec = if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(),
                 shrinkTowards = Alignment.Bottom), label = "broadcast-week") {
-            if (useAnimeBroadcastDial) AnimeWeeklyDial(today, calendar, enabled && inWeek, ::openWeek)
+            if (weekdayList) AnimeDesktopWeekdays(today, calendar.weekday, enabled && inWeek, ::openWeek)
+            else if (useAnimeBroadcastDial) AnimeWeeklyDial(today, calendar, enabled && inWeek, ::openWeek)
             else AnimeWeeklyDays(today, calendar.weekday, enabled && inWeek, ::openWeek)
         }
     }
@@ -1009,6 +1061,32 @@ private fun AnimeWeeklyDial(today: LocalDate, calendar: AnimeDiscoveryQuery, act
         }, onSelect = { index ->
             if (localToday().animeWeekStart() == weekStart) onSelect(index + 1)
         })
+}
+
+@Composable
+private fun AnimeDesktopWeekdays(today: LocalDate, selected: Int?, enabled: Boolean, onChoose: (Int) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val monday = today.animeWeekStart()
+    Column(Modifier.fillMaxWidth().selectableGroup(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        animeWeekdays.forEachIndexed { index, label ->
+            val day = monday.plusDays(index.toLong())
+            val chosen = selected == index + 1
+            val interaction = remember(day) { MutableInteractionSource() }
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp))
+                .then(if (chosen) Modifier.background(colors.secondaryContainer) else Modifier)
+                .motionPress(interaction, enabled = enabled, pressedScale = .99f)
+                .selectable(chosen, interaction, indication = null, enabled = enabled, role = Role.RadioButton,
+                    onClick = { if (!chosen && localToday().animeWeekStart() == monday) onChoose(index + 1) })
+                .heightIn(min = 37.dp).padding(horizontal = 12.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal)
+                if (day == today) Text("今天", style = MaterialTheme.typography.labelSmall, color = colors.primary)
+                Text("${day.monthNumber} / ${day.dayOfMonth}",
+                    style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"), color = colors.onSurfaceVariant)
+            }
+        }
+    }
 }
 
 @Composable

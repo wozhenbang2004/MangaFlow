@@ -4,6 +4,7 @@ package dev.mangaflow.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -68,21 +69,24 @@ internal fun SiteRankingFiltersDialog(
     // Keep incomplete numeric input local instead of normalizing each keystroke to "all years".
     var yearText by remember { mutableStateOf(selection.filters.year?.toString().orEmpty()) }
     val scroll = rememberScrollState()
+    val advancedScroll = rememberScrollState()
     val open = visible && active
     LaunchedEffect(open) {
         if (open) {
             draft = selection
             yearText = selection.filters.year?.toString().orEmpty()
             scroll.scrollTo(0)
+            advancedScroll.scrollTo(0)
         }
     }
     val currentYear = remember(open) { formatInstantMillis(wallTimeMillis(), "yyyy").toIntOrNull() }
     val yearValid = yearText.isBlank() || yearText.toIntOrNull()?.let { it in 1900..3000 } == true
     val preview = draft.normalized()
     val changeFilters: (SiteRankingFilters) -> Unit = { filters -> draft = draft.copy(filters = filters) }
+    val desktop = fitsDesktopIndex(LocalMangaWindow.current.width, 900.dp)
 
     MotionDialog(visible = open, onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp,
+        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = if (desktop) 884.dp else 520.dp,
         onClosed = onClosed) {
         val colors = MaterialTheme.colorScheme
         val focus = LocalFocusManager.current
@@ -90,6 +94,7 @@ internal fun SiteRankingFiltersDialog(
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
             // MotionDialog already accounts for safe drawing and IME; one stable height owner.
             val panelHeight = minOf(maxHeight, 640.dp)
+            val split = desktop && fitsDesktopIndex(maxWidth, 690.dp)
             LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().height(panelHeight),
                 cornerRadius = 24.dp, role = GlassSurfaceRole.PANEL, softCard = true) {
                 Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp)
@@ -111,8 +116,7 @@ internal fun SiteRankingFiltersDialog(
                             Icon(Icons.Outlined.Close, "关闭筛选，不应用修改", Modifier.size(19.dp))
                         }
                     }
-                    Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll)
-                        .padding(top = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    RankingFilterColumns(split, scroll, advancedScroll, Modifier.weight(1f).fillMaxWidth(), basic = {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             RankingFilterHeading("排序")
                             val kinds = preview.availableKinds
@@ -205,6 +209,13 @@ internal fun SiteRankingFiltersDialog(
                             }
                         }
 
+                    }, advanced = {
+                        if (split && !preview.supportsAdvancedFilters && !preview.site.supportsStatus && !preview.site.supportsCountry) {
+                            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                RankingFilterHeading("榜单口径")
+                                Text(preview.explanation, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            }
+                        }
                         if (preview.supportsAdvancedFilters && preview.site.supportsQuery) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 RankingFilterHeading("关键词")
@@ -292,7 +303,7 @@ internal fun SiteRankingFiltersDialog(
                                     onSelect = { changeFilters(draft.filters.copy(minVotes = votes[it])) })
                             }
                         }
-                    }
+                    })
                     HorizontalDivider(color = colors.onSurface.copy(alpha = .08f))
                     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -325,6 +336,31 @@ internal fun SiteRankingFiltersDialog(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun RankingFilterColumns(split: Boolean, left: ScrollState, right: ScrollState, modifier: Modifier,
+    basic: @Composable ColumnScope.() -> Unit, advanced: @Composable ColumnScope.() -> Unit) {
+    if (!split) {
+        Column(modifier.verticalScroll(left).padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+            basic()
+            advanced()
+        }
+        return
+    }
+    Row(modifier) {
+        Box(Modifier.weight(.44f).fillMaxHeight()) {
+            Column(Modifier.fillMaxSize().verticalScroll(left).padding(start = 4.dp, end = 16.dp, top = 12.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp), content = basic)
+            DesktopVerticalScrollbar(left, Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(5.dp))
+        }
+        androidx.compose.material3.VerticalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
+        Box(Modifier.weight(.56f).fillMaxHeight()) {
+            Column(Modifier.fillMaxSize().verticalScroll(right).padding(start = 16.dp, end = 10.dp, top = 12.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp), content = advanced)
+            DesktopVerticalScrollbar(right, Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(5.dp))
         }
     }
 }

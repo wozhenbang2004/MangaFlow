@@ -13,8 +13,6 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.focusGroup
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,7 +26,6 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
@@ -80,6 +77,13 @@ import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.geometry.isSpecified
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.scale
@@ -295,10 +299,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
     }
 }
 
-/**
- * Desktop combines the existing rounded artwork/material card with explicit groups.
- * Every visible book opens in one click; only the arrows and page controls change groups.
- */
+/** The main cover and the adjacent books are independent, directly openable targets. */
 @Composable
 private fun DesktopFeaturedRecommendations(
     manga: List<Manga>,
@@ -311,117 +312,257 @@ private fun DesktopFeaturedRecommendations(
     desktopActions: ((Manga) -> List<DesktopMenuAction>)?,
 ) {
     val window = LocalMangaWindow.current
-    val density = LocalDensity.current
-    val fontScale = density.fontScale.coerceAtLeast(1f)
+    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-    val coverUrls = remember(manga) { manga.map { it.coverUrl } }
-    val extracted = remember(coverUrls) { mutableStateMapOf<String, Color>() }
-    val fallback = MaterialTheme.colorScheme.surfaceVariant
-    var firstIndex by rememberSaveable { mutableStateOf(0) }
+    var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
+    val index = manga.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
+    val lead = manga.getOrNull(index)
+    val move: (Int) -> Boolean = { step ->
+        manga.getOrNull(index + step)?.let { selectedId = it.id; true } ?: false
+    }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val perGroup = when {
-            maxWidth >= 960.dp * fontScale -> 3
-            maxWidth >= 600.dp * fontScale -> 2
+        val split = manga.size > 1 && maxWidth >= 720.dp * scale.coerceAtMost(1.5f)
+        val narrow = maxWidth < 430.dp * scale
+        val short = window.shortHeight
+        val height = (if (short) 178.dp else (window.height * .32f).coerceIn(218.dp, 292.dp)) +
+            64.dp * (scale - 1f).coerceIn(0f, 1.6f)
+        val railWidth = (maxWidth * .265f).coerceIn(192.dp * scale.coerceAtMost(1.3f), 310.dp)
+        val previewCount = when {
+            split && !short -> 3
+            split || !narrow -> 2
             else -> 1
-        }
-        val pageCount = ((manga.size + perGroup - 1) / perGroup).coerceAtLeast(1)
-        val page = (firstIndex / perGroup).coerceIn(0, pageCount - 1)
-        val selectPage: (Int) -> Unit = { firstIndex = it.coerceIn(0, pageCount - 1) * perGroup }
-        LaunchedEffect(manga.size) {
-            if (manga.isNotEmpty()) firstIndex = firstIndex.coerceIn(0, manga.lastIndex)
-        }
-        val cardHeight = if (window.shortHeight) 152.dp
-            else (window.height * .24f).coerceIn(176.dp, 224.dp)
-        val gap = 12.dp
-        val galleryHeight = cardHeight + 20.dp
-        val cardWidth = ((maxWidth - 16.dp - gap * (perGroup - 1)) / perGroup).coerceAtLeast(1.dp)
-        // Decode dimensions have upward buckets; visible geometry still follows every resize.
-        fun decodePixels(size: Dp): Int = with(density) {
-            ((size.roundToPx().coerceAtLeast(1).toLong() + 127L) / 128L * 128L)
-                .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-        }
-        val decodeWidth = decodePixels(cardWidth)
-        val decodeHeight = decodePixels(cardHeight)
-        val inlineInformation = cardWidth >= 224.dp * fontScale
-        val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
-        val captionHeight = if (inlineInformation) 0.dp else featuredCaptionHeight(cardHeight, titleLines, fontScale)
-        val inlinePages = maxWidth >= 480.dp
+        }.coerceAtMost((manga.size - 1).coerceAtLeast(0))
+        val previews = List(previewCount) { manga[(index + it + 1) % manga.size] }
         Column(Modifier.fillMaxWidth().semantics { paneTitle = "精选推荐" }
             .onPreviewKeyEvent { event ->
-                if (!visible || pageCount <= 1 || event.type != KeyEventType.KeyDown || event.isAltPressed ||
+                if (!visible || event.type != KeyEventType.KeyDown || event.isAltPressed ||
                     event.isCtrlPressed || event.isMetaPressed) false
                 else when (event.key) {
-                    Key.DirectionLeft -> { selectPage(page + if (rtl) 1 else -1); true }
-                    Key.DirectionRight -> { selectPage(page + if (rtl) -1 else 1); true }
+                    Key.DirectionLeft -> move(if (rtl) 1 else -1)
+                    Key.DirectionRight -> move(if (rtl) -1 else 1)
                     else -> false
                 }
-            }.focusGroup(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("精选", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (pageCount > 1) {
-                    MotionIconButton(onClick = { selectPage(page - 1) }, enabled = visible && page > 0,
-                        modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "上一组推荐", Modifier.size(18.dp))
+            }.focusGroup(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("精选推荐", modifier = Modifier.weight(1f), style = browseTitleStyle(20.sp, 27.sp),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (manga.size > 1) {
+                    Text("${index + 1} / ${manga.size}", color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = mangaMetricValueStyle(12.sp, 16.sp), modifier = Modifier.padding(end = 6.dp))
+                    MotionIconButton(onClick = { move(-1) }, enabled = visible && index > 0,
+                        modifier = Modifier.size(44.dp), tooltip = "上一部推荐") {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "上一部推荐", Modifier.size(18.dp))
                     }
-                    if (inlinePages) DesktopRecommendationPages(pageCount, page, visible, selectPage)
-                    MotionIconButton(onClick = { selectPage(page + 1) }, enabled = visible && page < pageCount - 1,
-                        modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowForward, "下一组推荐", Modifier.size(18.dp))
+                    MotionIconButton(onClick = { move(1) }, enabled = visible && index < manga.lastIndex,
+                        modifier = Modifier.size(44.dp), tooltip = "下一部推荐") {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowForward, "下一部推荐", Modifier.size(18.dp))
                     }
                 }
             }
-            if (manga.isEmpty() && loading) Box(Modifier.fillMaxWidth().height(galleryHeight),
-                contentAlignment = Alignment.Center) { QuietLoading("正在翻开书页…") }
-            else MotionTabContent(selected = page to perGroup, modifier = Modifier.fillMaxWidth().height(galleryHeight),
-                contentKey = { it }, order = { it.first }, fillContent = false) { group ->
-                val entries = manga.drop(group.first * group.second).take(group.second)
-                Row(Modifier.fillMaxWidth().height(galleryHeight).padding(horizontal = 8.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(gap)) {
-                    repeat(group.second) { index ->
-                        val entry = entries.getOrNull(index)
-                        if (entry == null) Spacer(Modifier.weight(1f).fillMaxHeight())
-                        else key(entry.id, entry.coverUrl) {
-                            val color = animateColorAsState(
-                                extracted[entry.coverUrl] ?: FeaturedCoverColors.get(entry.coverUrl) ?: fallback,
-                                if (LocalMotionEnabled.current) tween(420, easing = MangaMotion.EnterEasing) else snap(),
-                                label = "desktop-featured-color")
-                            Box(Modifier.weight(1f).fillMaxHeight()) {
-                                DesktopBrowseActions(desktopActions?.invoke(entry).orEmpty(), visible) {
-                                    FeaturedManga(entry, repository, captionHeight, titleLines, inlineInformation,
-                                        decodeWidth, decodeHeight,
-                                        color = color, atmosphere = color,
-                                        onColor = { extracted[entry.coverUrl] = it }, onReady = {},
-                                        modifier = Modifier.fillMaxSize().mangaCoverCard(22.dp, shadowRadius = 16.dp),
-                                        emphasis = { 1f }, settled = true, scrolling = false, offset = { 0f }, onPreview = {},
-                                        enabled = visible, onOpen = onOpen, onRatings = onRatings, showSource = showSource)
-                                }
-                            }
+            if (lead == null) {
+                if (loading) Box(Modifier.fillMaxWidth().height(height), contentAlignment = Alignment.Center) {
+                    QuietLoading("正在翻开书页…")
+                }
+            } else {
+                val spotlight: @Composable (Modifier) -> Unit = { bounds ->
+                    MotionTabContent(lead, modifier = bounds, contentKey = Manga::id,
+                        order = { item -> manga.indexOfFirst { it.id == item.id } }) { entry ->
+                        val enabled = visible && entry.id == lead.id
+                        DesktopBrowseActions(desktopActions?.invoke(entry).orEmpty(), enabled) {
+                            DesktopFeaturedSpread(entry, repository, enabled, showSource, short,
+                                onOpen = onOpen, onRatings = onRatings)
                         }
                     }
                 }
-            }
-            if (!inlinePages && pageCount > 1) Row(Modifier.fillMaxWidth()
-                .horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.Center) {
-                DesktopRecommendationPages(pageCount, page, visible, selectPage)
+                if (split) Row(Modifier.fillMaxWidth().height(height),
+                    horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                    spotlight(Modifier.weight(1f).fillMaxHeight())
+                    Column(Modifier.width(railWidth).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        previews.forEach { entry -> key(entry.id) {
+                            Box(Modifier.weight(1f).fillMaxWidth()) {
+                                DesktopFeaturedPreview(entry, repository, visible, showSource, onOpen, desktopActions)
+                            }
+                        } }
+                    }
+                } else {
+                    spotlight(Modifier.fillMaxWidth().height(height))
+                    if (previews.isNotEmpty()) Row(Modifier.fillMaxWidth().height(64.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        previews.forEach { entry -> key(entry.id) {
+                            Box(Modifier.weight(1f).fillMaxHeight()) {
+                                DesktopFeaturedPreview(entry, repository, visible, showSource, onOpen, desktopActions)
+                            }
+                        } }
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun DesktopRecommendationPages(count: Int, page: Int, enabled: Boolean, onPage: (Int) -> Unit) {
-    repeat(count) { index ->
-        MotionIconButton(onClick = { onPage(index) }, enabled = enabled, modifier = Modifier.size(44.dp)
-            .semantics {
-                contentDescription = "第${index + 1}组推荐，共${count}组"
-                selected = page == index
-            }) {
-            Box(Modifier.size(width = if (page == index) 16.dp else 4.dp, height = 4.dp)
-                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = if (page == index) .58f else .16f),
-                    RoundedCornerShape(2.dp)))
+private fun DesktopFeaturedSpread(
+    manga: Manga, repository: MangaRepository, enabled: Boolean, showSource: Boolean, short: Boolean,
+    onOpen: (Manga) -> Unit, onRatings: ((Manga) -> Unit)?,
+) {
+    val colors = MaterialTheme.colorScheme
+    val density = LocalDensity.current
+    val scale = density.fontScale.coerceAtLeast(1f)
+    val motion = LocalMotionEnabled.current
+    val contrast = LocalGlassAccessibilitySettings.current.increaseContrast
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val host = LocalMangaCoverTransition.current
+    val interaction = remember(manga.id) { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val focused by interaction.collectIsFocusedAsState()
+    var swatch by remember(manga.coverUrl) { mutableStateOf(FeaturedCoverColors.get(manga.coverUrl)) }
+    val paper = colors.surface
+    val pigment by animateColorAsState(swatch ?: colors.primary,
+        if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap(), label = "featured-paper")
+    val field = lerp(paper, pigment, if (paper.luminance() > .5f) .19f else .24f)
+    val edge = lerp(paper, pigment, if (hovered || focused) .09f else .055f)
+    val placement = "discovery-featured"
+    BoxWithConstraints(Modifier.fillMaxSize().clip(RoundedCornerShape(18.dp))
+        .background(edge).browseIntentWarmup(manga, repository, interaction, enabled)
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button, enabled = enabled,
+            onClickLabel = "查看作品详情") {
+            host?.select?.invoke(MangaCoverKey(manga.id, placement))
+            onOpen(manga)
+        }.motionPress(interaction, enabled = enabled, pressedScale = .993f)) {
+        val artWidth = (maxWidth * if (maxWidth >= 600.dp) .42f else .36f).coerceAtMost(340.dp)
+        val copyWidth = maxWidth - artWidth
+        val tight = copyWidth < 240.dp * scale || short
+        val posterHeight = (maxHeight - if (short) 20.dp else 30.dp).coerceAtLeast(1.dp)
+        val artworkWidth = (artWidth - if (artWidth < 116.dp) 8.dp else 24.dp).coerceAtLeast(1.dp)
+        val decode = with(density) { ((posterHeight.roundToPx().coerceAtLeast(1) + 127) / 128 * 128) }
+        val artwork = rememberFeaturedArtwork(manga, repository, decode, decode, onColor = { swatch = it }, onReady = {})
+        Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(artWidth).fillMaxHeight().background(field), contentAlignment = Alignment.Center) {
+                if (artwork.ready && !contrast) Image(artwork.painter, null,
+                    Modifier.fillMaxSize().graphicsLayer { alpha = .115f }, contentScale = ContentScale.Crop)
+                val gradient = if (rtl) listOf(edge, Color.Transparent) else listOf(Color.Transparent, edge)
+                Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(gradient)))
+                val intrinsic = artwork.painter.intrinsicSize
+                val ratio = if (intrinsic.isSpecified && intrinsic.width.isFinite() && intrinsic.height > 0f)
+                    (intrinsic.width / intrinsic.height).coerceIn(.45f, 1.5f) else 2f / 3f
+                val w = minOf(artworkWidth, posterHeight * ratio)
+                Box(Modifier.size(w, w / ratio).mangaSharedCover(manga.id, placement)
+                    .mangaCoverCard(8.dp, shadowRadius = 10.dp).background(colors.surfaceVariant),
+                    contentAlignment = Alignment.Center) {
+                    if (!artwork.ready) Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(28.dp),
+                        tint = colors.onSurfaceVariant)
+                    Image(artwork.painter, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                }
+            }
+            val inset = if (copyWidth < 180.dp * scale) 8.dp else if (tight) 14.dp else 24.dp
+            Column(Modifier.weight(1f).fillMaxHeight().padding(start = inset, end = inset,
+                top = if (short) 10.dp else 16.dp, bottom = if (short) 8.dp else 14.dp)) {
+                Column(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.Center) {
+                    if (showSource) MangaBrowseSource(manga, foreground = colors.onSurfaceVariant)
+                    val titleSize = if (tight) 21.sp else if (copyWidth >= 400.dp * scale) 32.sp else 27.sp
+                    Text(manga.title, Modifier.widthIn(max = 580.dp),
+                        style = browseTitleStyle(titleSize, (titleSize.value * 1.22f).sp),
+                        color = colors.onSurface, maxLines = if (tight || scale > 1.35f) 2 else 3, overflow = TextOverflow.Ellipsis)
+                    val byline = remember(manga.authors, manga.status) {
+                        (manga.authors.filter(String::isNotBlank).distinct().take(2) +
+                            listOf(manga.status).filter(String::isNotBlank)).joinToString(" · ")
+                    }
+                    if (byline.isNotBlank() && (scale < 1.5f || !tight)) Text(byline, Modifier.padding(top = 5.dp),
+                        color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (!tight && scale < 1.35f && manga.description.isNotBlank()) {
+                        Text(manga.description, Modifier.widthIn(max = 480.dp).padding(top = 8.dp),
+                            style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                Row(Modifier.fillMaxWidth().heightIn(min = if (tight) 26.dp else 34.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("查看详情", style = MaterialTheme.typography.labelLarge, color = colors.onSurface, maxLines = 1)
+                    Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.size(15.dp), tint = colors.onSurface)
+                    if (!showSource && !tight && scale < 1.35f) {
+                        Spacer(Modifier.width(8.dp))
+                        MangaMetricBadges(manga, Modifier.weight(1f), foreground = colors.onSurfaceVariant,
+                            compact = true, maxScores = 1, plain = true,
+                            onExpand = onRatings?.takeIf { enabled }?.let { { it(manga) } })
+                    }
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun DesktopFeaturedPreview(
+    manga: Manga, repository: MangaRepository, enabled: Boolean, showSource: Boolean, onOpen: (Manga) -> Unit,
+    desktopActions: ((Manga) -> List<DesktopMenuAction>)?,
+) {
+    val colors = MaterialTheme.colorScheme
+    val host = LocalMangaCoverTransition.current
+    val interaction = remember(manga.id) { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val focused by interaction.collectIsFocusedAsState()
+    val note = if (showSource) manga.sourceName.ifBlank { dev.mangaflow.data.sourceDisplayName(manga.sourceId) }
+        else manga.authors.firstOrNull { it.isNotBlank() } ?: manga.latestChapter.ifBlank { manga.status }
+    val placement = "discovery-featured-preview"
+    DesktopBrowseActions(desktopActions?.invoke(manga).orEmpty(), enabled) {
+        Row(Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp))
+            .background(if (hovered || focused) colors.onSurface.copy(alpha = .065f) else Color.Transparent)
+            .browseIntentWarmup(manga, repository, interaction, enabled)
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button,
+                onClickLabel = "查看作品详情") {
+                host?.select?.invoke(MangaCoverKey(manga.id, placement))
+                onOpen(manga)
+            }.motionPress(interaction, enabled = enabled, pressedScale = .986f)
+            .padding(start = 5.dp, end = 16.dp, top = 5.dp, bottom = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(11.dp), verticalAlignment = Alignment.CenterVertically) {
+            MangaCover(manga, repository, Modifier.heightIn(max = 86.dp).fillMaxHeight().aspectRatio(.7f)
+                .mangaSharedCover(manga.id, placement).mangaCoverCard(6.dp, shadowRadius = 4.dp), scale = ContentScale.Fit)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(manga.title, color = colors.onSurface, style = browseTitleStyle(15.sp, 20.sp),
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (note.isNotBlank()) Text(note, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+private data class FeaturedArtwork(val painter: Painter, val ready: Boolean)
+
+@Composable
+private fun rememberFeaturedArtwork(
+    manga: Manga, repository: MangaRepository, imageWidthPx: Int, imageHeightPx: Int,
+    onColor: (Color) -> Unit, onReady: () -> Unit,
+): FeaturedArtwork {
+    val context = LocalContext.current
+    val motion = LocalMotionEnabled.current
+    var decoded by remember(manga.coverUrl) { mutableStateOf<Image?>(null) }
+    val latestOnColor by rememberUpdatedState(onColor)
+    val latestOnReady by rememberUpdatedState(onReady)
+    LaunchedEffect(manga.coverUrl, decoded) {
+        decoded?.let { bitmap ->
+            FeaturedCoverColors.get(manga.coverUrl)?.let { latestOnColor(it); return@LaunchedEffect }
+            withContext(Dispatchers.Default) { FeaturedCoverColors.extract(manga.coverUrl, bitmap) }
+                ?.let { latestOnColor(it) }
+        }
+    }
+    val identity = mangaCoverIdentity(manga, repository)
+    val request = remember(context, manga.id, manga.coverUrl, manga.sourceUrl, repository, identity, imageWidthPx, imageHeightPx, motion) {
+        ImageRequest.Builder(imagePlatformContext(context)).data(identity.url)
+            .sourceNetwork(dev.mangaflow.data.SourceKeys.decodeManga(manga.id).sourceId).softwareBitmap()
+            .size(imageWidthPx, imageHeightPx)
+            .memoryCacheKey("featured-cover:" + identity.cacheKey)
+            .placeholderMemoryCacheKey("manga-cover:" + identity.cacheKey)
+            .diskCacheKey(identity.cacheKey)
+            .httpHeaders(NetworkHeaders.Builder().apply {
+                identity.headers.forEach { (name, value) -> set(name, value) }
+            }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()
+    }
+    // The peek and fitted poster share one bounded Coil decode and the original request headers.
+    val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit,
+        onSuccess = { decoded = it.result.image; latestOnReady() })
+    return FeaturedArtwork(painter, decoded != null)
 }
 
 private fun featuredCaptionHeight(cardHeight: Dp, titleLines: Int, fontScale: Float): Dp =
@@ -451,38 +592,14 @@ private fun FeaturedManga(
     onRatings: ((Manga) -> Unit)?,
     showSource: Boolean,
 ) {
-    val context = LocalContext.current
     val motion = LocalMotionEnabled.current
     val pageDirection = if (LocalLayoutDirection.current == LayoutDirection.Rtl) -1f else 1f
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
     val accessibility = LocalGlassAccessibilitySettings.current
     val solidCaption = accessibility.reduceTransparency || accessibility.increaseContrast
-    var decoded by remember(manga.coverUrl) { mutableStateOf<Image?>(null) }
-    val latestOnColor by rememberUpdatedState(onColor)
-    val latestOnReady by rememberUpdatedState(onReady)
-    LaunchedEffect(manga.coverUrl, decoded) {
-        decoded?.let { bitmap ->
-            FeaturedCoverColors.get(manga.coverUrl)?.let { latestOnColor(it); return@LaunchedEffect }
-            withContext(Dispatchers.Default) { FeaturedCoverColors.extract(manga.coverUrl, bitmap) }
-                ?.let { latestOnColor(it) }
-        }
-    }
-    val identity = mangaCoverIdentity(manga, repository)
-    val request = remember(context, manga.id, manga.coverUrl, manga.sourceUrl, repository, identity, imageWidthPx, imageHeightPx, motion) {
-        ImageRequest.Builder(imagePlatformContext(context)).data(identity.url)
-            .sourceNetwork(dev.mangaflow.data.SourceKeys.decodeManga(manga.id).sourceId).softwareBitmap()
-            .size(imageWidthPx, imageHeightPx)
-            .memoryCacheKey("featured-cover:" + identity.cacheKey)
-            .placeholderMemoryCacheKey("manga-cover:" + identity.cacheKey)
-            .diskCacheKey(identity.cacheKey)
-            .httpHeaders(NetworkHeaders.Builder().apply {
-                identity.headers.forEach { (name, value) -> set(name, value) }
-            }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()
-    }
-    // The peek and fitted poster share one bounded Coil decode and the original request headers.
-    val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit,
-        onSuccess = { decoded = it.result.image; latestOnReady() })
+    val artwork = rememberFeaturedArtwork(manga, repository, imageWidthPx, imageHeightPx, onColor, onReady)
+    val painter = artwork.painter
     val currentEmphasis by rememberUpdatedState(emphasis)
     val travelingPoster = remember {
         object : ContentScale {
@@ -578,7 +695,7 @@ private fun FeaturedManga(
                 }
             }.mangaSharedCover(manga.id, "discovery-featured").clip(RoundedCornerShape(16.dp)),
                 contentAlignment = Alignment.Center) {
-                if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
+                if (!artwork.ready) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                     tint = ink.copy(alpha = .22f), modifier = Modifier.size(28.dp))
                 Image(painter, contentDescription = null, modifier = Modifier.matchParentSize(),
                     contentScale = if (motion) travelingPoster else if (settled) ContentScale.Fit else ContentScale.Crop)

@@ -30,6 +30,10 @@ import dev.mangaflow.anime.AnimeEpisode
 import dev.mangaflow.anime.AnimeLibraryEntry
 import dev.mangaflow.anime.AnimeWatchProgress
 import dev.mangaflow.platform.formatInstantMillis
+import dev.mangaflow.ui.DesktopVerticalScrollbar
+import dev.mangaflow.ui.motion.MotionButton
+import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionPress
@@ -126,7 +130,83 @@ internal fun animeContinuationLabel(entry: AnimeLibraryEntry, target: AnimeEpiso
     else -> "继续观看"
 }
 
-/** Uses the ordinary manga chapter-history sheet's local records, row geometry and exit handoff. */
+@Composable
+private fun historyRows(entry: AnimeLibraryEntry, subjectRecords: List<AnimeWatchProgress>) =
+    remember(entry.subject.id, entry.resume, subjectRecords) {
+        (subjectRecords + listOfNotNull(entry.resume?.takeIf {
+            it.belongsToWatchHistory(entry.subject.id)
+        })).sortedWith(compareByDescending<AnimeWatchProgress> { it.updatedAt }.thenBy { it.episodeId })
+            .distinctBy { it.episodeId }
+    }
+
+@Composable
+private fun historyCatalogue(entry: AnimeLibraryEntry) = remember(entry.subject.id, entry.catalogDetail) {
+    buildMap<String, AnimeEpisode> {
+        entry.catalogDetail?.takeIf { it.subject.id == entry.subject.id }?.episodes?.forEach { episode ->
+            if (episode.subjectId == entry.subject.id && episode.id !in this) put(episode.id, episode)
+        }
+    }
+}
+
+@Composable
+internal fun AnimeDesktopLibraryPreview(entry: AnimeLibraryEntry, subjectRecords: List<AnimeWatchProgress>, progress: Map<String, AnimeWatchProgress>,
+    currentDetail: AnimeDetail?, active: Boolean, actionLabel: String?, onPlay: () -> Unit, onOpen: () -> Unit,
+    onEpisode: (AnimeWatchProgress) -> Unit, modifier: Modifier) {
+    val subject = entry.subject
+    val rows = historyRows(entry, subjectRecords)
+    val catalogue = historyCatalogue(entry)
+    val position = rememberLazyListState()
+    val colors = MaterialTheme.colorScheme
+    val facts = listOfNotNull(animeSubjectSummary(subject).takeIf(String::isNotBlank),
+        animeStatusLabel(entry.status).takeIf { entry.followed }, entry.folder.takeIf(String::isNotBlank)).joinToString(" · ")
+    Box(modifier.motionInputGate(active)) {
+        LazyColumn(Modifier.fillMaxSize(), state = position, userScrollEnabled = active,
+            contentPadding = PaddingValues(start = 4.dp, top = 12.dp, end = 12.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            item(key = "work") {
+                Row(Modifier.fillMaxWidth().padding(bottom = 7.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    AnimePoster(subject, Modifier.size(88.dp, 132.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(subject.title, Modifier.semantics { heading() }, style = animeWorkTitleStyle(large = true),
+                            maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        if (subject.originalTitle.isNotBlank() && subject.originalTitle != subject.title)
+                            Text(subject.originalTitle, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        if (facts.isNotBlank()) AnimeQuietLabel(facts)
+                        AnimeSubjectRatings(subject, enabled = active)
+                    }
+                }
+            }
+            item(key = "actions") {
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (actionLabel != null) MotionButton(onClick = onPlay, enabled = active) {
+                        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(17.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(actionLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    MotionTextButton(onClick = onOpen, enabled = active) { Text("详情与选集") }
+                }
+            }
+            if (subject.description.isNotBlank()) item(key = "description") {
+                Text(subject.description.trim(), Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant, maxLines = 4, overflow = TextOverflow.Ellipsis)
+            }
+            if (rows.isNotEmpty()) item(key = "episodes") {
+                Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("逐集观看记录", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+                    AnimeQuietLabel("${rows.size} 集")
+                }
+            }
+            items(rows, key = { "record:" + it.episodeId }) { record ->
+                AnimeEpisodeHistoryRow(entry, record, catalogue[record.episodeId],
+                    animeHistoryPlayback(entry, record, progress, currentDetail), onOpen = { if (active) onEpisode(record) })
+            }
+        }
+        DesktopVerticalScrollbar(position, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+    }
+}
+
 @Composable
 internal fun AnimeEpisodeHistorySheet(
     entry: AnimeLibraryEntry,
@@ -137,19 +217,9 @@ internal fun AnimeEpisodeHistorySheet(
     onContinue: (AnimeWatchProgress) -> Unit,
 ) {
     var selected by remember(entry.subject.id) { mutableStateOf<AnimeWatchProgress?>(null) }
-    val rows = remember(entry.subject.id, entry.resume, progress) {
-        (progress.values.filter { it.subjectId == entry.subject.id } + listOfNotNull(entry.resume?.takeIf {
-            it.belongsToWatchHistory(entry.subject.id)
-        })).sortedWith(compareByDescending<AnimeWatchProgress> { it.updatedAt }.thenBy { it.episodeId })
-            .distinctBy { it.episodeId }
-    }
-    val catalogue = remember(entry.subject.id, entry.catalogDetail) {
-        buildMap<String, AnimeEpisode> {
-            entry.catalogDetail?.takeIf { it.subject.id == entry.subject.id }?.episodes?.forEach { episode ->
-                if (episode.subjectId == entry.subject.id && episode.id !in this) put(episode.id, episode)
-            }
-        }
-    }
+    val subjectRecords = remember(entry.subject.id, progress) { progress.values.filter { it.subjectId == entry.subject.id } }
+    val rows = historyRows(entry, subjectRecords)
+    val catalogue = historyCatalogue(entry)
     val scroll = rememberLazyListState()
     MotionBottomSheet(onDismissRequest = {
         val chosen = selected

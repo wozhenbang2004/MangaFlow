@@ -123,6 +123,8 @@ import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.SkipNext
+import androidx.compose.material.icons.outlined.SkipPrevious
 import androidx.compose.material.icons.outlined.Source
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Undo
@@ -140,6 +142,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Tune
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
@@ -187,7 +190,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
@@ -457,6 +463,7 @@ fun ReaderScreen(
     var targetOffset by remember(chapterId) { mutableIntStateOf(0) }
     var returnLocation by remember(chapterId) { mutableStateOf<ReaderReturnLocation?>(null) }
     var showPageNavigator by remember(chapterId) { mutableStateOf(false) }
+    var pageFocusRequest by remember(chapterId) { mutableIntStateOf(0) }
     var showReaderActions by remember(chapterId) { mutableStateOf(false) }
     var readerActionsPresent by remember(chapterId) { mutableStateOf(false) }
     var sourceChapter by remember(manga.id) { mutableStateOf<Chapter?>(null) }
@@ -503,17 +510,26 @@ fun ReaderScreen(
     var showChapters by rememberSaveable { mutableStateOf(false) }
     var chaptersQuery by rememberSaveable(manga.id) { mutableStateOf("") }
     var handledFindRequest by rememberSaveable(manga.id) { mutableIntStateOf(0) }
-    var focusReadingAfterChapter by remember(manga.id) { mutableStateOf(false) }
+    var focusReadingAfterSelection by remember(manga.id) { mutableStateOf(false) }
     val desktop = platformKind == PlatformKind.DESKTOP
     val readerWindow = LocalMangaWindow.current
     val readerFontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val dockedPanels = desktop && readerWindow.width >= 960.dp * readerFontScale &&
         readerWindow.height >= 480.dp
     val panelWidth = (if (readerWindow.width >= 1280.dp * readerFontScale) 336.dp else 304.dp) * readerFontScale
+    val inspectorOpen = showSettings || showChapters || showPageNavigator
     val panelBlocksReading = !dockedPanels && (showSettings || showChapters)
-    var retainedInspector by remember { mutableIntStateOf(0) }
-    val inspector = if (showSettings) 1 else if (showChapters) 0 else retainedInspector
-    SideEffect { if (showSettings || showChapters) retainedInspector = inspector }
+    val pageNavigatorBlocking = showPageNavigator && !dockedPanels
+    val wideReaderChrome = desktop && readerWindow.width - (if (dockedPanels && inspectorOpen) panelWidth else 0.dp) >=
+        790.dp * readerFontScale
+    var retainedInspector by remember { mutableStateOf(ReaderInspector.CHAPTERS) }
+    val inspector = when {
+        showSettings -> ReaderInspector.SETTINGS
+        showPageNavigator -> ReaderInspector.PAGES
+        showChapters -> ReaderInspector.CHAPTERS
+        else -> retainedInspector
+    }
+    SideEffect { if (inspectorOpen) retainedInspector = inspector }
     val topChromeInteraction = remember { MutableInteractionSource() }
     val bottomChromeInteraction = remember { MutableInteractionSource() }
     val topChromeHovered by topChromeInteraction.collectIsHoveredAsState()
@@ -574,7 +590,7 @@ fun ReaderScreen(
     val compareEnhancement = comparisonTarget?.matches(enhancement, pageIndex,
         enhancementState.assets[pageIndex], enhancementPolicy) == true
     val readerToolsVisible = controlsVisible && !readerStatusInspecting && !readerStatusOpen && !panelBlocksReading &&
-        !showPanelModels && !showEnhancement && !compareEnhancement && !showSpreadAdjustment && !showComments && !showPageNavigator
+        !showPanelModels && !showEnhancement && !compareEnhancement && !showSpreadAdjustment && !showComments && !pageNavigatorBlocking
     val warmSourceStandbys by rememberUpdatedState(onWarmSourceStandbys)
     val prefetchedPageFailed by rememberUpdatedState(onPrefetchPageFailed)
     val cancelSourceStandbys by rememberUpdatedState(onCancelSourceStandbys)
@@ -827,10 +843,10 @@ fun ReaderScreen(
             }
         }
     }
-    val readerDockWidth = 440.dp
+    val readerDockWidth = if (desktop) 986.dp else 440.dp
     val touchExploration = rememberReaderTouchExploration()
     val chapterWaitVisible = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
-        !showComments && !showSpreadAdjustment && !showPageNavigator && !sourcePickerBlocking
+        !showComments && !showSpreadAdjustment && !pageNavigatorBlocking && !sourcePickerBlocking
     LaunchedEffect(chapterLoadAttempt, chapterWaitVisible, loading, error) {
         chapterSlowLoading = false
         if (chapterWaitVisible && loading && error == null && chapterLoadAttempt.acceptsResult) {
@@ -853,7 +869,7 @@ fun ReaderScreen(
 
     val clock = rememberReaderClock(readerToolsVisible && readerForeground && !leavingReader)
     val readingEligible = active && !leavingReader && !loading && error == null && imageVisible &&
-        !panelBlocksReading && !showPanelModels && !showComments && !showSpreadAdjustment && !showPageNavigator &&
+        !panelBlocksReading && !showPanelModels && !showComments && !showSpreadAdjustment && !pageNavigatorBlocking &&
         !showReaderActions && !readerActionsPresent && !sourcePickerBlocking && !readerStatusInspecting &&
         repairState.selection == null
     RecordReaderActivity(manga, readingEligible, libraryStore, chapterId) { owner, confirmedChapter ->
@@ -940,28 +956,76 @@ fun ReaderScreen(
     fun toggleReaderSettings() {
         if (showSettings) closeReaderSettings() else {
             showChapters = false
+            showPageNavigator = false
             showSettings = true
             controlsVisible = true
         }
     }
     fun toggleReaderChapters() {
         if (showSettings) closeReaderSettings()
+        showPageNavigator = false
         showChapters = !showChapters
         controlsVisible = true
         if (!showChapters) keyboardFocusRestore++
     }
+    fun openPageNavigator() {
+        if (pages.isEmpty() || !active || leavingReader) return
+        if (showSettings) closeReaderSettings()
+        showChapters = false
+        showPageNavigator = true
+        pageFocusRequest++
+        controlsVisible = true
+    }
+    fun closePageNavigator() {
+        showPageNavigator = false
+        keyboardFocusRestore++
+    }
     LaunchedEffect(active, desktopFindRequest) {
         if (desktop && active && desktopFindRequest > 0 && desktopFindRequest != handledFindRequest) {
             if (!sourcePickerBlocking && !showComments && !showPanelModels && !showSpreadAdjustment &&
-                !showPageNavigator && repairState.selection == null) {
+                !pageNavigatorBlocking && repairState.selection == null) {
                 if (showSettings) closeReaderSettings()
                 handledFindRequest = desktopFindRequest
-                focusReadingAfterChapter = false
+                showPageNavigator = false
+                focusReadingAfterSelection = false
                 showChapters = true
                 controlsVisible = true
             }
             onDesktopFindHandled(desktopFindRequest)
         }
+    }
+    val pagePanel: @Composable (Boolean) -> Unit = { embedded ->
+        ReaderPageNavigatorDialog(
+            visible = showPageNavigator, embedded = embedded, focusRequest = pageFocusRequest,
+            pages = pages,
+            headers = headers,
+            sourceId = chapter.sourceId,
+            resolvePage = resolvePage,
+            currentPage = pageIndex,
+            pageInformation = {
+                ReaderPageResolutionInfo(pages, headers, chapter.sourceId, pageIndex,
+                    showSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage && preferences.mode != ReadingMode.VERTICAL,
+                    enhancementEnabled = enhancementPolicy.tier != QualityTier.ORIGINAL, enhancement = enhancementState,
+                    replacements = repairState.replacements, enhancementSources = enhancementSources)
+            },
+            collectedPages = remember(pageCollections, manga.id, chapterId) {
+                pageCollections.filter { it.manga.id == manga.id && it.chapter.id == chapterId && !it.spread }
+                    .map(PageCollection::firstPage).toSet()
+            },
+            onToggleCollection = { togglePicture(it) },
+            backdrop = readerBackdrop,
+            onSelect = { destination ->
+                if (destination != pageIndex) {
+                    returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
+                    targetOffset = 0
+                    targetPage = destination
+                }
+                if (!embedded) showPageNavigator = false
+                focusReadingAfterSelection = embedded
+                keyboardFocusRestore++
+            },
+            onDismiss = ::closePageNavigator,
+        )
     }
     val settingsPanel: @Composable (Boolean) -> Unit = { embedded ->
         ReaderSettingsDialog(
@@ -986,7 +1050,7 @@ fun ReaderScreen(
                 onCancelSourceSelection()
                 if (it != chapterId) { chapterChangeRequested = true; chapterId = it }
                 if (!dockedPanels) showChapters = false
-                focusReadingAfterChapter = dockedPanels
+                focusReadingAfterSelection = dockedPanels
                 controlsVisible = true
                 keyboardFocusRestore++
             },
@@ -1125,7 +1189,7 @@ fun ReaderScreen(
         }
     }
     LaunchedEffect(atChapterEnd, touchExploration, chromeEngaged) {
-        if (atChapterEnd && !touchExploration && !chromeEngaged && !readerStatusInspecting) controlsVisible = false
+        if (atChapterEnd && !(desktop && inspectorOpen) && !touchExploration && !chromeEngaged && !readerStatusInspecting) controlsVisible = false
     }
 
     val keyboard = LocalReaderKeyboard.current
@@ -1135,7 +1199,7 @@ fun ReaderScreen(
     var keyboardRequest by remember(sourceIdentity) { mutableStateOf<ReaderKeyboardRequest?>(null) }
     val desktopCanvasReady = desktop && readerForeground && !leavingReader && !panelBlocksReading &&
         !showPanelModels && !showEnhancement && !compareEnhancement && !showComments && !showSpreadAdjustment &&
-        !showPageNavigator && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking &&
+        !pageNavigatorBlocking && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking &&
         !readerStatusOpen && !readerStatusInspecting && !progressInteracting && repairState.selection == null
     // Focusing the canvas and revealing its tools need no decoded image. A new page turn
     // still requires the existing reading proof; a turn in flight can expose a placeholder.
@@ -1145,17 +1209,17 @@ fun ReaderScreen(
     LaunchedEffect(keyboardTurnOwned) {
         if (!keyboardTurnOwned) keyboardRequest = null
     }
-    LaunchedEffect(keyboardReady, keyboardFocusRestore, readerStatusInspecting, showSettings, showChapters) {
+    LaunchedEffect(keyboardReady, keyboardFocusRestore, readerStatusInspecting, inspector) {
         // Let closing chrome settle first. An open inspector keeps its own focused editor.
         if (restoreStatusFocus && readerToolsVisible && readerForeground && !leavingReader &&
             statusPlacement != ReaderStatusPlacement.HIDDEN) {
             withFrameNanos { }
             statusControlFocus.requestFocus()
             restoreStatusFocus = false
-        } else if (keyboardReady && !showSettings && (!showChapters || focusReadingAfterChapter)) {
+        } else if (keyboardReady && (!inspectorOpen || focusReadingAfterSelection)) {
             withFrameNanos { }
             keyboardFocus.requestFocus()
-            focusReadingAfterChapter = false
+            focusReadingAfterSelection = false
         }
     }
     val keyboardModifier = if (keyboard == null) Modifier else Modifier
@@ -1167,7 +1231,10 @@ fun ReaderScreen(
             if (!keyboardReady || !keyboardFocused || event.type != KeyEventType.KeyDown) false
             else keyboard.actionFor(event, preferences.mode != ReadingMode.VERTICAL &&
                 preferences.swipeRightForNext(desktop = true))?.let { action ->
-                if (action == ReaderKeyboardAction.TOGGLE_CONTROLS) {
+                if (action == ReaderKeyboardAction.PAGE_NAVIGATOR && pages.isNotEmpty() && !chapterChangeRequested) {
+                    openPageNavigator()
+                    true
+                } else if (action == ReaderKeyboardAction.TOGGLE_CONTROLS) {
                     controlsVisible = !controlsVisible
                     true
                 } else if (keyboardTurnOwned && readingEligible) {
@@ -1176,7 +1243,7 @@ fun ReaderScreen(
                 } else false
             } ?: false
         }.focusable(enabled = keyboardReady)
-    val desktopMouseRevealAllowed = desktopCanvasReady && !showSettings && !showChapters && !touchExploration
+    val desktopMouseRevealAllowed = desktopCanvasReady && !inspectorOpen && !touchExploration
     val revealDesktopTools by rememberUpdatedState<() -> Unit> {
         if (desktopMouseRevealAllowed && !controlsVisible) controlsVisible = true
     }
@@ -1197,14 +1264,36 @@ fun ReaderScreen(
             if (waiting) rescuePages[index] = true else rescuePages.remove(index)
         }) {
     ReaderWorkspace(
-        panelVisible = dockedPanels && (showSettings || showChapters),
+        panelVisible = dockedPanels && inspectorOpen,
         panelWidth = panelWidth,
         panel = {
-            MotionTabContent(selected = inspector, modifier = Modifier.fillMaxSize(), soft = true) { target ->
-                if (target == 1) settingsPanel(true) else chaptersPanel(true)
+            Column(Modifier.fillMaxSize()) {
+                ReaderSurface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) {
+                    val destinations = if (pages.isNotEmpty() || showPageNavigator) ReaderInspector.entries
+                        else listOf(ReaderInspector.CHAPTERS, ReaderInspector.SETTINGS)
+                    MotionTabs(destinations.indexOf(inspector).coerceAtLeast(0), destinations.map { it.label }, onSelect = { index ->
+                        val target = destinations[index]
+                        if (target != inspector) when (target) {
+                            ReaderInspector.CHAPTERS -> toggleReaderChapters()
+                            ReaderInspector.PAGES -> openPageNavigator()
+                            ReaderInspector.SETTINGS -> toggleReaderSettings()
+                        }
+                    }, modifier = Modifier.fillMaxWidth().padding(3.dp), controlHeight = 38.dp,
+                        tooltips = destinations.map { it.description })
+                }
+                Spacer(Modifier.height(6.dp))
+                MotionTabContent(selected = inspector, modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentKey = { it }, order = { it.ordinal }, soft = true) { target ->
+                    when (target) {
+                        ReaderInspector.CHAPTERS -> chaptersPanel(true)
+                        ReaderInspector.PAGES -> pagePanel(true)
+                        ReaderInspector.SETTINGS -> settingsPanel(true)
+                    }
+                }
             }
-            BackHandler(active && (showSettings || showChapters)) {
+            BackHandler(active && inspectorOpen) {
                 if (showSettings) closeReaderSettings()
+                else if (showPageNavigator) closePageNavigator()
                 else { showChapters = false; keyboardFocusRestore++ }
             }
         },
@@ -1296,7 +1385,7 @@ fun ReaderScreen(
                         onTap = { controlsVisible = !controlsVisible }, onNext = openNextChapter,
                         onDisable = { updatePreferences(preferences.copy(panelEngine = PanelEngine.OFF)) },
                         active = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
-                            !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking &&
+                            !showSpreadAdjustment && !showComments && !pageNavigatorBlocking && !sourcePickerBlocking &&
                             repairState.selection == null && !chapterChangeRequested,
                         backdrop = readerBackdrop, artworkModifier = artworkModifier,
                         bottomClearancePx = if (controlsVisible) bottomControlsHeightPx else 0,
@@ -1490,7 +1579,7 @@ fun ReaderScreen(
 
         if (commentsAvailable && !hideAmbientChrome && active && !leavingReader && atChapterEnd && !loading && error == null &&
             !showComments && !showSettings && !showChapters && !showSpreadAdjustment &&
-            !showReaderActions && !readerActionsPresent && !showPageNavigator && !sourcePickerBlocking &&
+            !showReaderActions && !readerActionsPresent && !pageNavigatorBlocking && !sourcePickerBlocking &&
             !readerStatusInspecting && !progressInteracting) {
             val bottom = if (controlsVisible) with(LocalDensity.current) {
                 (bottomControlsHeightPx - dev.mangaflow.reader.readerNavigationInsets().getBottom(this)).coerceAtLeast(0).toDp()
@@ -1507,7 +1596,7 @@ fun ReaderScreen(
         }
 
         val statusAvailable = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
-            !showEnhancement && !compareEnhancement && !showSpreadAdjustment && !showComments && !showPageNavigator &&
+            !showEnhancement && !compareEnhancement && !showSpreadAdjustment && !showComments && !pageNavigatorBlocking &&
             !sourcePickerBlocking && !chapterChangeRequested && !showReaderActions && !readerActionsPresent &&
             repairState.selection == null
         val statusButton: @Composable () -> Unit = {
@@ -1552,7 +1641,7 @@ fun ReaderScreen(
                             color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 16.sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    if (preferences.panelEngine == PanelEngine.OFF &&
+                    if ((!desktop || wideReaderChrome) && preferences.panelEngine == PanelEngine.OFF &&
                         (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT)) {
                         TextButton(enabled = readerToolsVisible, onClick = {
                             cursor.scrollOffset = 0
@@ -1569,7 +1658,20 @@ fun ReaderScreen(
                             onClick = { openPageRepair(pageIndex) })
                     }
                     if (statusPlacement == ReaderStatusPlacement.TOP) statusButton()
-                    if (desktop) ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook,
+                    if (wideReaderChrome) {
+                        TextButton(onClick = ::toggleReaderChapters, enabled = readerToolsVisible,
+                            contentPadding = PaddingValues(horizontal = 9.dp)) {
+                            Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("目录", color = colors.onSurface, style = MaterialTheme.typography.labelMedium)
+                        }
+                        TextButton(onClick = ::openPageNavigator, enabled = readerToolsVisible && pages.isNotEmpty(),
+                            contentPadding = PaddingValues(horizontal = 9.dp)) {
+                            Icon(Icons.Outlined.MyLocation, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("定位书页", color = colors.onSurface, style = MaterialTheme.typography.labelMedium)
+                        }
+                    } else if (desktop) ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook,
                         if (showChapters) "收起章节目录" else "章节目录", interactive = readerToolsVisible,
                         emphasis = if (showChapters) 1f else .82f, onClick = ::toggleReaderChapters)
                     ReaderIcon(Icons.Rounded.AutoAwesome, "画质与性能", interactive = readerToolsVisible,
@@ -1605,7 +1707,7 @@ fun ReaderScreen(
                     modifier = Modifier.fillMaxWidth(),
                     cornerRadius = 28.dp,
                 ) {
-                    Column(Modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 10.dp, vertical = 4.dp)) {
+                    ReaderDockGroups(desktop, progress = {
                         if (pages.isNotEmpty()) key(chapterId) {
                             ReaderProgressSlider(
                                 pageIndex = pageIndex, pages = pages, pendingPage = targetPage,
@@ -1619,10 +1721,18 @@ fun ReaderScreen(
                                         targetPage = destination
                                     }
                                 },
-                                onOpenNavigator = { showPageNavigator = true },
+                                onOpenNavigator = ::openPageNavigator,
                                 onInteractionChanged = { progressInteracting = it; if (!it) keyboardFocusRestore++ },
                                 statusContent = if (statusPlacement == ReaderStatusPlacement.BOTTOM) statusButton else null,
                                 sourceContent = {
+                                    if (wideReaderChrome && preferences.panelEngine == PanelEngine.OFF) {
+                                        val mayTurn = readerToolsVisible && keyboardTurnOwned && readingEligible
+                                        ReaderPageStepButtons(
+                                            forwardOnLeft = preferences.mode != ReadingMode.VERTICAL && preferences.swipeRightForNext(desktop = true),
+                                            previousEnabled = mayTurn && (currentSpread?.first ?: pageIndex) > 0,
+                                            nextEnabled = mayTurn && (currentSpread?.last ?: pageIndex) < pages.lastIndex,
+                                        ) { action -> keyboardRequest = ReaderKeyboardRequest(++keyboardSerial, action) }
+                                    }
                                     if (canChooseSource || sourceLoading) Box(
                                         Modifier.width(44.dp).heightIn(min = 44.dp)
                                             .onGloballyPositioned { coordinates ->
@@ -1648,6 +1758,7 @@ fun ReaderScreen(
                         if (pages.isEmpty() && statusPlacement == ReaderStatusPlacement.BOTTOM) {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { statusButton() }
                         }
+                    }, actions = {
                         BoxWithConstraints(Modifier.fillMaxWidth()) {
                             val canCorrectSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage &&
                                 preferences.mode in setOf(ReadingMode.RIGHT_TO_LEFT, ReadingMode.LEFT_TO_RIGHT)
@@ -1731,14 +1842,14 @@ fun ReaderScreen(
                             }
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 if (inlineChapterNavigation) ReaderIcon(
-                                    Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章",
+                                    if (desktop) Icons.Outlined.SkipPrevious else Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章",
                                     enabled = chapterIndex > 0, interactive = readerToolsVisible,
                                     buttonSize = 44.dp, onClick = openPrevious)
                                 if (inlineCatalog) ReaderIcon(
                                     Icons.AutoMirrored.Outlined.MenuBook, "章节目录", interactive = readerToolsVisible,
                                     buttonSize = 44.dp, onClick = ::toggleReaderChapters)
                                 if (inlineChapterNavigation) ReaderIcon(
-                                    Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
+                                    if (desktop) Icons.Outlined.SkipNext else Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
                                     enabled = openNextChapter != null && !chapterChangeRequested,
                                     interactive = readerToolsVisible, buttonSize = 44.dp,
                                     onClick = { openNextChapter?.invoke() })
@@ -1824,7 +1935,7 @@ fun ReaderScreen(
                                 )
                             }
                         }
-                    }
+                    })
                 }
             }
         }
@@ -1906,33 +2017,7 @@ fun ReaderScreen(
     }
     }
     }
-    ReaderPageNavigatorDialog(
-        visible = showPageNavigator,
-        pages = pages,
-        headers = headers,
-        sourceId = chapter.sourceId,
-        resolvePage = resolvePage,
-        currentPage = pageIndex,
-        pageInformation = {
-            ReaderPageResolutionInfo(pages, headers, chapter.sourceId, pageIndex,
-                showSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage && preferences.mode != ReadingMode.VERTICAL,
-                enhancementEnabled = enhancementPolicy.tier != QualityTier.ORIGINAL, enhancement = enhancementState,
-                replacements = repairState.replacements, enhancementSources = enhancementSources)
-        },
-        collectedPages = pageCollections.filter { it.manga.id == manga.id && it.chapter.id == chapterId && !it.spread }
-            .map(PageCollection::firstPage).toSet(),
-        onToggleCollection = { togglePicture(it) },
-        backdrop = readerBackdrop,
-        onSelect = { destination ->
-            if (destination != pageIndex) {
-                returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
-                targetOffset = 0
-                targetPage = destination
-            }
-            showPageNavigator = false
-        },
-        onDismiss = { showPageNavigator = false },
-    )
+    if (!dockedPanels) pagePanel(false)
     if (!dockedPanels) settingsPanel(false)
     EnhancementCenterPanel(
         visible = showEnhancement, backdrop = readerBackdrop, initialContent = enhancementContent,
@@ -2324,7 +2409,7 @@ private fun ChapterPages(
                             if (keyboardMotion) list.animateScrollBy(step) else list.scrollBy(step)
                         } else if (forward) onNext?.invoke() else onPrevious?.invoke()
                     }
-                    ReaderKeyboardAction.TOGGLE_CONTROLS -> Unit
+                    ReaderKeyboardAction.TOGGLE_CONTROLS, ReaderKeyboardAction.PAGE_NAVIGATOR -> Unit
                 }
             } finally { onKeyboardConsumed(request.serial) }
         }
@@ -2437,7 +2522,7 @@ private fun ChapterPages(
                     ReaderKeyboardAction.LAST_PAGE -> groups.lastIndex
                     ReaderKeyboardAction.PREVIOUS_PAGE, ReaderKeyboardAction.SCROLL_UP -> pager.currentPage - 1
                     ReaderKeyboardAction.NEXT_PAGE, ReaderKeyboardAction.SCROLL_DOWN -> pager.currentPage + 1
-                    ReaderKeyboardAction.TOGGLE_CONTROLS -> pager.currentPage
+                    ReaderKeyboardAction.TOGGLE_CONTROLS, ReaderKeyboardAction.PAGE_NAVIGATOR -> pager.currentPage
                 }
                 when {
                     destination < 0 -> onPrevious?.invoke()
@@ -4458,11 +4543,30 @@ private fun ReaderPageImage(
     }
 }
 
+private enum class ReaderInspector(val label: String, val description: String) {
+    CHAPTERS("章节", "章节目录"), PAGES("书页", "定位书页"), SETTINGS("设置", "阅读设置"),
+}
+
+@Composable
+private fun ReaderPageStepButtons(forwardOnLeft: Boolean, previousEnabled: Boolean, nextEnabled: Boolean,
+    onTurn: (ReaderKeyboardAction) -> Unit) {
+    val step: @Composable (Boolean, ImageVector) -> Unit = { forward, icon ->
+        ReaderIcon(icon, if (forward) "下一页" else "上一页", enabled = if (forward) nextEnabled else previousEnabled,
+            buttonSize = 36.dp) { onTurn(if (forward) ReaderKeyboardAction.NEXT_PAGE else ReaderKeyboardAction.PREVIOUS_PAGE) }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        step(forwardOnLeft, Icons.AutoMirrored.Rounded.KeyboardArrowLeft)
+        step(!forwardOnLeft, Icons.AutoMirrored.Rounded.KeyboardArrowRight)
+    }
+}
+
 private data class ReaderReturnLocation(val pageIndex: Int, val scrollOffset: Int)
 
 @Composable
 private fun ReaderPageNavigatorDialog(
     visible: Boolean,
+    embedded: Boolean,
+    focusRequest: Int,
     pages: List<Page>,
     headers: Map<String, String>,
     sourceId: String,
@@ -4476,73 +4580,125 @@ private fun ReaderPageNavigatorDialog(
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
-    MotionDialog(
-        visible = visible,
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val panel: @Composable () -> Unit = {
         ReaderDialogSurface(
-            Modifier.padding(horizontal = 16.dp).widthIn(max = 560.dp).fillMaxWidth()
+            if (embedded) Modifier.fillMaxSize().motionInputGate(visible)
+            else Modifier.padding(horizontal = 16.dp).widthIn(max = 560.dp).fillMaxWidth()
                 .heightIn(max = LocalMangaWindow.current.panelHeight),
-            backdrop,
+            backdrop, dialogWindow = !embedded,
         ) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
-                ReaderPanelHeading("页导航", "关闭页导航", onDismiss)
+                ReaderPanelHeading(if (desktop) "书页" else "页导航", "关闭页导航", onDismiss)
+                val grid = rememberLazyGridState(initialFirstVisibleItemIndex =
+                    if (desktop && pages.isNotEmpty()) currentPage.coerceIn(pages.indices) else 0)
+                if (desktop && pages.isNotEmpty()) {
+                    var input by remember(pages, visible) { mutableStateOf("") }
+                    val destination = input.toIntOrNull()?.takeIf { it in 1..pages.size }?.minus(1)
+                    val numberFocus = remember { FocusRequester() }
+                    val navigationScope = rememberCoroutineScope()
+                    LaunchedEffect(visible, focusRequest) {
+                        if (visible) {
+                            withFrameNanos { }
+                            numberFocus.requestFocus()
+                        }
+                    }
+                    val go: () -> Unit = {
+                        if (visible && destination != null) {
+                            onSelect(destination)
+                            if (embedded) navigationScope.launch { grid.scrollToItem(destination) }
+                            input = ""
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedTextField(value = input, onValueChange = { value ->
+                            if (value.length <= pages.size.toString().length && value.all { it in '0'..'9' }) input = value
+                        }, modifier = Modifier.weight(1f).focusRequester(numberFocus).onPreviewKeyEvent { event ->
+                            if (event.key == Key.Enter || event.key == Key.NumPadEnter) {
+                                if (event.type == KeyEventType.KeyDown) go()
+                                true
+                            } else false
+                        }, singleLine = true, label = { Text("跳到页码") },
+                            placeholder = { Text("${currentPage + 1} / ${pages.size}") },
+                            textStyle = MaterialTheme.typography.bodyMedium, shape = RoundedCornerShape(12.dp))
+                        TextButton(onClick = go, enabled = visible && destination != null) { Text("前往") }
+                        ReaderIcon(Icons.Outlined.MyLocation, "在缩略图中定位当前页", enabled = visible,
+                            buttonSize = 38.dp) { navigationScope.launch { grid.scrollToItem(currentPage.coerceIn(pages.indices)) } }
+                    }
+                }
                 pageInformation()
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(76.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
-                    modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
-                    contentPadding = PaddingValues(bottom = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(9.dp),
-                    verticalArrangement = Arrangement.spacedBy(13.dp),
-                ) {
-                    items(pages, key = { it.index }) { page ->
-                        val selected = page.index == currentPage
-                        var preview by remember(page) { mutableStateOf<Page?>(null) }
-                        LaunchedEffect(page, visible, resolvePage) {
-                            if (!visible) return@LaunchedEffect
-                            try { preview = resolvePage(page, null) }
-                            catch (cancel: CancellationException) { throw cancel }
-                            catch (_: Exception) { preview = null }
-                        }
-                        val request = remember(preview, headers, sourceId) {
-                            preview?.let { readerImageRequest(context, it, headers, sourceId).crossfade(0).build() }
-                        }
-                        val colors = MaterialTheme.colorScheme
-                        Column(Modifier.clip(RoundedCornerShape(8.dp))
-                            .selectable(selected, role = Role.RadioButton, onClick = { onSelect(page.index) })) {
-                            Box(Modifier.fillMaxWidth().aspectRatio(.7f)
-                                .clip(RoundedCornerShape(8.dp)).background(colors.surfaceVariant)) {
-                                AsyncImage(
-                                    model = request,
-                                    contentDescription = "第 ${page.index + 1} 页",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                                MotionIconButton(onClick = { onToggleCollection(page.index) },
-                                    modifier = Modifier.align(Alignment.TopEnd).size(44.dp)) {
-                                    Box(Modifier.size(25.dp).background(colors.surface, CircleShape),
-                                        contentAlignment = Alignment.Center) {
-                                        Icon(if (page.index in collectedPages) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                            if (page.index in collectedPages) "取消这一页的收藏" else "单独收藏这一页",
-                                            Modifier.size(14.dp), tint = colors.onSurface)
+                Box(Modifier.fillMaxWidth().weight(1f, fill = embedded)) {
+                    LazyVerticalGrid(
+                        state = grid,
+                        columns = GridCells.Adaptive(76.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(end = if (desktop) 8.dp else 0.dp, bottom = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(9.dp),
+                        verticalArrangement = Arrangement.spacedBy(13.dp),
+                    ) {
+                        items(pages, key = { it.index }) { page ->
+                            val selected = page.index == currentPage
+                            var preview by remember(page) { mutableStateOf<Page?>(null) }
+                            LaunchedEffect(page, visible, resolvePage) {
+                                if (!visible) return@LaunchedEffect
+                                try { preview = resolvePage(page, null) }
+                                catch (cancel: CancellationException) { throw cancel }
+                                catch (_: Exception) { preview = null }
+                            }
+                            val request = remember(preview, headers, sourceId) {
+                                preview?.let { readerImageRequest(context, it, headers, sourceId).crossfade(0).build() }
+                            }
+                            val colors = MaterialTheme.colorScheme
+                            val pointer = if (desktop) remember(page) { MutableInteractionSource() } else null
+                            val hovered = pointer?.collectIsHoveredAsState()?.value == true
+                            var focused by remember(page) { mutableStateOf(false) }
+                            val cell = if (pointer != null) Modifier.hoverable(pointer)
+                                .onFocusChanged { focused = it.hasFocus }.focusGroup() else Modifier
+                            Column(cell.clip(RoundedCornerShape(8.dp))
+                                .then(if (desktop && selected) Modifier.background(colors.primary.copy(alpha = .10f)) else Modifier)
+                                .selectable(selected, enabled = visible, role = Role.RadioButton, onClick = { onSelect(page.index) })
+                                .then(if (desktop) Modifier.padding(3.dp) else Modifier)) {
+                                Box(Modifier.fillMaxWidth().aspectRatio(.7f)
+                                    .clip(RoundedCornerShape(8.dp)).background(colors.surfaceVariant)) {
+                                    AsyncImage(
+                                        model = request,
+                                        contentDescription = "第 ${page.index + 1} 页",
+                                        contentScale = if (desktop) ContentScale.Fit else ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                    if (!desktop || selected || hovered || focused || page.index in collectedPages) {
+                                        MotionIconButton(onClick = { onToggleCollection(page.index) }, enabled = visible,
+                                            modifier = Modifier.align(Alignment.TopEnd).size(44.dp)) {
+                                            Box(Modifier.size(25.dp).background(colors.surface, CircleShape),
+                                                contentAlignment = Alignment.Center) {
+                                                Icon(if (page.index in collectedPages) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                                    if (page.index in collectedPages) "取消这一页的收藏" else "单独收藏这一页",
+                                                    Modifier.size(14.dp), tint = colors.onSurface)
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                            Row(Modifier.padding(start = 2.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                if (selected) Spacer(Modifier.size(12.dp, 3.dp).background(colors.primary, CircleShape))
-                                Text("${page.index + 1}", fontFamily = mangaFontFamily(MangaFontScene.NUMBERS),
-                                    fontSize = 13.sp, lineHeight = 17.sp,
-                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                    color = if (selected) colors.onSurface else colors.onSurfaceVariant)
+                                Row(Modifier.padding(start = 2.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    if (selected) Spacer(Modifier.size(12.dp, 3.dp).background(colors.primary, CircleShape))
+                                    Text("${page.index + 1}", fontFamily = mangaFontFamily(MangaFontScene.NUMBERS),
+                                        fontSize = 13.sp, lineHeight = 17.sp,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (selected) colors.onSurface else colors.onSurfaceVariant)
+                                }
                             }
                         }
+                    }
+                    if (desktop) Box(Modifier.matchParentSize()) {
+                        DesktopVerticalScrollbar(grid, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                     }
                 }
             }
         }
     }
+    if (embedded) panel() else MotionDialog(visible = visible, onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)) { panel() }
 }
 
 @Composable

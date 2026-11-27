@@ -5,6 +5,7 @@ import dev.mangaflow.ui.platform.*
 import dev.mangaflow.platform.*
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -65,7 +66,8 @@ internal fun AuthorWorksSheet(
         if (nearEnd && state.hasMore && !state.loading && !state.loadingMore && state.error == null) onMore()
     }
     val colors = MaterialTheme.colorScheme
-    MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background) { dismiss ->
+    MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background, desktopWidth = 980.dp) { dismiss ->
+        val desktop = platformKind == PlatformKind.DESKTOP
         Column(Modifier.fillMaxWidth().fillMaxHeight(.9f).navigationBarsPadding()) {
             Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(start = 20.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
@@ -76,28 +78,31 @@ internal fun AuthorWorksSheet(
                 }
                 MotionIconButton(onClick = dismiss) { Icon(Icons.Outlined.Close, "关闭作者作品", Modifier.size(20.dp)) }
             }
-            LazyVerticalGrid(columns = GridCells.Adaptive(88.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
-                state = grid, modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 24.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-                items(state.items, key = Manga::id) { manga -> CoverTile(manga, repository, dense = true) { onOpen(manga) } }
-                item(key = "author-footer", span = { GridItemSpan(maxLineSpan) }) {
-                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                        when {
-                            state.loading || state.loadingMore -> CircularProgressIndicator(Modifier.padding(20.dp).size(20.dp), strokeWidth = 1.5.dp)
-                            state.error != null -> {
-                                Text(state.error, color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp,
-                                    modifier = Modifier.padding(vertical = 12.dp))
-                                TextButton(onClick = onRetry) { Text("重试") }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyVerticalGrid(columns = GridCells.Adaptive((if (desktop) 144.dp else 88.dp) * LocalDensity.current.fontScale.coerceAtLeast(1f)),
+                    state = grid, modifier = Modifier.fillMaxWidth().fillMaxHeight(),
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    items(state.items, key = Manga::id) { manga -> CoverTile(manga, repository, dense = !desktop) { onOpen(manga) } }
+                    item(key = "author-footer", span = { GridItemSpan(maxLineSpan) }) {
+                        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                            when {
+                                state.loading || state.loadingMore -> CircularProgressIndicator(Modifier.padding(20.dp).size(20.dp), strokeWidth = 1.5.dp)
+                                state.error != null -> {
+                                    Text(state.error, color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp,
+                                        modifier = Modifier.padding(vertical = 12.dp))
+                                    TextButton(onClick = onRetry) { Text("重试") }
+                                }
+                                state.items.isEmpty() -> Text("暂无这位作者的漫画", color = colors.onSurfaceVariant,
+                                    fontSize = 13.sp, modifier = Modifier.padding(vertical = 28.dp))
                             }
-                            state.items.isEmpty() -> Text("暂无这位作者的漫画", color = colors.onSurfaceVariant,
-                                fontSize = 13.sp, modifier = Modifier.padding(vertical = 28.dp))
-                        }
-                        if (state.hasMore && !state.loading && !state.loadingMore && state.error == null) {
-                            TextButton(onClick = onMore) { Text("加载更多") }
+                            if (state.hasMore && !state.loading && !state.loadingMore && state.error == null) {
+                                TextButton(onClick = onMore) { Text("加载更多") }
+                            }
                         }
                     }
                 }
+                if (desktop) DesktopVerticalScrollbar(grid, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
             }
         }
     }

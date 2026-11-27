@@ -7,9 +7,11 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +24,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
@@ -31,6 +35,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -39,10 +47,51 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.mangaflow.ui.mangaMetricValueStyle
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlinx.coroutines.delay
+
+/** The pointer inspects a time without issuing a seek or registering an extra video observation. */
+@Composable
+internal fun AnimeTimelineSlot(desktop: Boolean, duration: Long, modifier: Modifier, content: @Composable (Modifier) -> Unit) {
+    if (!desktop) {
+        content(modifier)
+        return
+    }
+    val pointer = remember(duration) { mutableStateOf<Float?>(null) }
+    Box(modifier.pointerInput(pointer) {
+        val inset = 14.dp.toPx()
+        try {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Final)
+                    val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse }
+                    pointer.value = if (mouse != null && !mouse.pressed && !mouse.previousPressed &&
+                        (event.type == PointerEventType.Move || event.type == PointerEventType.Enter)) {
+                        ((mouse.position.x - inset) / (size.width - 2f * inset).coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    } else null
+                }
+            }
+        } finally { pointer.value = null }
+    }) {
+        content(Modifier.fillMaxWidth())
+        AnimeTimelineHoverTime(pointer, duration)
+    }
+}
+
+@Composable
+private fun BoxScope.AnimeTimelineHoverTime(pointer: State<Float?>, duration: Long) {
+    val physical = pointer.value ?: return
+    val logical = if (LocalLayoutDirection.current == LayoutDirection.Rtl) 1f - physical else physical
+    val colors = MaterialTheme.colorScheme
+    Text(animeTime((logical.toDouble() * duration).toLong()),
+        Modifier.align(BiasAlignment(2f * logical - 1f, -1f)).clearAndSetSemantics { }
+            .background(colors.inverseSurface.copy(alpha = .94f), RoundedCornerShape(5.dp))
+            .padding(horizontal = 5.dp), color = colors.inverseOnSurface, maxLines = 1,
+        style = mangaMetricValueStyle(11.sp, 15.sp))
+}
 
 /** The two halves of the play triangle separate into the pause bars around the same centre. */
 @Composable

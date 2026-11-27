@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.widthIn
 import dev.mangaflow.ui.MangaWindowSize
 import dev.mangaflow.ui.MangaLayout
 import dev.mangaflow.ui.LocalMangaWindow
+import dev.mangaflow.ui.DesktopTooltipSession
+import dev.mangaflow.ui.LocalDesktopTooltipSession
 import dev.mangaflow.ui.mangaOverlayScrim
 import dev.mangaflow.platform.monotonicTimeMillis
 
@@ -89,6 +91,8 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
@@ -118,7 +122,9 @@ internal val LocalTabVisibilityScope = staticCompositionLocalOf<AnimatedVisibili
 @Composable
 fun MangaMotionProvider(content: @Composable () -> Unit) {
     val preferences = rememberPlatformAccessibilityPreferences()
+    val tooltips = if (platformKind == PlatformKind.DESKTOP) remember { DesktopTooltipSession() } else null
     CompositionLocalProvider(
+        LocalDesktopTooltipSession provides tooltips,
         LocalMotionEnabled provides preferences.motionEnabled,
         LocalTouchExplorationEnabled provides preferences.touchExploration,
         LocalPlatformAccessibilityPreferences provides preferences,
@@ -146,7 +152,9 @@ internal fun Modifier.motionPress(
     interaction: MutableInteractionSource,
     enabled: Boolean = true,
     pressedScale: Float = MangaMotion.SurfacePressScale,
-): Modifier = motionPressFeedback(interaction, enabled, pressedScale, icon = false, desktopIcon = null)
+    showKeyboardFocus: Boolean = true,
+): Modifier = motionPressFeedback(interaction, enabled, pressedScale, icon = false, desktopIcon = null,
+    showKeyboardFocus = showKeyboardFocus)
 
 /** Mouse-origin focus affects drawing only. Real focus and the click action stay with Foundation. */
 private class DesktopIconFocus {
@@ -176,13 +184,16 @@ private fun Modifier.motionPressFeedback(
     pressedScale: Float,
     icon: Boolean,
     desktopIcon: DesktopIconFocus?,
+    showKeyboardFocus: Boolean = true,
 ): Modifier {
     val interactionPressed by interaction.collectIsPressedAsState()
     val desktop = platformKind == PlatformKind.DESKTOP
+    val accessibility = if (desktop) LocalPlatformAccessibilityPreferences.current else null
     val hovered = if (desktop) interaction.collectIsHoveredAsState().value else false
-    val focused = if (desktop) interaction.collectIsFocusedAsState().value && LocalWindowInfo.current.isWindowFocused else false
+    val focused = if (desktop) interaction.collectIsFocusedAsState().value && LocalWindowInfo.current.isWindowFocused &&
+        (showKeyboardFocus || accessibility?.increaseContrast == true || accessibility?.touchExploration == true) else false
     val feedbackColor = MaterialTheme.colorScheme.onSurface
-    val iconAccessibility = if (desktopIcon != null) LocalPlatformAccessibilityPreferences.current else null
+    val iconAccessibility = if (desktopIcon != null) accessibility else null
     var down by remember(interaction) { mutableStateOf(false) }
     var directPress by remember(interaction) { mutableStateOf(false) }
     var contact by remember(interaction) { mutableStateOf(TransformOrigin.Center) }
@@ -301,7 +312,8 @@ private fun Modifier.motionPressFeedback(
             drawCircle(feedbackColor.copy(alpha = .075f * amount), radius, center + offset)
         }
     } else Modifier
-    return then(input).then(desktopFeedback).graphicsLayer {
+    val cursor = if (desktop && enabled) Modifier.pointerHoverIcon(PointerIcon.Hand) else Modifier
+    return then(input).then(cursor).then(desktopFeedback).graphicsLayer {
         val extent = maxOf(size.width, size.height).coerceAtLeast(1f)
         // Pin the image or row to the finger. A wide desktop row travels only a few pixels.
         val compression = minOf((1f - pressedScale).coerceAtLeast(0f), 4.dp.toPx() / extent)
@@ -345,7 +357,7 @@ internal fun MotionIconButton(
         contentAlignment = Alignment.Center) {
         Box(Modifier.graphicsLayer { alpha = if (enabled) 1f else .38f },
             contentAlignment = Alignment.Center) { content() }
-        DesktopIconTooltip(tooltip, interaction, enabled)
+        DesktopIconTooltip(tooltip, interaction, enabled, showOnFocus = desktopIcon?.pointerFocus != true)
     }
 }
 
@@ -450,7 +462,8 @@ internal fun MotionDialog(
             // Read the dialog's own constraints: split-screen and the IME can be smaller
             // than the activity window. Existing panels retain their own scroll state.
             BoxWithConstraints(Modifier.safeDrawingPadding().imePadding()) {
-            val panelWindow = MangaWindowSize(maxWidth, maxHeight, LocalDensity.current.fontScale.coerceAtLeast(1f))
+            val panelWindow = MangaWindowSize(if (desktop) minOf(maxWidth, maximumWidth) else maxWidth,
+                maxHeight, LocalDensity.current.fontScale.coerceAtLeast(1f))
             CompositionLocalProvider(LocalMangaWindow provides panelWindow) {
             Box(Modifier.widthIn(max = maximumWidth).heightIn(max = maxHeight)
                 .motionInputGate(visible).graphicsLayer {
@@ -478,10 +491,11 @@ internal fun MotionBottomSheet(
     contentColor: Color = contentColorFor(containerColor),
     backdrop: HazeState? = null,
     desktopCloseButton: Boolean = false,
+    desktopWidth: Dp = MangaLayout.PanelWidth,
     content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
 ) {
     if (platformKind == PlatformKind.DESKTOP) {
-        DesktopSheet(onDismissRequest, modifier, containerColor, contentColor, backdrop, desktopCloseButton, content)
+        DesktopSheet(onDismissRequest, modifier, containerColor, contentColor, backdrop, desktopCloseButton, desktopWidth, content)
         return
     }
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -549,6 +563,7 @@ private fun DesktopSheet(
     contentColor: Color,
     backdrop: HazeState?,
     closeButton: Boolean,
+    contentWidth: Dp,
     content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
 ) {
     var visible by remember { mutableStateOf(true) }
@@ -559,29 +574,32 @@ private fun DesktopSheet(
         onDismissRequest = dismiss,
         onClosed = { if (!visible) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false),
-        maximumWidth = 760.dp,
+        maximumWidth = contentWidth + 24.dp,
     ) {
         val panelWindow = LocalMangaWindow.current
         val foreground: @Composable () -> Unit = {
-            CompositionLocalProvider(LocalContentColor provides contentColor) {
-                Column(Modifier.fillMaxWidth().motionInputGate(visible)) {
-                    if (closeButton) Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.weight(1f))
-                        MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭") {
-                            Icon(Icons.Outlined.Close, "关闭", Modifier.size(18.dp), tint = contentColor)
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val bodyWindow = MangaWindowSize(maxWidth, maxHeight, panelWindow.fontScale)
+                CompositionLocalProvider(LocalContentColor provides contentColor, LocalMangaWindow provides bodyWindow) {
+                    Column(Modifier.fillMaxWidth().motionInputGate(visible)) {
+                        if (closeButton) Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.weight(1f))
+                            MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭") {
+                                Icon(Icons.Outlined.Close, "关闭", Modifier.size(18.dp), tint = contentColor)
+                            }
                         }
-                    }
-                    // The optional close row is part of the content height budget.
-                    val clearance = if (closeButton) 68.dp else 24.dp
-                    Box(Modifier.heightIn(max = (panelWindow.height - clearance).coerceAtLeast(1.dp))) {
-                        Column(Modifier.fillMaxWidth(), content = { content(dismiss) })
+                        // The optional close row is part of the content height budget.
+                        val clearance = if (closeButton) 44.dp else 0.dp
+                        Box(Modifier.heightIn(max = (bodyWindow.height - clearance).coerceAtLeast(1.dp))) {
+                            Column(Modifier.fillMaxWidth(), content = { content(dismiss) })
+                        }
                     }
                 }
             }
         }
         val bounds = Modifier.padding(12.dp)
-            .widthIn(max = 760.dp).fillMaxWidth()
+            .widthIn(max = contentWidth).fillMaxWidth()
             .heightIn(max = (panelWindow.height - 24.dp).coerceAtLeast(1.dp))
         if (backdrop != null) LiquidGlassSurface(backdrop, bounds.then(modifier),
             cornerRadius = 24.dp, role = GlassSurfaceRole.PANEL, surfaceColor = containerColor,

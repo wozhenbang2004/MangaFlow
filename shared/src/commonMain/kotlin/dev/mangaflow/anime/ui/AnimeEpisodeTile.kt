@@ -1,5 +1,7 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
@@ -68,6 +70,7 @@ internal fun AnimeEpisodeTile(
     modifier: Modifier = Modifier,
     listRow: Boolean = false,
     onMore: (() -> Unit)? = null,
+    titleFirst: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember(episode.id) { MutableInteractionSource() }
@@ -89,7 +92,9 @@ internal fun AnimeEpisodeTile(
         AnimeEpisodeAvailability.UNMATCHED -> "暂无匹配线路"
         AnimeEpisodeAvailability.MATCHED -> null
     }
-    val caption = when (availability) {
+    val headline = if (titleFirst) subtitle ?: label else if (showNumber) animeEpisodeNumber(episode.number) else label
+    val caption = if (titleFirst && subtitle != null) listOfNotNull(label, sourceState ?: selectionLabel).joinToString(" · ")
+    else when (availability) {
         AnimeEpisodeAvailability.UPCOMING, AnimeEpisodeAvailability.RECENTLY_FAILED -> sourceState
         else -> subtitle ?: selectionLabel ?: sourceState.takeIf { listRow }
     }
@@ -119,8 +124,8 @@ internal fun AnimeEpisodeTile(
     val sourcesLabel = "选择本集线路"
     Box(modifier) {
         DesktopContextMenuArea(if (!enabled || platformKind != PlatformKind.DESKTOP) emptyList() else buildList {
-            add(DesktopMenuAction(sourcesLabel, onClick = onSources))
-            if (onMore != null) add(DesktopMenuAction(menuLabel, onClick = onMore))
+            add(DesktopMenuAction(sourcesLabel, icon = Icons.Outlined.Tune, onClick = onSources))
+            if (onMore != null) add(DesktopMenuAction(menuLabel, icon = Icons.Outlined.MoreHoriz, onClick = onMore))
         }) {
             Box(Modifier.fillMaxWidth().motionPress(interaction, enabled = enabled, pressedScale = .98f)
                 .clip(shape).drawBehind {
@@ -151,10 +156,10 @@ internal fun AnimeEpisodeTile(
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(if (showNumber) animeEpisodeNumber(episode.number) else label, Modifier.weight(1f),
+                        Text(headline, Modifier.weight(1f),
                             style = if (showNumber) mangaMetricValueStyle(19.sp, 24.sp) else MaterialTheme.typography.labelLarge,
                             fontWeight = if (selectedEpisode) FontWeight.SemiBold else FontWeight.Medium,
-                            maxLines = if (episode.subjectId.startsWith("native:")) 2 else 1,
+                            maxLines = if (titleFirst || episode.subjectId.startsWith("native:")) 2 else 1,
                             color = ink, overflow = TextOverflow.Ellipsis)
                         if (listRow) playMark(12.dp)
                         if (listRow && hasProgress) AnimeWatchProgressMark(progress, watched,

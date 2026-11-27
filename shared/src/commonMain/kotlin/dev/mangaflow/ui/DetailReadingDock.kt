@@ -186,6 +186,8 @@ internal fun DetailActionDock(
     val motion = LocalMotionEnabled.current
     val feedback = rememberFeelFeedback()
     val desktop = platformKind == PlatformKind.DESKTOP
+    val fixedDesktop = desktop && persistent
+    val colors = MaterialTheme.colorScheme
     val desktopActions = if (desktop) options.map { option ->
         DesktopMenuAction(option.desktopLabel, enabled = active, onClick = option.onClick)
     } else emptyList()
@@ -274,7 +276,11 @@ internal fun DetailActionDock(
                         scaleX = 1f - .015f * reach
                         scaleY = 1f + .045f * reach
                     },
-                        cornerRadius = lerp(28.dp, 18.dp, collapse), role = GlassSurfaceRole.READING_DOCK,
+                        cornerRadius = if (fixedDesktop) 14.dp else lerp(28.dp, 18.dp, collapse),
+                        role = GlassSurfaceRole.READING_DOCK,
+                        surfaceColor = if (fixedDesktop) androidx.compose.ui.graphics.lerp(
+                            colors.surface, colors.primary, if (canActivate) .14f else .045f) else null,
+                        elevation = if (fixedDesktop) 3.dp else null,
                         interactionSource = interaction.takeIf { enabled }, preferSource = true,
                         softCard = true) {
                         Row(Modifier.fillMaxWidth().heightIn(min = minimumHeight)
@@ -348,7 +354,7 @@ internal fun DetailActionDock(
         }
     }
     if (actions && active) MotionBottomSheet(onDismissRequest = { actions = false },
-        backdrop = backdrop, desktopCloseButton = true,
+        backdrop = backdrop, desktopCloseButton = true, desktopWidth = 400.dp,
         containerColor = DetailBackground, contentColor = DetailForeground) { dismiss ->
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 20.dp)) {
             options.forEach { option ->

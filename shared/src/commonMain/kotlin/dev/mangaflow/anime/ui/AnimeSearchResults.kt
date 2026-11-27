@@ -1,5 +1,6 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -133,7 +134,7 @@ private fun AnimeSearchTerms(
 internal fun LazyListScope.animeSearchResults(
     search: AnimeUnifiedSearchState, controller: AnimeController, matchingReference: Boolean, active: Boolean,
     onOpenGroup: (AnimeSearchGroup) -> Unit, onManage: (AnimeSubject) -> Unit,
-    onShowSources: () -> Unit, pull: BottomPullLoadState,
+    onShowSources: () -> Unit, pull: BottomPullLoadState, twoColumns: Boolean = false,
 ) {
     val groups = search.groups
     val providerNames = search.sources.associate { it.providerId to it.name }
@@ -178,9 +179,9 @@ internal fun LazyListScope.animeSearchResults(
                 icon = Icons.Outlined.Search)
         }
     }
-    items(groups, key = { it.key }, contentType = { "anime-search-result" }) { group ->
+    val result: @Composable (AnimeSearchGroup) -> Unit = work@{ group ->
         val canonical = group.subject
-        val subject = animeSearchDisplaySubject(group, controller) ?: return@items
+        val subject = animeSearchDisplaySubject(group, controller) ?: return@work
         val manage = if (!active || matchingReference) null else canonical?.let { { onManage(it) } }
         val ratings: (@Composable () -> Unit)? = if (matchingReference || canonical == null) null else
             ({ AnimeSubjectRatings(canonical, enabled = active) })
@@ -198,11 +199,23 @@ internal fun LazyListScope.animeSearchResults(
         val sources = remember(group.sources, providerNames) {
             group.sources.mapNotNull { hit -> providerNames[hit.sourceId]?.let { hit.sourceId to it } }.distinctBy { it.first }
         }
-        DesktopContextMenuArea(manage?.let { listOf(DesktopMenuAction("番剧操作", onClick = it)) }.orEmpty()) {
+        DesktopContextMenuArea(manage?.let { listOf(DesktopMenuAction("番剧操作", icon = Icons.Outlined.MoreHoriz, onClick = it)) }.orEmpty()) {
             AnimeSearchWorkRow(subject, facts, original, sources, active, { onOpenGroup(group) },
-                if (matchingReference) "选择这部番剧" else "查看番剧详情", manage, ratings)
+                if (matchingReference) "选择这部番剧" else "查看番剧详情", manage, ratings, showSourceNames = twoColumns)
         }
     }
+    if (twoColumns) {
+        items((groups.size + 1) / 2, key = { row -> groups[row * 2].key }, contentType = { "anime-result-pair" }) { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                for (index in row * 2..row * 2 + 1) {
+                    val group = groups.getOrNull(index)
+                    if (group == null) Spacer(Modifier.weight(1f)) else key(group.key) {
+                        Box(Modifier.weight(1f)) { result(group) }
+                    }
+                }
+            }
+        }
+    } else items(groups, key = { it.key }, contentType = { "anime-search-result" }) { result(it) }
     if (search.canPageSearch || search.searchLoadingMore) item(key = "search-more") {
         Box(Modifier.fillMaxWidth().heightIn(min = 44.dp), contentAlignment = Alignment.Center) {
             if (search.searchLoadingMore) Row(verticalAlignment = Alignment.CenterVertically,
@@ -226,6 +239,7 @@ internal fun AnimeSearchWorkRow(
     subject: AnimeSubject, facts: String, original: String?, sources: List<Pair<String, String>>,
     active: Boolean, onOpen: () -> Unit, openLabel: String, onLongClick: (() -> Unit)? = null,
     ratings: (@Composable () -> Unit)? = null,
+    showSourceNames: Boolean = false,
 ) {
     val interaction = remember(subject.id) { MutableInteractionSource() }
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
@@ -246,9 +260,16 @@ internal fun AnimeSearchWorkRow(
             ratings?.invoke()
             if (sources.isNotEmpty()) Row(Modifier.semantics { contentDescription = "收录来源：" + sources.joinToString("、") { it.second } },
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                sources.take(3).forEach { (id, name) -> AnimeSourceMark(id, name, size = 13.dp) }
-                if (sources.size == 1) AnimeQuietLabel(sources.single().second)
-                else if (sources.size > 3) AnimeQuietLabel("+${sources.size - 3}")
+                if (showSourceNames) {
+                    AnimeSourceMark(sources.first().first, sources.first().second, size = 13.dp)
+                    Text(sources.take(2).joinToString(" · ") { it.second } +
+                        if (sources.size > 2) " 等 ${sources.size} 个来源" else "",
+                        style = MaterialTheme.typography.labelSmall, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                } else {
+                    sources.take(3).forEach { (id, name) -> AnimeSourceMark(id, name, size = 13.dp) }
+                    if (sources.size == 1) AnimeQuietLabel(sources.single().second)
+                    else if (sources.size > 3) AnimeQuietLabel("+${sources.size - 3}")
+                }
             }
         }
     }

@@ -19,6 +19,8 @@ import dev.mangaflow.ui.glass.softSurfaceShadow
 @Composable
 internal fun Modifier.mangaCoverCard(cornerRadius: Dp = 12.dp, shadowRadius: Dp = cornerRadius * 1.5f): Modifier {
     val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
+    val desktop = platformKind == PlatformKind.DESKTOP
     return softSurfaceShadow(shape, MaterialTheme.colorScheme.surface.luminance() > .5f,
-        strength = .65f, radius = shadowRadius).clip(shape)
+        strength = if (desktop) .43f else .65f,
+        radius = if (desktop) minOf(shadowRadius, 12.dp) else shadowRadius).clip(shape)
 }

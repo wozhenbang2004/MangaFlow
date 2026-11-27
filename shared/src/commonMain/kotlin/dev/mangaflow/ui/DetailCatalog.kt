@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import androidx.compose.material.icons.outlined.AutoStories
+import androidx.compose.material.icons.outlined.Tune
 import dev.mangaflow.ui.platform.*
 
 import dev.mangaflow.platform.*
@@ -23,9 +25,11 @@ import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -215,14 +219,30 @@ internal fun DetailCatalog(
     val motion = LocalMotionEnabled.current
     val showBusy = rememberDelayedBusy(loading)
     Column(Modifier.fillMaxSize()) {
-        if (desktop) Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 14.dp, bottom = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            val single = searchResults.singleOrNull()?.takeUnless { downloadMode }
-            ChapterSearchField(chapterQuery, { chapterQuery = it }, desktopFindRequest,
-                active && !sourcePresent, Modifier.weight(1f), onOpenMatch = single?.let { match -> { onRead(match) } })
-            if (searching) Text("${searchResults.size} 章", color = DetailMuted, style = MaterialTheme.typography.labelSmall)
-            if (progress != null) DetailAction(Icons.Outlined.MyLocation, "定位上次阅读",
-                enabled = active && !sourcePresent, onClick = onLocate)
+        if (desktop) BoxWithConstraints(Modifier.fillMaxWidth().padding(start = 16.dp, end = 14.dp, bottom = 5.dp)) {
+            val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+            val roomy = maxWidth >= 390.dp * fontScale
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                val single = searchResults.singleOrNull()?.takeUnless { downloadMode }
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                    ChapterSearchField(chapterQuery, { chapterQuery = it }, desktopFindRequest,
+                        active && !sourcePresent, Modifier.fillMaxWidth(), onOpenMatch = single?.let { match -> { onRead(match) } })
+                    if (roomy && chapterQuery.isEmpty()) Text("Ctrl+F", Modifier.padding(end = 12.dp),
+                        color = DetailMuted, style = mangaMetricValueStyle(10.sp, 16.sp))
+                }
+                if (searching) Text("${searchResults.size} 章", color = DetailMuted,
+                    style = MaterialTheme.typography.labelSmall)
+                if (progress != null) {
+                    if (roomy) TextButton(onClick = onLocate, enabled = active && !sourcePresent,
+                        contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.Outlined.MyLocation, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("上次阅读", style = MaterialTheme.typography.labelMedium)
+                    } else DetailAction(Icons.Outlined.MyLocation, "定位上次阅读",
+                        enabled = active && !sourcePresent, onClick = onLocate)
+                }
+            }
         }
         if (groups.size > 1 && !searching || !desktop && progress != null) Row(
             Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 16.dp),
@@ -349,7 +369,7 @@ internal fun DetailCatalog(
             } else {
                 val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                 val showGroup = (searching || targetGroup == null) && groups.size > 1
-                val tileHeight = ((if (desktop) 56f else 40f) * fontScale + 8f).dp
+                val tileHeight = ((if (desktop) 60f else 40f) * fontScale + 8f).dp
                 // Source groups are consecutive. Keep that exact order and give each run
                 // its own grid row so a book cover never stretches a normal chapter row.
                 val runs = remember(visibleChapters) {
@@ -391,10 +411,10 @@ internal fun DetailCatalog(
                     // remaining pane width, including the actual scrollbar gutter.
                     val gridWidth = (maxWidth - (if (desktop) 12.dp else 0.dp)).coerceAtLeast(1.dp)
                     val chapterColumns = if (desktop)
-                        MangaLayout.columns(gridWidth, 12, 116.dp * fontScale, 6.dp, 16.dp)
+                        MangaLayout.columns(gridWidth, 4, 173.dp * fontScale, 8.dp, 16.dp)
                     else MangaLayout.columns(gridWidth, 4, 64.dp * fontScale, 6.dp, 16.dp)
                     val volumeColumns = if (desktop)
-                        MangaLayout.columns(gridWidth, 8, 128.dp * fontScale, 6.dp, 16.dp)
+                        MangaLayout.columns(gridWidth, 6, 132.dp * fontScale, 8.dp, 16.dp)
                     else chapterColumns
                     // Separate book/text densities share one scroll state and full-width group breaks.
                     val gridUnits = detailCatalogGridUnits(chapterColumns, volumeColumns)
@@ -403,14 +423,22 @@ internal fun DetailCatalog(
                         state = grid, userScrollEnabled = paneActive,
                         modifier = Modifier.fillMaxSize().padding(end = if (desktop) 12.dp else 0.dp),
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (desktop) 8.dp else 6.dp),
                         // Reading and source marks share the compact secondary line.
                         verticalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
                         runs.forEachIndexed { runIndex, run ->
                             if (showGroup && (runIndex > 0 || !isDefaultChapterGroup(run.first().group))) item(key = "group:$runIndex:${run.first().group}",
                                 span = { GridItemSpan(maxLineSpan) }, contentType = "group") {
-                                Text(chapterGroupLabel(run.first().group), color = DetailSecondary,
+                                val heading = chapterGroupLabel(run.first().group)
+                                if (desktop) Row(Modifier.fillMaxWidth().padding(top = if (runIndex == 0) 4.dp else 14.dp,
+                                    bottom = 6.dp), verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(heading, Modifier.weight(1f), color = DetailForeground,
+                                        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                                    Text(run.size.toString() + if (isVolumeChapter(run.first())) " 册" else " 章",
+                                        style = MaterialTheme.typography.labelSmall, color = DetailMuted)
+                                } else Text(heading, color = DetailSecondary,
                                     style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
                                     modifier = Modifier.padding(top = if (runIndex == 0) 3.dp else 14.dp, bottom = 5.dp))
                             }
@@ -793,17 +821,66 @@ private fun ChapterTile(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val desktop = platformKind == PlatformKind.DESKTOP
-    val desktopActions = listOf(
-        DesktopMenuAction("阅读章节", onClick = onRead),
-        DesktopMenuAction("选择来源下载", onClick = onDownload),
-        DesktopMenuAction("选择章节来源", enabled = sourceEnabled && chapter.variants.isNotEmpty()) { onSources(null) },
-        DesktopMenuAction("章节信息", onClick = onActions),
-    )
+    val desktopActions = if (desktop) listOf(
+        DesktopMenuAction("阅读章节", icon = Icons.Outlined.AutoStories, onClick = onRead),
+        DesktopMenuAction("选择来源下载", icon = Icons.Outlined.Download, onClick = onDownload),
+        DesktopMenuAction("选择章节来源", icon = Icons.Outlined.Tune, enabled = sourceEnabled && chapter.variants.isNotEmpty()) { onSources(null) },
+        DesktopMenuAction("章节信息", icon = Icons.Outlined.Info, onClick = onActions),
+    ) else emptyList()
     val complete = detailReadingFraction(progress) == 1f
     val readingColor = MaterialTheme.colorScheme.primary
     val hasDownloadMark = downloadMode || entry != null
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val markSize = 10.dp * fontScale
+    if (desktop) {
+        val hovered by interaction.collectIsHoveredAsState()
+        val focused by interaction.collectIsFocusedAsState()
+        val colors = MaterialTheme.colorScheme
+        val fill by animateColorAsState(when {
+            current -> readingColor.copy(alpha = if (hovered || focused) .15f else .095f)
+            hovered || focused -> colors.onSurface.copy(alpha = .085f)
+            else -> colors.onSurface.copy(alpha = .032f)
+        }, if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "chapter-row")
+        val reading = when {
+            complete -> "已读完"
+            progress != null -> detailReadingPercent(progress)?.let { "读至 $it%" } ?: "阅读中"
+            current -> "上次阅读"
+            else -> null
+        }
+        DesktopContextMenuArea(desktopActions) {
+            Row(modifier.fillMaxWidth().height(height).padding(vertical = 3.dp)
+                .clip(RoundedCornerShape(9.dp)).background(fill)
+                .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
+                    onClickLabel = if (downloadMode) "选择来源下载章节" else "阅读章节",
+                    onClick = if (downloadMode) onDownload else onRead)
+                .motionPress(interaction, pressedScale = .99f).semantics {
+                    contentDescription = chapter.title
+                    stateDescription = listOf(if (current) "当前阅读章节" else "",
+                        chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
+                        .filter(String::isNotBlank).joinToString("，")
+                }.padding(start = 10.dp, end = 3.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(mangaNumberText(chapter.title), color = if (current) readingColor else DetailForeground,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = if (current) FontWeight.SemiBold
+                            else FontWeight.Medium), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        CatalogSourceEntry(chapter, enabled = sourceEnabled,
+                            onOpen = { anchor -> if (downloadMode) onDownload() else onSources(anchor) })
+                        if (reading != null) {
+                            ChapterReadMark(progress, progressKnown, size = 11.dp)
+                            Text(reading, Modifier.weight(1f, fill = false), color = DetailSecondary,
+                                style = mangaMetricValueStyle(11.sp, 15.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (hasDownloadMark) ChapterDownloadMark(entry, downloadMode, size = 12.dp)
+                    }
+                }
+                Box(Modifier.size(32.dp)) { DesktopMoreButton(desktopActions, label = chapter.title + "的操作") }
+            }
+        }
+        return
+    }
     Box(modifier.fillMaxWidth().height(height.coerceAtLeast(48.dp))) {
         DesktopContextMenuArea(desktopActions) {
             Box(
@@ -883,6 +960,35 @@ private fun CatalogSourceEntry(chapter: Chapter, modifier: Modifier = Modifier,
         return
     }
     var anchor by remember(chapter.logicalId, chapter.id) { mutableStateOf<Rect?>(null) }
+    if (platformKind == PlatformKind.DESKTOP) {
+        val interaction = remember(chapter.id) { MutableInteractionSource() }
+        val source = remember(chapter.id, chapter.sourceId, chapter.variants) {
+            chapter.variants.firstOrNull { it.storageId == chapter.id }
+                ?: chapter.variants.firstOrNull { it.sourceId == chapter.sourceId } ?: chapter.variants.first()
+        }
+        val label = remember(chapter.variants) {
+            val sources = chapter.variants.distinctBy { it.sourceId }.size
+            when {
+                sources > 1 -> "$sources 个来源"
+                chapter.variants.size > 1 -> "${chapter.variants.size} 个版本"
+                else -> "来源"
+            }
+        }
+        Row(modifier.heightIn(min = 22.dp).clip(RoundedCornerShape(5.dp))
+            .clickable(enabled = enabled, interactionSource = interaction, indication = null,
+                role = Role.Button, onClickLabel = "选择本章来源", onClick = { onOpen(anchor) })
+            .motionPress(interaction, enabled = enabled, pressedScale = .97f)
+            .semantics(mergeDescendants = true) { contentDescription = source.sourceName + "，" + label },
+            horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+            ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(13.dp).onGloballyPositioned { coordinates ->
+                val origin = coordinates.localToScreen(Offset.Zero)
+                if (origin.isSpecified) anchor = Rect(origin, Size(coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
+            }, muted = true)
+            Text(label, color = DetailSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(11.dp), tint = DetailMuted)
+        }
+        return
+    }
     Box(modifier, contentAlignment = Alignment.CenterStart) {
         ReaderSourceStack(chapter, compact = true, enabled = enabled,
             modifier = Modifier.onGloballyPositioned { coordinates ->

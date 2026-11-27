@@ -12,6 +12,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -25,6 +27,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Sync
@@ -36,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
@@ -46,6 +50,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import dev.chrisbanes.haze.HazeState
@@ -100,6 +105,8 @@ internal fun UnifiedSourceManager(
     var attaching by remember(state.work.id) { mutableStateOf<Manga?>(null) }
     var detachCandidate by remember(state.work.id) { mutableStateOf<String?>(null) }
     var aligningChapter by remember(state.work.id) { mutableStateOf<String?>(null) }
+    val overviewScroll = key(state.work.id) { rememberLazyListState() }
+    var locateSource by remember(state.work.id) { mutableStateOf<String?>(null) }
     val editor = remember { ExperienceEditor() }
     val now by produceState(wallTimeMillis()) {
         while (true) { delay(1_000L); value = wallTimeMillis() }
@@ -179,13 +186,26 @@ internal fun UnifiedSourceManager(
         }
     }
     DisposableEffect(Unit) { onDispose { keyboard?.hide(); focus.clearFocus() } }
-    MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop,
+    MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop, desktopWidth = 980.dp,
         containerColor = colors.surface.copy(alpha = .97f)) { dismiss ->
         BackHandler(enabled = sourcePage != null && !state.connecting, onBack = showOverview)
-        Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height * .72f)) {
-            Row(Modifier.fillMaxWidth().padding(start = if (sourcePage == null) 20.dp else 4.dp, end = 8.dp)
+        val window = LocalMangaWindow.current
+        val railWidth = (window.width * .29f).coerceIn(220.dp, 280.dp)
+        val split = platformKind == PlatformKind.DESKTOP && window.width - railWidth >= 430.dp * window.fontScale &&
+            window.height >= 360.dp
+        val height = if (split) Modifier.height(minOf(window.height * .88f, 760.dp))
+            else Modifier.heightIn(max = window.height * .72f)
+        Row(Modifier.fillMaxWidth().then(height)) {
+            if (split) SourceWorkNavigation(state.work, associated, overview, sourcePage, errorDetailsSource,
+                state.linked.firstOrNull { sourcePage == "@align:${it.id}" }?.sourceId,
+                !state.connecting, railWidth,
+                onOverview = { showOverview(); locateSource = null },
+                onChecks = { showOverview(); locateSource = null; sourcePage = "@checks" },
+                onEdition = { id -> showOverview(); errorDetailsSource = id; locateSource = id })
+            Column(Modifier.weight(1f)) {
+            Row(Modifier.fillMaxWidth().padding(start = if (sourcePage == null || split) 20.dp else 4.dp, end = 8.dp)
                 .heightIn(min = 60.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (sourcePage != null) MotionIconButton(enabled = !state.connecting, onClick = showOverview) {
+                if (!split && sourcePage != null) MotionIconButton(enabled = !state.connecting, onClick = showOverview) {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回来源列表", Modifier.size(20.dp))
                 }
                 Column(Modifier.weight(1f)) {
@@ -199,7 +219,7 @@ internal fun UnifiedSourceManager(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         val heading = when {
-                            sourcePage == null -> "来源"
+                            sourcePage == null -> if (split) "全部来源" else "来源"
                             sourcePage == "@checks" -> "来源检查"
                             sourcePage?.startsWith("@align:") == true -> "章节对应"
                             else -> state.sources.firstOrNull { it.first == source }?.second
@@ -209,14 +229,14 @@ internal fun UnifiedSourceManager(
                         if (canSwitchSource) Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp),
                             tint = colors.onSurfaceVariant)
                     }
-                    Text(state.work.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1,
+                    if (!split) Text(state.work.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1,
                         overflow = TextOverflow.Ellipsis)
                 }
                 if (sourcePage == null && overview.any { it.status == "FAILED" })
                     MotionIconButton(enabled = !checking && !state.connecting, onClick = onRetryAll) {
                         Icon(Icons.Outlined.Refresh, "重试失败的来源检查", Modifier.size(19.dp))
                     }
-                if (sourcePage == null) MotionIconButton(enabled = !state.connecting,
+                if (!split && sourcePage == null) MotionIconButton(enabled = !state.connecting,
                     onClick = { editor.field = null; sourcePage = "@checks" }) {
                     Icon(Icons.Outlined.Tune, "来源检查设置", Modifier.size(19.dp))
                 }
@@ -231,7 +251,14 @@ internal fun UnifiedSourceManager(
                 modifier = Modifier.weight(1f, fill = false).fillMaxWidth()) { page ->
                 val pageActive = page == (sourcePage ?: "overview")
                 val alignmentWork = state.linked.firstOrNull { page == "@align:${it.id}" }
-                LazyColumn(Modifier.fillMaxWidth(),
+                val list = if (page == "overview") overviewScroll else rememberLazyListState()
+                if (page == "overview" && pageActive && locateSource != null) LaunchedEffect(locateSource, overview) {
+                    val index = overview.indexOfFirst { it.id == locateSource }
+                    if (index >= 0) overviewScroll.scrollToItem(index + 1)
+                    locateSource = null
+                }
+                Box(Modifier.fillMaxWidth()) {
+                LazyColumn(Modifier.fillMaxWidth(), state = list,
                     contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     if (page.startsWith("@align:")) {
@@ -553,9 +580,83 @@ internal fun UnifiedSourceManager(
                         }
                     }
                 }
+                if (platformKind == PlatformKind.DESKTOP) Box(Modifier.matchParentSize()) {
+                    DesktopVerticalScrollbar(list, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                }
+                }
+            }
             }
             }
         }
+    }
+}
+
+@Composable
+private fun SourceWorkNavigation(work: Manga, associated: List<Manga>, overview: List<SourceOverviewEntry>,
+    page: String?, expandedSource: String?, alignmentSource: String?, enabled: Boolean, width: Dp,
+    onOverview: () -> Unit, onChecks: () -> Unit, onEdition: (String) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val list = rememberLazyListState()
+    val groups = remember(associated) { associated.groupBy { it.sourceId }.entries.toList() }
+    Box(Modifier.width(width).fillMaxHeight().background(colors.surfaceContainerLow)) {
+        LazyColumn(Modifier.fillMaxSize(), state = list,
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            item(key = "work") {
+                Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, bottom = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (work.coverUrl.isNotBlank()) AsyncImage(work.coverUrl, null,
+                        Modifier.size(46.dp, 64.dp).mangaCoverCard(6.dp), contentScale = ContentScale.Crop)
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(work.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                            style = MaterialTheme.typography.titleMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        if (work.authors.isNotEmpty()) Text(work.authors.joinToString(" · "),
+                            color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            item(key = "all") {
+                SourceNavigationItem("全部来源", page == null && expandedSource == null, enabled, onOverview,
+                    detail = overview.size.toString()) { Icon(Icons.Outlined.Layers, null, Modifier.size(17.dp)) }
+            }
+            item(key = "checks") {
+                SourceNavigationItem("来源检查", page == "@checks", enabled, onChecks) {
+                    Icon(Icons.Outlined.Tune, null, Modifier.size(17.dp))
+                }
+            }
+            item(key = "linked") {
+                Text("作品来源", Modifier.padding(start = 10.dp, top = 22.dp, bottom = 4.dp),
+                    color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+            }
+            items(groups, key = { "edition:${it.key}" }) { (id, editions) ->
+                val name = overview.firstOrNull { it.id == id }?.name ?: sourceDisplayName(id)
+                val selected = if (page == null) expandedSource == id else page == id || alignmentSource == id
+                SourceNavigationItem(name, selected, enabled, { onEdition(id) },
+                    detail = if (id == work.sourceId) "主来源" else if (editions.size > 1) "${editions.size} 个版本" else null) {
+                    ChapterSourceLogo(id, name, Modifier.size(18.dp))
+                }
+            }
+        }
+        DesktopVerticalScrollbar(list, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+    }
+}
+
+@Composable
+private fun SourceNavigationItem(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit,
+    detail: String? = null, leading: @Composable () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val colors = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp))
+        .then(if (selected) Modifier.background(colors.primary.copy(alpha = .095f)) else Modifier)
+        .selectable(selected = selected, enabled = enabled, interactionSource = interaction, indication = null,
+            role = Role.Tab, onClick = onClick).motionPress(interaction, enabled)
+        .heightIn(min = 39.dp).padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+        leading()
+        Text(label, Modifier.weight(1f), color = if (selected) colors.primary else colors.onSurface,
+            style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        detail?.let { Text(it, color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall) }
     }
 }
 

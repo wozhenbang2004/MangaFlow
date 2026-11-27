@@ -175,6 +175,8 @@ import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
+import dev.mangaflow.ui.motion.MotionTextButton
+import androidx.compose.foundation.layout.PaddingValues
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
@@ -451,26 +453,31 @@ fun DetailScreen(
                             sourceLoading = sourceLoading, sourceError = sourceError,
                             desktopFindRequest = handledFindRequest,
                         )
-                        else -> if (sourceCommentsContent != null) {
-                            sourceCommentsContent(Modifier.fillMaxSize(), paneBottomPadding, commentsOpenRevision, active && targetSection == activeSection)
-                        } else if (commentsAvailable) Box(Modifier.fillMaxSize()) {
-                            Box(Modifier.fillMaxSize().padding(end =
-                                if (platformKind == PlatformKind.DESKTOP) 12.dp else 0.dp)) {
-                                CommunityPanel(
-                                    mangaId = current.id, sources = reviews, loading = reviewsLoading,
-                                    openRevision = commentsOpenRevision,
-                                    onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
-                                    onRelink = onReviewRelink, loadReplies = loadReplies,
-                                    onScrollTarget = { commentsList = it }, backdrop = readingBackdrop,
-                                    captureBackdrop = false,
-                                    active = active && targetSection == activeSection, bottomPadding = paneBottomPadding,
-                                    filterOpen = commentFilterOpen, onFilterDismiss = { commentFilterOpen = false },
-                                    onFilterChanged = { commentFilterChanged = it },
-                                )
-                            }
-                            if (platformKind == PlatformKind.DESKTOP) commentsList?.let { list ->
-                                DesktopVerticalScrollbar(list,
-                                    Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
+                        else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                            val discussionWidth = if (platformKind == PlatformKind.DESKTOP)
+                                Modifier.widthIn(max = 736.dp).fillMaxSize() else Modifier.fillMaxSize()
+                            if (sourceCommentsContent != null) {
+                                sourceCommentsContent(discussionWidth, paneBottomPadding, commentsOpenRevision,
+                                    active && targetSection == activeSection)
+                            } else if (commentsAvailable) Box(discussionWidth) {
+                                Box(Modifier.fillMaxSize().padding(end =
+                                    if (platformKind == PlatformKind.DESKTOP) 12.dp else 0.dp)) {
+                                    CommunityPanel(
+                                        mangaId = current.id, sources = reviews, loading = reviewsLoading,
+                                        openRevision = commentsOpenRevision,
+                                        onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
+                                        onRelink = onReviewRelink, loadReplies = loadReplies,
+                                        onScrollTarget = { commentsList = it }, backdrop = readingBackdrop,
+                                        captureBackdrop = false,
+                                        active = active && targetSection == activeSection, bottomPadding = paneBottomPadding,
+                                        filterOpen = commentFilterOpen, onFilterDismiss = { commentFilterOpen = false },
+                                        onFilterChanged = { commentFilterChanged = it },
+                                    )
+                                }
+                                if (platformKind == PlatformKind.DESKTOP) commentsList?.let { list ->
+                                    DesktopVerticalScrollbar(list,
+                                        Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
+                                }
                             }
                         }
                     }
@@ -489,9 +496,11 @@ fun DetailScreen(
         val androidEditorial = platformKind == PlatformKind.ANDROID && !adultProfile
         val fontScale = density.fontScale.coerceAtLeast(1f)
         val desktopDetail = platformKind == PlatformKind.DESKTOP &&
-            maxWidth >= 840.dp * fontScale.coerceAtMost(1.5f)
+            maxWidth >= 768.dp * fontScale.coerceAtMost(1.65f) && maxHeight >= 390.dp
         val desktopWidth = minOf(maxWidth, 1440.dp)
-        val summaryWidth = (desktopWidth * .36f).coerceIn(300.dp, 432.dp)
+        val desktopMargin = if (desktopWidth >= 1100.dp) 28.dp else 16.dp
+        val columnGap = if (desktopWidth >= 1040.dp) 24.dp else 12.dp
+        val summaryWidth = (desktopWidth * .30f).coerceIn(242.dp * fontScale.coerceAtMost(1.4f), 388.dp)
         // Retain the largest real dock clearance: condensing must not move the last chapter rows.
         val bottomInset = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
         val readingInset = maxOf((38f * fontScale + 10f).coerceAtLeast(56f).dp,
@@ -611,6 +620,17 @@ fun DetailScreen(
                 }
             }
         }
+        val dock: @Composable (Modifier, Boolean) -> Unit = { dockModifier, permanent ->
+            DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
+                resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
+                hidden = !permanent && dockHidden, collapseProgress = { dockCollapse }, active = active,
+                persistent = permanent, modifier = dockModifier,
+                onHeightChanged = { if (!permanent) measuredDockHeight = maxOf(measuredDockHeight, it) },
+                onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents,
+                preferredResumeChapter = preferredResumeChapter, onContinuePreferred = onContinuePreferred,
+                cloudProgress = copyProgress, onAdoptCloudProgress = onAdoptCloudProgress,
+                onRetryCloudProgress = onRetryCloudProgress)
+        }
         // A fixed atmosphere sits behind the moving book and opaque catalogue plane.
         // Floating controls sample the final composed scene through the existing Haze source.
         val toolbarWidth = if (desktopDetail) Modifier.width(desktopWidth)
@@ -619,25 +639,28 @@ fun DetailScreen(
             val summaryScroll = rememberScrollState()
             if (desktopDetail) {
                 Row(Modifier.width(desktopWidth).fillMaxHeight().align(Alignment.TopCenter)
-                    .padding(start = 20.dp, end = 20.dp, top = toolbarClearance + 8.dp, bottom = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                    Box(Modifier.width(summaryWidth).fillMaxHeight()) {
-                        Column(Modifier.fillMaxSize().verticalScroll(summaryScroll)
-                            .padding(end = 12.dp, bottom = readingInset)) {
-                            HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
-                                compact = true, artworkHeadroom = 0.dp, adultProfile = adultProfile, desktopSummary = true,
-                                onPosterHeight = { posterHeightPx.intValue = it },
-                                onIntroduction = { fullIntroduction = true },
-                                onRatings = if (adultProfile) null else ({ fullRatings = true }),
-                                onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
-                                onTag = onTag?.let { action -> { tag -> action(current, tag) } }, collapse = { 0f })
+                    .padding(start = desktopMargin, end = desktopMargin, top = toolbarClearance + 8.dp,
+                        bottom = 10.dp + bottomInset), horizontalArrangement = Arrangement.spacedBy(columnGap)) {
+                    Column(Modifier.width(summaryWidth).fillMaxHeight()) {
+                        Box(Modifier.weight(1f).fillMaxWidth()) {
+                            Column(Modifier.fillMaxSize().verticalScroll(summaryScroll)
+                                .padding(end = 10.dp, bottom = 8.dp)) {
+                                HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
+                                    compact = true, artworkHeadroom = 0.dp, adultProfile = adultProfile, desktopSummary = true,
+                                    onPosterHeight = { posterHeightPx.intValue = it },
+                                    onIntroduction = { fullIntroduction = true },
+                                    onRatings = if (adultProfile) null else ({ fullRatings = true }),
+                                    onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
+                                    onTag = onTag?.let { action -> { tag -> action(current, tag) } }, collapse = { 0f })
+                            }
+                            DesktopVerticalScrollbar(summaryScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                         }
-                        DesktopVerticalScrollbar(summaryScroll,
-                            Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp, bottom = readingInset))
+                        Box(Modifier.fillMaxWidth().padding(top = 8.dp, end = 8.dp)) {
+                            dock(Modifier.fillMaxWidth(), true)
+                        }
                     }
-                    Box(Modifier.width(1.dp).fillMaxHeight().background(DetailLine))
-                    sectionPane(Modifier.weight(1f).fillMaxHeight().background(informationTone),
-                        16.dp + bottomInset)
+                    sectionPane(Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(16.dp))
+                        .background(informationTone).padding(top = 8.dp), 12.dp)
                 }
             } else {
                 Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
@@ -813,19 +836,10 @@ fun DetailScreen(
                 onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() },
                 onRetryCover = { coverFailed = false; coverRetry++ })
         }
-        val dockLane = if (desktopDetail) Modifier.width(desktopWidth).padding(start = 20.dp, bottom = 12.dp)
-            else Modifier.fillMaxWidth().windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Bottom))
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-        Box(dockLane.align(Alignment.BottomCenter), contentAlignment = Alignment.BottomStart) {
-            DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
-                resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
-                hidden = !desktopDetail && dockHidden, collapseProgress = { dockCollapse }, active = active,
-                persistent = desktopDetail, modifier = if (desktopDetail) Modifier.width(summaryWidth) else Modifier,
-                onHeightChanged = { measuredDockHeight = maxOf(measuredDockHeight, it) },
-                onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents,
-                preferredResumeChapter = preferredResumeChapter, onContinuePreferred = onContinuePreferred,
-                cloudProgress = copyProgress, onAdoptCloudProgress = onAdoptCloudProgress,
-                onRetryCloudProgress = onRetryCloudProgress)
+        if (!desktopDetail) Box(Modifier.fillMaxWidth().align(Alignment.BottomCenter)
+            .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Bottom))
+            .padding(horizontal = 16.dp, vertical = 8.dp), contentAlignment = Alignment.BottomStart) {
+            dock(Modifier, false)
         }
     }
     }
@@ -988,6 +1002,11 @@ private fun HeroBookInformation(
     val posterAspect by animateFloatAsState(targetAspect,
         if (LocalMotionEnabled.current) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap(),
         label = "detail-poster-aspect")
+    if (desktopSummary) {
+        DesktopBookSummary(manga, cover, posterAspect, informationTone, adultProfile, onPosterHeight,
+            onIntroduction, onRatings, onAuthor, onTag, arrival = { copyArrival?.value ?: 1f })
+        return
+    }
     val ink = DetailForeground
     val titleInteraction = remember(manga.id) { MutableInteractionSource() }
     val titleDirection = if (LocalLayoutDirection.current == LayoutDirection.Ltr) -1f else 1f
@@ -1053,7 +1072,7 @@ private fun HeroBookInformation(
                     }
                 }
             }
-            HeroSynopsis(manga, ink, infoVisible, onIntroduction, lines = if (desktopSummary) 4 else 2)
+            HeroSynopsis(manga, ink, infoVisible, onIntroduction)
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
                 DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag,
                     largeTouchTarget = adultProfile,
@@ -1063,6 +1082,51 @@ private fun HeroBookInformation(
                     compact = true, onExpand = onRatings)
                 else if (!adultProfile) MangaBrowseSource(manga, Modifier.padding(top = 6.dp), foreground = ink.copy(alpha = .80f))
             }
+        }
+    }
+}
+
+@Composable
+private fun DesktopBookSummary(
+    manga: Manga, cover: Painter, aspect: Float, paper: Color, adultProfile: Boolean, onPosterHeight: (Int) -> Unit,
+    onIntroduction: () -> Unit, onRatings: (() -> Unit)?, onAuthor: ((String) -> Unit)?, onTag: ((String) -> Unit)?,
+    arrival: () -> Float,
+) {
+    val window = LocalMangaWindow.current
+    val colors = MaterialTheme.colorScheme
+    val ink = DetailForeground
+    val stageHeight = if (window.shortHeight) 150.dp else (window.height * .29f).coerceIn(174.dp, 278.dp)
+    Column(Modifier.fillMaxWidth()) {
+        BoxWithConstraints(Modifier.fillMaxWidth().height(stageHeight).clip(RoundedCornerShape(15.dp))
+            .background(paper.copy(alpha = .34f)), contentAlignment = Alignment.Center) {
+            val h = (stageHeight - 18.dp).coerceAtLeast(1.dp)
+            val width = minOf((maxWidth - 20.dp).coerceAtLeast(1.dp), h * aspect)
+            Box(Modifier.size(width, width / aspect).onSizeChanged { onPosterHeight(it.height) }
+                .mangaSharedCover(manga.id).mangaCoverCard(8.dp, shadowRadius = 10.dp)
+                .background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
+                Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(32.dp), tint = colors.onSurfaceVariant)
+                Image(cover, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            }
+        }
+        Column(Modifier.fillMaxWidth().background(paper).padding(start = 7.dp, end = 7.dp, top = 14.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            if (adultProfile) MangaBrowseSource(manga, foreground = DetailSecondary)
+            Text(manga.title, style = browseTitleStyle(26.sp, 33.sp), color = ink,
+                modifier = Modifier.graphicsLayer {
+                    val rest = 1f - arrival()
+                    alpha = 1f - rest * .25f
+                    translationY = 6.dp.toPx() * rest
+                }.clickable(role = Role.Button, onClickLabel = "完整作品资料", onClick = onIntroduction))
+            if (manga.authors.any(String::isNotBlank)) AuthorNames(manga.authors, ink, onAuthor = onAuthor)
+            val publication = listOf(manga.status, manga.latestChapter.takeIf(String::isNotBlank)
+                ?.let { "更新 · " + mangaNumberText(it) }.orEmpty()).filter(String::isNotBlank).joinToString("　·　")
+            if (publication.isNotBlank()) Text(publication, style = MaterialTheme.typography.bodySmall,
+                color = DetailSecondary)
+            HeroSynopsis(manga, ink, true, onIntroduction, lines = 4)
+            DetailTags(manga, includeState = false, onTag = onTag, maximumVisible = 5,
+                largeTouchTarget = adultProfile, onMore = onIntroduction)
+            if (onRatings != null) DetailRatingStrip(manga, ink, compact = true, onExpand = onRatings)
+            else if (!adultProfile) MangaBrowseSource(manga, foreground = DetailSecondary)
         }
     }
 }
@@ -1268,20 +1332,23 @@ private fun DetailSections(
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     val countStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp)
-    val sourceLabel = if (pendingSourceCount > 0) "待确认 $pendingSourceCount" else sourceCount.toString()
-    val sourceLabelWidth = with(density) {
-        measurer.measure(sourceLabel, countStyle, maxLines = 1).size.width.toDp()
-    }
     BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 2.dp)) {
         val availableWidth = maxWidth
         val scale = density.fontScale.coerceAtLeast(1f)
+        val desktopLabels = platformKind == PlatformKind.DESKTOP && availableWidth >= 425.dp * scale
+        val sourceLabel = if (pendingSourceCount > 0) "待确认 $pendingSourceCount"
+            else if (desktopLabels) "来源 $sourceCount" else sourceCount.toString()
+        val sourceLabelWidth = with(density) {
+            measurer.measure(sourceLabel, countStyle, maxLines = 1).size.width.toDp()
+        }
         val comments = commentsAvailable && selected == 1
         val sourceWidth = (sourceLabelWidth + 46.dp).coerceAtLeast(48.dp)
             .coerceAtMost((availableWidth - 120.dp).coerceAtLeast(48.dp))
         // Keep action width and the tab track continuous while the whole
         // section rail travels with the shrinking artwork above it.
+        val toolWidth = if (desktopLabels) 92.dp * scale else 44.dp
         val actionsWidth by animateDpAsState(
-            targetValue = if (comments) { if (sourceComments) 0.dp else 44.dp } else sourceWidth + 48.dp,
+            targetValue = if (comments) { if (sourceComments) 0.dp else toolWidth } else sourceWidth + toolWidth + 4.dp,
             animationSpec = if (LocalMotionEnabled.current)
                 spring(dampingRatio = MangaMotion.NavigationDamping, stiffness = 430f)
                 else snap(),
@@ -1317,14 +1384,24 @@ private fun DetailSections(
                     if (!showingComments) DetailSourceAction(
                         sourceId, sourceName, sourceCount, pendingSourceCount, sourceLabel,
                         sourceLoading, sourcesChecking, sourceWidth, onManageSources)
-                    if (!showingComments || !sourceComments) DetailAction(
-                        icon = if (showingComments) Icons.Outlined.FilterList else if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
-                        description = if (showingComments) {
+                    if (!showingComments || !sourceComments) {
+                        val icon = if (showingComments) Icons.Outlined.FilterList
+                            else if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download
+                        val label = if (showingComments) {
+                            if (filterOpen) "收起筛选" else "筛选评论"
+                        } else if (downloadMode) "退出下载" else "下载章节"
+                        val action = if (showingComments) onToggleFilter else onToggleDownload
+                        val chosen = if (showingComments) filterOpen || filterChanged else downloadMode
+                        if (desktopLabels) MotionTextButton(onClick = action, modifier = Modifier.width(toolWidth),
+                            contentPadding = PaddingValues(horizontal = 6.dp)) {
+                            val tint = if (chosen) MaterialTheme.colorScheme.primary else DetailSecondary
+                            Icon(icon, null, Modifier.size(16.dp), tint = tint)
+                            Spacer(Modifier.width(5.dp))
+                            Text(label, color = tint, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                        } else DetailAction(icon, if (showingComments) {
                             if (filterOpen) "收起评论筛选" else "筛选评论"
-                        } else if (downloadMode) "退出连续下载" else "连续下载章节",
-                        selected = if (showingComments) filterOpen || filterChanged else downloadMode,
-                        onClick = if (showingComments) onToggleFilter else onToggleDownload,
-                    )
+                        } else if (downloadMode) "退出连续下载" else "连续下载章节", selected = chosen, onClick = action)
+                    }
                 }
             }
         }

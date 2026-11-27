@@ -3,10 +3,12 @@ package dev.mangaflow.ui
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.rememberTransition
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -22,6 +24,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.BookmarkAdd
+import androidx.compose.material.icons.outlined.BookmarkRemove
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -45,6 +50,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -58,6 +64,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -68,6 +77,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.anchoredMenuReveal
@@ -75,6 +85,7 @@ import dev.mangaflow.ui.motion.surfaceReveal
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -82,8 +93,16 @@ import kotlin.math.roundToInt
 internal data class DesktopMenuAction(
     val label: String,
     val enabled: Boolean = true,
+    val icon: ImageVector? = null,
+    val destructive: Boolean = false,
+    val selected: Boolean? = null,
     val onClick: () -> Unit,
 )
+
+internal fun desktopShelfAction(favorite: Boolean, addLabel: String = "加入书架", removeLabel: String = "移出书架",
+    onClick: () -> Unit) = DesktopMenuAction(if (favorite) removeLabel else addLabel,
+    icon = if (favorite) Icons.Outlined.BookmarkRemove else Icons.Outlined.BookmarkAdd,
+    destructive = favorite, onClick = onClick)
 
 /** Touch keeps its original gesture tree. A secondary mouse press never becomes an open action. */
 @Composable
@@ -100,8 +119,8 @@ internal fun DesktopContextMenuArea(
     val latestActions by rememberUpdatedState(actions)
     Box(Modifier
         .onPreviewKeyEvent { event ->
-            if (event.type == KeyEventType.KeyDown && event.key == Key.F10 &&
-                event.isShiftPressed && latestActions.isNotEmpty()) {
+            if (event.type == KeyEventType.KeyDown && latestActions.isNotEmpty() &&
+                (event.key == Key.Menu || event.key == Key.F10 && event.isShiftPressed)) {
                 anchor = null
                 visible = true
                 true
@@ -144,7 +163,10 @@ internal fun DesktopMoreButton(
     if (platformKind != PlatformKind.DESKTOP || actions.isEmpty()) return
     var visible by remember { mutableStateOf(false) }
     Box {
-        MotionIconButton(onClick = { visible = !visible }, modifier = Modifier.size(32.dp), tooltip = label) {
+        val colors = MaterialTheme.colorScheme
+        val selected = if (visible) Modifier.background(colors.primary.copy(alpha = .10f), RoundedCornerShape(9.dp)) else Modifier
+        MotionIconButton(onClick = { visible = !visible }, modifier = Modifier.size(32.dp).then(selected)
+            .semantics { stateDescription = if (visible) "已展开" else "已收起" }, tooltip = label.takeUnless { visible }) {
             Icon(Icons.Outlined.MoreHoriz, label, Modifier.size(19.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -157,12 +179,13 @@ internal fun DesktopMoreButton(
  * surface, radius and shadow. The real anchor and window bounds own placement, not animated width.
  */
 @Composable
-private fun DesktopActionPopup(
+internal fun DesktopActionPopup(
     visible: Boolean,
     actions: List<DesktopMenuAction>,
     onDismiss: () -> Unit,
     anchor: IntOffset? = null,
     onPresenceChange: (Boolean) -> Unit = {},
+    alignToStart: Boolean = false,
 ) {
     // Closed menus belong to every visible and precomposed item. Only install the
     // transition once that particular menu opens, then retain it through its exit.
@@ -182,13 +205,19 @@ private fun DesktopActionPopup(
         onDispose { if (present) reportPresence(false) }
     }
     if (!present) return
-    val maximumWidth = (LocalMangaWindow.current.width - 24.dp).coerceIn(1.dp, 300.dp)
-    val enabledIndices = actions.indices.filter { actions[it].enabled }
-    val requesters = remember(actions.size) { List(actions.size) { FocusRequester() } }
+    val window = LocalMangaWindow.current
+    val maximumWidth = (window.width - 24.dp).coerceIn(1.dp, 320.dp * window.fontScale.coerceAtMost(1.5f))
+    val (removals, ordinary) = actions.partition { it.destructive }
+    val entries = if (removals.isEmpty()) actions else ordinary + removals
+    val hasIcons = entries.any { it.icon != null }
+    val hasSelection = entries.any { it.selected != null }
+    val enabledIndices = entries.indices.filter { entries[it].enabled }
+    val requesters = remember(entries.size) { List(entries.size) { FocusRequester() } }
     var focusedIndex by remember { mutableIntStateOf(-1) }
+    var keyboardFocus by remember(visible) { mutableStateOf(anchor == null) }
     var origin by remember(anchor) { mutableStateOf(TransformOrigin(.5f, 0f)) }
     val latestDismiss by rememberUpdatedState(onDismiss)
-    val position = remember(anchor, density) {
+    val position = remember(anchor, alignToStart, density) {
         val margin = with(density) { 8.dp.roundToPx() }
         val gap = with(density) { 4.dp.roundToPx() }
         object : PopupPositionProvider {
@@ -198,12 +227,24 @@ private fun DesktopActionPopup(
                 layoutDirection: LayoutDirection,
                 popupContentSize: IntSize,
             ): IntOffset {
-                val pointX = anchorBounds.left + (anchor?.x ?: if (layoutDirection == LayoutDirection.Ltr) anchorBounds.width else 0)
-                val pointY = anchorBounds.top + (anchor?.y ?: anchorBounds.height)
-                val desiredX = if (pointX + popupContentSize.width > windowSize.width - margin)
-                    pointX - popupContentSize.width else pointX
-                val desiredY = if (pointY + popupContentSize.height + gap > windowSize.height - margin)
-                    pointY - popupContentSize.height - gap else pointY + gap
+                val ltr = layoutDirection == LayoutDirection.Ltr
+                val growRight = if (anchor == null) alignToStart == ltr else ltr
+                val pointX = anchor?.let { anchorBounds.left + it.x } ?: if (growRight) anchorBounds.left else anchorBounds.right
+                val roomRight = windowSize.width - margin - pointX
+                val roomLeft = pointX - margin
+                val placeRight = when {
+                    growRight && roomRight >= popupContentSize.width -> true
+                    !growRight && roomLeft >= popupContentSize.width -> false
+                    else -> roomRight >= roomLeft
+                }
+                val desiredX = if (placeRight) pointX else pointX - popupContentSize.width
+                val pointerY = anchor?.let { anchorBounds.top + it.y }
+                val below = (pointerY ?: anchorBounds.bottom) + gap
+                val above = (pointerY ?: anchorBounds.top) - gap
+                val placeBelow = windowSize.height - margin - below >= popupContentSize.height ||
+                    windowSize.height - margin - below >= above - margin
+                val desiredY = if (placeBelow) below else above - popupContentSize.height
+                val pointY = pointerY ?: if (placeBelow) anchorBounds.bottom else anchorBounds.top
                 val placed = IntOffset(
                     desiredX.coerceIn(margin, (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)),
                     desiredY.coerceIn(margin, (windowSize.height - popupContentSize.height - margin).coerceAtLeast(margin)),
@@ -217,20 +258,33 @@ private fun DesktopActionPopup(
     Popup(popupPositionProvider = position,
         onDismissRequest = { if (visible) latestDismiss() },
         properties = PopupProperties(focusable = visible)) {
-        LaunchedEffect(visible, actions.map { it.label to it.enabled }) {
+        LaunchedEffect(visible, enabledIndices) {
+            if (!visible) focusedIndex = -1
             if (visible && enabledIndices.isNotEmpty()) {
                 withFrameNanos { }
-                val first = enabledIndices.first()
-                requesters[first].requestFocus()
+                if (focusedIndex !in enabledIndices) {
+                    val initialIndex = enabledIndices.firstOrNull { entries[it].selected == true } ?: enabledIndices.first()
+                    requesters[initialIndex].requestFocus()
+                }
             }
         }
         Surface(
-            modifier = Modifier.widthIn(min = minOf(144.dp, maximumWidth), max = maximumWidth).width(IntrinsicSize.Max)
+            modifier = Modifier.widthIn(min = minOf(168.dp, maximumWidth), max = maximumWidth).width(IntrinsicSize.Max)
                 .motionInputGate(visible)
+                .pointerInput(visible, anchor) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.type == PointerEventType.Press || (event.type == PointerEventType.Move &&
+                                event.changes.any { it.position != it.previousPosition })) keyboardFocus = false
+                        }
+                    }
+                }
                 .onPreviewKeyEvent { event ->
+                    if (visible && event.type == KeyEventType.KeyDown) keyboardFocus = true
                     if (!visible || event.type != KeyEventType.KeyDown) false
                     else when (event.key) {
-                        Key.Escape -> { latestDismiss(); true }
+                        Key.Escape, Key.Tab -> { latestDismiss(); true }
                         Key.DirectionDown, Key.DirectionUp, Key.MoveHome, Key.MoveEnd -> {
                             if (enabledIndices.isNotEmpty()) {
                                 val current = enabledIndices.indexOf(focusedIndex)
@@ -246,28 +300,42 @@ private fun DesktopActionPopup(
                         }
                         else -> false
                     }
-                }.anchoredMenuReveal(reveal, 18.dp) { origin },
-            shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surface,
+                }.anchoredMenuReveal(reveal, 14.dp) { origin },
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLowest,
             tonalElevation = 0.dp,
             shadowElevation = 4.dp,
         ) {
             Column(Modifier.heightIn(max = (LocalMangaWindow.current.height - 48.dp).coerceAtLeast(1.dp))
                 .verticalScroll(rememberScrollState()).padding(6.dp)) {
-                actions.forEachIndexed { index, action ->
+                entries.forEachIndexed { index, action ->
                     val interaction = remember(index) { MutableInteractionSource() }
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    val startRemovalGroup = index > 0 && action.destructive && !entries[index - 1].destructive
+                    val colors = MaterialTheme.colorScheme
+                    val opacity = if (action.enabled) 1f else .40f
+                    Row(Modifier.fillMaxWidth().padding(top = if (startRemovalGroup) 6.dp else 0.dp)
+                        .clip(RoundedCornerShape(8.dp)).then(if (action.selected == true)
+                            Modifier.background(colors.primary.copy(alpha = .065f)) else Modifier)
                         .focusRequester(requesters[index])
-                        .onFocusChanged { if (it.isFocused) focusedIndex = index }
+                        .onFocusChanged { if (it.isFocused) focusedIndex = index else if (focusedIndex == index) focusedIndex = -1 }
+                        .then(action.selected?.let { choice -> Modifier.semantics { selected = choice } } ?: Modifier)
                         .clickable(enabled = action.enabled, interactionSource = interaction, indication = null,
-                            role = Role.Button, onClick = {
+                            role = if (action.selected != null) Role.RadioButton else Role.Button, onClick = {
                                 latestDismiss()
                                 action.onClick()
-                            }).motionPress(interaction, action.enabled, pressedScale = .98f)
-                        .heightIn(min = 36.dp).padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Text(action.label, color = MaterialTheme.colorScheme.onSurface.copy(
-                            alpha = if (action.enabled) 1f else .40f), style = MaterialTheme.typography.bodyMedium)
+                            }).motionPress(interaction, action.enabled, pressedScale = .98f, showKeyboardFocus = keyboardFocus)
+                        .heightIn(min = 34.dp).padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (hasIcons) Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                            action.icon?.let { glyph -> Icon(glyph, null, Modifier.size(17.dp),
+                                tint = (if (action.destructive) colors.error else colors.onSurfaceVariant).copy(alpha = opacity)) }
+                        }
+                        Text(action.label, Modifier.weight(1f), color = colors.onSurface.copy(alpha = opacity),
+                            style = MaterialTheme.typography.bodyMedium)
+                        if (hasSelection) Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+                            if (action.selected == true) Icon(Icons.Outlined.Check, null, Modifier.size(15.dp),
+                                tint = colors.primary.copy(alpha = opacity))
+                        }
                     }
                 }
             }
@@ -278,23 +346,63 @@ private fun DesktopActionPopup(
 /** Only a host with dark media chrome opts into this variant. */
 internal val LocalDesktopTooltipOverMedia = staticCompositionLocalOf { false }
 
+/** Nearby targets share one tooltip and a brief grace period when the pointer crosses a gap. */
+internal class DesktopTooltipSession {
+    var visibleOwner by mutableStateOf<Any?>(null)
+        private set
+    private var candidate: Any? = null
+    private var lastHiddenAt: Long? = null
+
+    fun arm(owner: Any): Long {
+        val now = monotonicTimeMillis()
+        val warm = visibleOwner != null || lastHiddenAt?.let { now - it in 0L..450L } == true
+        visibleOwner?.let { end(it) }
+        candidate = owner
+        return if (warm) 95L else 480L
+    }
+
+    fun show(owner: Any): Boolean {
+        if (candidate !== owner) return false
+        visibleOwner = owner
+        return true
+    }
+
+    fun end(owner: Any) {
+        if (candidate === owner) candidate = null
+        if (visibleOwner === owner) {
+            visibleOwner = null
+            lastHiddenAt = monotonicTimeMillis()
+        }
+    }
+}
+
+internal val LocalDesktopTooltipSession = staticCompositionLocalOf<DesktopTooltipSession?> { null }
+
 /** A non-focusable label lives inside its actual icon's Box, preserving the caller's layout slot. */
 @Composable
-internal fun DesktopIconTooltip(label: String?, interaction: MutableInteractionSource, enabled: Boolean) {
+internal fun DesktopIconTooltip(label: String?, interaction: MutableInteractionSource, enabled: Boolean,
+    showOnFocus: Boolean = true) {
     if (platformKind != PlatformKind.DESKTOP || label.isNullOrBlank()) return
     val hovered by interaction.collectIsHoveredAsState()
     val focused by interaction.collectIsFocusedAsState()
     val pressed by interaction.collectIsPressedAsState()
     val windowFocused = LocalWindowInfo.current.isWindowFocused
-    var visible by remember { mutableStateOf(false) }
-    LaunchedEffect(label, enabled, hovered, focused, pressed, windowFocused) {
-        visible = false
-        if (enabled && windowFocused && !pressed && (hovered || focused)) {
-            delay(500)
-            visible = true
+    val session = LocalDesktopTooltipSession.current ?: remember { DesktopTooltipSession() }
+    val owner = remember(interaction) { Any() }
+    var ready by remember(owner) { mutableStateOf(false) }
+    val interested = hovered || (focused && showOnFocus)
+    LaunchedEffect(session, owner, label, enabled, interested, pressed, windowFocused) {
+        if (!enabled || !windowFocused || pressed || !interested) return@LaunchedEffect
+        try {
+            delay(session.arm(owner))
+            ready = session.show(owner)
+            if (ready) awaitCancellation()
+        } finally {
+            ready = false
+            session.end(owner)
         }
     }
-    if (!visible) return
+    if (!ready || session.visibleOwner !== owner) return
     val density = LocalDensity.current
     val position = remember(density) {
         val gap = with(density) { 8.dp.roundToPx() }
@@ -321,7 +429,7 @@ internal fun DesktopIconTooltip(label: String?, interaction: MutableInteractionS
     Popup(popupPositionProvider = position, properties = PopupProperties(focusable = false)) {
         Surface(shape = RoundedCornerShape(9.dp), color = if (overMedia) colors.surfaceContainerHigh else colors.surface,
             tonalElevation = 0.dp, shadowElevation = if (overMedia) 1.dp else 3.dp) {
-            Text(label, Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+            Text(label, Modifier.widthIn(max = 300.dp).padding(horizontal = 11.dp, vertical = 6.dp),
                 color = colors.onSurface, fontSize = 12.sp, lineHeight = 17.sp,
                 maxLines = 2)
         }

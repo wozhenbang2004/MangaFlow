@@ -66,6 +66,7 @@ private class DesktopKeyBindings(context: PlatformContext) {
             ReaderKeyboardAction.FIRST_PAGE -> AwtKeyEvent.VK_HOME
             ReaderKeyboardAction.LAST_PAGE -> AwtKeyEvent.VK_END
             ReaderKeyboardAction.TOGGLE_CONTROLS -> AwtKeyEvent.VK_ENTER
+            ReaderKeyboardAction.PAGE_NAVIGATOR -> AwtKeyEvent.VK_G
         }, false, false, false, false)
 
     fun action(event: KeyEvent, rtl: Boolean): ReaderKeyboardAction? {

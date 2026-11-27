@@ -98,11 +98,14 @@ import dev.mangaflow.anime.canonicalBangumiId
 import dev.mangaflow.anime.canonicalDoubanId
 import dev.mangaflow.anime.sources.isRetiredAnimeSource
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.CompactMenuAction
 import dev.mangaflow.ui.CommunityPanel
 import dev.mangaflow.ui.DesktopVerticalScrollbar
+import dev.mangaflow.ui.DesktopSectionTabs
 import dev.mangaflow.ui.DetailAction
 import dev.mangaflow.ui.DetailTag
 import dev.mangaflow.ui.screenFitContentInsets
@@ -334,7 +337,9 @@ internal fun AnimeDetailPane(
         val fontScale = density.fontScale.coerceAtLeast(1f)
         val compactHero = maxHeight - contentTopPadding < 450.dp
         val toolbarPixels = with(density) { contentTopPadding.roundToPx() }
-        val wide = maxWidth >= (if (compactHero) 650.dp else 840.dp) * fontScale.coerceAtMost(1.5f)
+        val desktop = platformKind == PlatformKind.DESKTOP
+        val wide = if (desktop) maxWidth >= 780.dp * fontScale && maxHeight - contentTopPadding >= 325.dp * fontScale
+            else maxWidth >= (if (compactHero) 650.dp else 840.dp) * fontScale.coerceAtMost(1.5f)
         val width = minOf(maxWidth, if (wide) 1400.dp else 1080.dp)
         val horizontal = if (wide) 24.dp else 16.dp
         val contentInsets = screenFitContentInsets()
@@ -478,7 +483,9 @@ internal fun AnimeDetailPane(
                     .motionInputGate(active && !statusPresent && !discussionChecksPresent && episodeMenuOwner == null),
                     verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) {
-                        LiquidGlassSurface(backdrop, Modifier.widthIn(max = 320.dp * fontScale.coerceAtMost(1.4f)).fillMaxWidth(),
+                        if (desktop && wide) DesktopSectionTabs(detailTab, detailTabs, ::selectDetailTab,
+                            Modifier.widthIn(max = 340.dp * fontScale).fillMaxWidth())
+                        else LiquidGlassSurface(backdrop, Modifier.widthIn(max = 320.dp * fontScale.coerceAtMost(1.4f)).fillMaxWidth(),
                             cornerRadius = 24.dp, role = GlassSurfaceRole.NAVIGATION, elevation = 1.dp) {
                             MotionTabs(detailTab, detailTabs, ::selectDetailTab, controlHeight = 48.dp,
                                 fontSize = 13.sp, fullWidthIndicator = true)
@@ -590,9 +597,13 @@ internal fun AnimeDetailPane(
                                     val columns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
                                     val gap = animeDiscoveryGap(columns)
                                     val inset = maxOf(horizontal, animeDiscoveryInset(maxWidth, state.discoveryColumns, columns))
+                                    val relationColumns = if (desktop && wide && maxWidth - inset * 2 >= 600.dp * fontScale) 2 else 1
+                                    val relationRows = remember(relatedGroups, relationColumns) {
+                                        relatedGroups.map { (label, group) -> label to group.chunked(relationColumns) }
+                                    }
                                     val recommendationRows = remember(sourceRows, columns) { sourceRows.chunked(columns) }
                                     // Status and choice slots keep their indices while refreshing either section.
-                                    val itemCount = 5 + relatedGroups.sumOf { it.second.size + 1 } + recommendationRows.size
+                                    val itemCount = 5 + relationRows.sumOf { it.second.size + 1 } + recommendationRows.size
                                     val waitForRestore = !listShown && restoringPosition && sourceRows.isEmpty() &&
                                         position.firstVisibleItemIndex >= itemCount && (awaitingRelations || awaitingRecommendations)
                                     if (waitForRestore) {
@@ -634,15 +645,21 @@ internal fun AnimeDetailPane(
                                                     else -> Unit
                                                 }
                                             }
-                                            relatedGroups.forEach { (label, entries) ->
+                                            relationRows.forEach { (label, rows) ->
                                                 item(key = "related-group:$label") {
                                                     AnimeSectionTitle(label, modifier = Modifier.semantics { heading() })
                                                 }
-                                                items(entries, key = { "related:${it.subject.id}:${it.relation}" }) { entry ->
-                                                    val summary = animeSubjectSummary(entry.subject)
-                                                    AnimeSubjectRow(entry.subject,
-                                                        listOf(entry.relation, summary).filter(String::isNotBlank).joinToString(" · "),
-                                                        onOpen = { if (paneActive) onOpenRelated(entry.subject) })
+                                                items(rows, key = { "related:${it.first().subject.id}:${it.first().relation}" }) { row ->
+                                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                                                        row.forEach { entry -> key(entry.subject.id, entry.relation) {
+                                                            val summary = animeSubjectSummary(entry.subject)
+                                                            AnimeSubjectRow(entry.subject,
+                                                                listOf(entry.relation, summary).filter(String::isNotBlank).joinToString(" · "),
+                                                                modifier = Modifier.weight(1f),
+                                                                onOpen = { if (paneActive) onOpenRelated(entry.subject) })
+                                                        } }
+                                                        if (row.size < relationColumns) Spacer(Modifier.weight(1f))
+                                                    }
                                                 }
                                             }
                                             item(key = "source-related-heading") {
@@ -755,7 +772,14 @@ internal fun AnimeDetailPane(
                                         }
                                     }
                                     BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                                        val columns = animeEpisodeGridColumns(maxWidth - horizontal * 2, fontScale, wide)
+                                        val freeWidth = maxWidth - horizontal * 2
+                                        val namedCatalogue = remember(selectedEpisodes, native) {
+                                            val sample = selectedEpisodes.take(24)
+                                            native || sample.isNotEmpty() && sample.count { animeEpisodeSubtitle(it) != null } * 2 >= sample.size
+                                        }
+                                        val listRows = desktop && wide && namedCatalogue && freeWidth >= 300.dp * fontScale
+                                        val columns = if (listRows) ((freeWidth + 8.dp) / (282.dp * fontScale + 8.dp)).toInt().coerceIn(1, 3)
+                                            else animeEpisodeGridColumns(freeWidth, fontScale, wide)
                                         val rows = remember(episodes, columns) { episodes.chunked(columns) }
                                         val showStatus = episodes.isEmpty()
                                         val missingResume = savedProgress != null && savedEpisode == null && !state.detailLoading
@@ -833,6 +857,7 @@ internal fun AnimeDetailPane(
                                                                     libraryAvailable = !state.libraryReadUnavailable,
                                                                     onPlay = { onPlay(episode) }, onSources = { onSources(episode) },
                                                                     onCompleted = { controller.setEpisodeCompleted(episode.id, episode.id !in completed) },
+                                                                    listRow = listRows,
                                                                     onMenuPresenceChange = { present -> if (present) episodeMenuOwner = episode.id
                                                                         else if (episodeMenuOwner == episode.id) episodeMenuOwner = null },
                                                                     modifier = Modifier.weight(1f).then(if (episode.id == locatedId) Modifier.drawWithContent {
@@ -861,11 +886,26 @@ internal fun AnimeDetailPane(
         }
         if (wide) Row(Modifier.width(width).fillMaxHeight().padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            Column(Modifier.width((width * .36f).coerceIn(280.dp, 420.dp)).fillMaxHeight()) {
+            val workWidth = if (desktop) (width * .31f).coerceIn(242.dp * fontScale, 370.dp * fontScale)
+                else (width * .36f).coerceIn(280.dp, 420.dp)
+            Column(Modifier.width(workWidth).fillMaxHeight()) {
                 val summaryPosition = rememberScrollState()
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     Column(Modifier.fillMaxSize().verticalScroll(summaryPosition)
-                        .padding(end = 12.dp, bottom = if (showDock) 8.dp else listEnd)) { hero() }
+                        .padding(end = 12.dp, bottom = if (showDock) 8.dp else listEnd)) {
+                        hero()
+                        val summary = subject.description.ifBlank { canonicalInfo?.description.orEmpty() }
+                        if (desktop && detailTab != 1 && summary.isNotBlank()) {
+                            var clipped by remember(summary) { mutableStateOf(false) }
+                            Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                                Text(summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = if (compactHero) 3 else 5, overflow = TextOverflow.Ellipsis,
+                                    onTextLayout = { clipped = it.hasVisualOverflow })
+                                if (clipped) MotionTextButton(onClick = { selectDetailTab(1) }, enabled = active,
+                                    contentPadding = PaddingValues(0.dp)) { Text("完整简介") }
+                            }
+                        }
+                    }
                     DesktopVerticalScrollbar(summaryPosition, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                 }
                 if (showDock) playDock(Modifier.fillMaxWidth().padding(top = 6.dp, end = 12.dp, bottom = bottomInset + 4.dp))
@@ -1474,14 +1514,22 @@ private fun AnimeEpisodeCell(
     onCompleted: () -> Unit,
     onMenuPresenceChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    listRow: Boolean = false,
 ) {
     var menuVisible by remember(episode.id) { mutableStateOf(false) }
     var menuMounted by remember(episode.id) { mutableStateOf(false) }
     var sourcesAfterMenu by remember(episode.id) { mutableStateOf(false) }
     LaunchedEffect(active) { if (!active) { menuVisible = false; sourcesAfterMenu = false } }
     Box(modifier) {
-        AnimeEpisodeTile(episode, availability, progress, completed, "上次观看".takeIf { resume },
-            active, onPlay, onSources, onMore = { menuMounted = true; menuVisible = true })
+        val openMenu = { menuMounted = true; menuVisible = true }
+        if (listRow) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            AnimeEpisodeTile(episode, availability, progress, completed, "上次观看".takeIf { resume },
+                active, onPlay, onSources, modifier = Modifier.weight(1f), listRow = true, onMore = openMenu, titleFirst = true)
+            MotionIconButton(onClick = openMenu, enabled = active, modifier = Modifier.size(38.dp), tooltip = "本集操作") {
+                Icon(Icons.Outlined.MoreHoriz, "本集操作", Modifier.size(18.dp))
+            }
+        } else AnimeEpisodeTile(episode, availability, progress, completed, "上次观看".takeIf { resume },
+            active, onPlay, onSources, onMore = openMenu)
         if (menuMounted) CompactGlassPopover(menuVisible, backdrop,
             onDismiss = { menuVisible = false; sourcesAfterMenu = false },
             onPresenceChange = { present ->

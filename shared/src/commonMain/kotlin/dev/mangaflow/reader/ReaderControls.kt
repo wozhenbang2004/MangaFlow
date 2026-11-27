@@ -13,6 +13,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -202,6 +204,26 @@ internal fun ReaderToolPresence(
         scaleY = 1f - (if (top) .045f else .09f) * remaining
         alpha = 1f - remaining * remaining
     }.motionInputGate(presence.targetState)) { content() }
+}
+
+/** Place the page ruler and chapter tools on the same baseline when the artwork pane has room. */
+@Composable
+internal fun ReaderDockGroups(desktop: Boolean, progress: @Composable () -> Unit, actions: @Composable () -> Unit) {
+    val content = Modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 10.dp, vertical = 4.dp)
+    if (!desktop) {
+        Column(content) { progress(); actions() }
+        return
+    }
+    BoxWithConstraints(content) {
+        if (maxWidth >= 620.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { progress() }
+                Spacer(Modifier.padding(horizontal = 8.dp).size(1.dp, 20.dp)
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .13f)))
+                Box(Modifier.width(272.dp)) { actions() }
+            }
+        } else Column(Modifier.fillMaxWidth()) { progress(); actions() }
+    }
 }
 
 /** Keeps Material's seek, keyboard and accessibility behavior, with a quiet track and stable thumb slot. */

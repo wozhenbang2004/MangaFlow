@@ -198,8 +198,12 @@ internal fun ExpandingSearchBar(
         val endInset = 8.dp
         val availableWidth = (maxWidth - endInset).coerceAtLeast(44.dp)
         val minPanelWidth = minOf(availableWidth, inputEndInset + 16.dp + 64.dp)
-        val panelWidth = (maxWidth - 64.dp).coerceIn(minPanelWidth, minOf(availableWidth, 448.dp))
-        val resultsRoom = (maxHeight - 64.dp).coerceIn(0.dp, 360.dp)
+        val desktopWorkspace = fitsDesktopIndex(maxWidth, 660.dp)
+        val panelLimit = if (desktopWorkspace) 1000.dp else 448.dp
+        val panelWidth = (maxWidth - 64.dp).coerceIn(minPanelWidth, minOf(availableWidth, panelLimit))
+        val resultsRoom = if (desktopWorkspace)
+            minOf((maxHeight - 64.dp).coerceAtLeast(0.dp), maxHeight * .67f)
+        else (maxHeight - 64.dp).coerceIn(0.dp, 360.dp)
         // An empty title/author query is exactly the toolbar height, without an empty result gutter.
         val inputOnly = expanded && query.isBlank() && searchTarget != SearchTarget.TAG && !scopeCopyOnly && !showEmptyResults
         val panelHeight = if (inputOnly) 44.dp else foregroundHeight.coerceIn(44.dp, 44.dp + resultsRoom)

@@ -165,6 +165,8 @@ internal fun SiteRankingsScreen(
         }
         return
     }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val indexed = fitsDesktopIndex(maxWidth, 900.dp)
     RankingPageFrame(Modifier.fillMaxSize().background(colors.background.copy(alpha = .97f))
         .semantics { paneTitle = "漫画榜单" }, header = {
         Column {
@@ -195,7 +197,7 @@ internal fun SiteRankingsScreen(
             val conditionCount = selection.activeFilterCount
             val orderLabel = if (selection.site == RankingSite.BANGUMI && selection.filters.query.isNotBlank())
                 "搜索匹配" else selection.kind.label
-            Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp),
+            if (!indexed) Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 RankingSourceTabs(selection.site, contentReady, !state.restoringSelection,
@@ -216,7 +218,7 @@ internal fun SiteRankingsScreen(
                         fontWeight = FontWeight.Medium, maxLines = 1)
                 }
             }
-            if (!state.restoringSelection) Row(
+            if (!indexed && !state.restoringSelection) Row(
                 Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -244,15 +246,20 @@ internal fun SiteRankingsScreen(
             }
         }
     }) {
+        Row(Modifier.fillMaxSize()) {
+        if (indexed) DesktopRankingSidebar(state, controller, contentReady, openFilters,
+            Modifier.width(214.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)))
         MotionTabContent(selected = state, contentKey = { it.selection.key },
             order = { it.selection.site.ordinal * 100 + it.selection.kind.ordinal * 10 + it.selection.scope.ordinal },
-            soft = true, modifier = Modifier.fillMaxSize()) { pane ->
+            soft = true, modifier = Modifier.weight(1f).fillMaxHeight()) { pane ->
             positions.SaveableStateProvider(pane.selection.key) {
-                RankingPane(pane, backdrop, 0.dp,
+                RankingPane(pane, backdrop, 0.dp, indexed,
                     active = contentReady && pane.selection == state.selection,
                     onRetry = controller::retry, onMore = controller::more, onOpen = onOpen, onInspect = onInspect)
             }
         }
+        }
+    }
     }
     SiteRankingFiltersDialog(visible = filtersVisible && active, selection = panelSelection,
         active = active, backdrop = backdrop, onApply = {
@@ -285,6 +292,50 @@ internal fun SiteRankingsScreen(
                 if (panelFetchedAt > 0) Text("本机获取 · " + formatInstantMillis(panelFetchedAt, "MM-dd HH:mm"),
                     Modifier.padding(bottom = 8.dp), style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DesktopRankingSidebar(state: SiteRankingsState, controller: SiteRankingsController, enabled: Boolean,
+    onFilters: () -> Unit, modifier: Modifier) {
+    val selection = state.selection
+    val year = remember { formatInstantMillis(wallTimeMillis(), "yyyy").toIntOrNull() }
+    DesktopCatalogueSidebar(modifier) {
+        Column {
+            DesktopFilterHeading("榜单站点")
+            RankingSite.entries.forEach { site ->
+                RankingMenuChoice(site.title, !state.restoringSelection && selection.site == site, enabled,
+                    sourceId = site.id) { controller.selectSite(site) }
+            }
+        }
+        val kinds = selection.availableKinds
+        DesktopFilterOptions("排序", kinds.map { it.label }, kinds.indexOf(selection.kind), enabled) {
+            controller.selectKind(kinds[it])
+        }
+        val scopes = selection.availableScopes
+        if (scopes.size > 1) DesktopFilterOptions("作品范围", scopes.map { it.label }, scopes.indexOf(selection.scope), enabled) {
+            controller.selectScope(scopes[it])
+        } else DesktopIndexNote("作品范围 · ${selection.scopeLabel}")
+        if (year != null) {
+            val years = (listOf<Int?>(null, year, year - 1, year - 2) + listOfNotNull(selection.filters.year)).distinct()
+            DesktopFilterOptions("首发年份", years.map { it?.toString() ?: "不限" }, years.indexOf(selection.filters.year), enabled) {
+                val chosen = years[it]
+                controller.applySelection(selection.copy(filters = selection.filters.copy(year = chosen,
+                    month = selection.filters.month.takeIf { chosen != null })))
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            MotionTextButton(onClick = onFilters, enabled = enabled, contentPadding = PaddingValues(horizontal = 5.dp)) {
+                Icon(Icons.Outlined.FilterList, null, Modifier.size(17.dp))
+                Text("详细筛选", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodyMedium)
+            }
+            if (selection.activeFilterCount > 0) {
+                Text(selection.filterSummary, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                MotionTextButton(onClick = { controller.applySelection(selection.copy(filters = SiteRankingFilters())) },
+                    enabled = enabled, contentPadding = PaddingValues(horizontal = 5.dp)) { Text("清除条件") }
             }
         }
     }
@@ -392,10 +443,12 @@ internal fun RankingPageFrame(
 
 @Composable
 private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
-    top: Dp, active: Boolean, onRetry: () -> Unit, onMore: () -> Unit,
+    top: Dp, indexed: Boolean, active: Boolean, onRetry: () -> Unit, onMore: () -> Unit,
     onOpen: (SiteRankedWork) -> Unit, onInspect: (SiteRankedWork) -> Unit,
 ) {
-    val grid = rememberLazyGridState()
+    val selectionKey = remember(state.selection) { state.selection.key }
+    val savedGrid = rememberLazyGridState()
+    val grid = if (state.entries.isEmpty()) remember(selectionKey) { LazyGridState() } else savedGrid
     val motion = LocalMotionEnabled.current
     val placement = remember(motion) {
         if (motion) spring<IntOffset>(MangaMotion.NavigationDamping, MangaMotion.GestureStiffness,
@@ -410,21 +463,42 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
     }
     val ordinalStyle = mangaMetricValueStyle(16.sp, 22.sp).copy(fontWeight = FontWeight.SemiBold)
     val widest = rememberTextMeasurer().measure("8".repeat(digits), ordinalStyle, maxLines = 1).size.width
-    val ordinalWidth = with(LocalDensity.current) { widest.toDp() + 9.dp }
+    val ordinalWidth = with(LocalDensity.current) { (widest.toDp() + 9.dp).coerceAtLeast(if (indexed) 44.dp else 0.dp) }
     val nearEnd by remember(grid) { derivedStateOf {
         val info = grid.layoutInfo
         info.totalItemsCount > 0 && (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 4
     } }
+    var lastAutoCount by remember(selectionKey, indexed) { mutableIntStateOf(-1) }
     LaunchedEffect(active, nearEnd, state.entries.size, state.hasMore, state.loadingMore, state.refreshing, state.error) {
         if (active && nearEnd && state.entries.isNotEmpty() && state.hasMore &&
-            !state.loadingMore && !state.refreshing && state.error == null) onMore()
+            !state.loadingMore && !state.refreshing && state.error == null && (!indexed || lastAutoCount != state.entries.size)) {
+            lastAutoCount = state.entries.size
+            onMore()
+        }
     }
-    Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).motionInputGate(active)) {
-        LazyVerticalGrid(columns = GridCells.Adaptive(344.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
+    Column(Modifier.fillMaxSize().mangaHazeSource(backdrop).motionInputGate(active)) {
+        val selection = state.selection
+        if (indexed) Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 26.dp, top = 12.dp)) {
+            Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 6.dp, bottom = 9.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    DesktopIndexNote(selection.scopeLabel)
+                    val order = if (selection.site == RankingSite.BANGUMI && selection.filters.query.isNotBlank())
+                        "搜索匹配" else selection.kind.label + "榜"
+                    Text(selection.site.title + " · " + order, style = browseTitleStyle(25.sp, 32.sp))
+                }
+                if (!empty) DesktopIndexNote("已载入 ${state.entries.size} 部")
+            }
+            DesktopIndexLabels(rankingValueLabel(selection.kind),
+                if (selection.kind == SiteRankingKind.NEWEST) "站点评分" else "首发日期", ordinalWidth)
+        }
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+        LazyVerticalGrid(columns = if (indexed) GridCells.Fixed(1)
+            else GridCells.Adaptive(344.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
             state = grid, modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = if (desktop) 24.dp else 16.dp,
-                top = top + 6.dp, bottom = 24.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
-            horizontalArrangement = Arrangement.spacedBy(28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            contentPadding = PaddingValues(start = if (indexed) 20.dp else 16.dp, end = if (indexed) 26.dp else if (desktop) 24.dp else 16.dp,
+                top = if (indexed) top else top + 6.dp, bottom = 24.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
+            horizontalArrangement = Arrangement.spacedBy(28.dp), verticalArrangement = Arrangement.spacedBy(if (indexed) 0.dp else 14.dp)) {
             if (empty || state.refreshing || firstError != null) item(key = "rank-status", span = { GridItemSpan(maxLineSpan) }) {
                 val site = state.selection.site.title
                 val observed = state.fetchedAt.takeIf { it > 0 }?.let { formatInstantMillis(it, "MM-dd HH:mm") }
@@ -454,11 +528,14 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
                 }
             }
             items(state.entries, key = { it.work.key }, contentType = { "native-ranking" }) { entry ->
-                SiteRankingRow(entry, state.selection.kind, entry.work.key in state.linkedIds, ordinalWidth,
-                    state.selection.key, onOpen, onInspect,
-                    modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = placement))
+                val item = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = placement)
+                if (indexed) DesktopRankingRow(entry, selection.kind, selectionKey, entry.work.key in state.linkedIds, ordinalWidth,
+                    onOpen, onInspect, item)
+                else SiteRankingRow(entry, selection.kind, entry.work.key in state.linkedIds, ordinalWidth,
+                    selectionKey, onOpen, onInspect, modifier = item)
             }
-            if (!empty && (state.loadingMore || state.error != null && firstError == null)) item(
+            if (!empty && (state.loadingMore || state.error != null && firstError == null ||
+                    indexed && state.hasMore && firstError == null)) item(
                 key = "rank-footer", span = { GridItemSpan(maxLineSpan) }
             ) {
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -467,12 +544,76 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
                         Text(state.error, Modifier.padding(vertical = 10.dp),
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         MotionTextButton(onClick = onRetry, enabled = active) { Text("重试") }
-                    }
+                    } else if (indexed && state.hasMore) MotionTextButton(onClick = onMore,
+                        enabled = active && !state.loading && !state.refreshing) { Text("加载更多作品") }
                 }
             }
         }
         if (desktop) DesktopVerticalScrollbar(grid, Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(7.dp))
+        }
     }
+}
+
+@Composable
+private fun DesktopRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, selectionKey: String, linked: Boolean,
+    ordinalWidth: Dp, onOpen: (SiteRankedWork) -> Unit, onInspect: (SiteRankedWork) -> Unit, modifier: Modifier) {
+    val work = entry.work
+    val colors = MaterialTheme.colorScheme
+    val interaction = remember(work.key) { MutableInteractionSource() }
+    val transition = LocalMangaCoverTransition.current
+    val placement = "ranking-site-$selectionKey"
+    val inspect = {
+        transition?.select?.invoke(MangaCoverKey(work.manga.id, placement))
+        onInspect(work)
+    }
+    val open = {
+        transition?.select?.invoke(if (linked) null else MangaCoverKey(work.manga.id, placement))
+        onOpen(work)
+    }
+    val score = work.score?.let { "${it.toString().removeSuffix(".0")} / ${work.scoreScale}" }
+    val mainValue = when (kind) {
+        SiteRankingKind.SCORE -> score
+        SiteRankingKind.FAVOURITES -> work.favourites?.let(::rankingCount)
+        SiteRankingKind.TRENDING -> work.trending?.let(::rankingCount)
+        SiteRankingKind.POPULARITY -> work.popularity?.let(::rankingCount)
+        SiteRankingKind.NEWEST -> work.publishedDate
+    }
+    Column(modifier.fillMaxWidth()) {
+        DesktopContextMenuArea(listOf(DesktopMenuAction("打开作品", onClick = open),
+            DesktopMenuAction("作品资料与阅读来源", onClick = inspect))) {
+            DesktopIndexColumns(Modifier.combinedClickable(role = Role.Button, interactionSource = interaction,
+                indication = null, onClickLabel = "打开${work.manga.title}", onLongClickLabel = "作品资料与阅读来源",
+                onLongClick = inspect, onClick = open).motionPress(interaction, pressedScale = .997f).padding(vertical = 7.dp),
+                ordinalWidth = ordinalWidth,
+                ordinal = { Text(entry.position.toString().padStart(2, '0'), style = mangaMetricValueStyle(16.sp, 22.sp),
+                    color = if (entry.position in 1..3) colors.primary else colors.onSurfaceVariant) },
+                work = { DesktopIndexWork(work.manga, cover = { frame ->
+                    CatalogueCover(work.manga, frame.mangaSharedCover(work.manga.id, placement).mangaCoverCard(5.dp))
+                }, subtitle = work.manga.authors.take(3).joinToString(" / ")) },
+                detail = {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(mainValue ?: "—", style = mangaMetricValueStyle(15.sp, 20.sp), maxLines = 1,
+                            overflow = TextOverflow.Ellipsis)
+                        if (kind == SiteRankingKind.SCORE && work.ratingCount != null)
+                            DesktopIndexNote(rankingCount(work.ratingCount.toLong()) + " 人评分")
+                    }
+                },
+                figure = { DesktopIndexNote((if (kind == SiteRankingKind.NEWEST) score else work.publishedDate) ?: "—") },
+                action = { MotionIconButton(onClick = inspect, modifier = Modifier.size(34.dp),
+                    tooltip = if (linked) "已关联 · 查看或更换阅读来源" else "作品资料与阅读来源") {
+                    Icon(if (linked) Icons.Outlined.Link else Icons.Outlined.Info, "作品资料与阅读来源", Modifier.size(16.dp))
+                } })
+        }
+        androidx.compose.material3.HorizontalDivider(color = colors.onSurface.copy(alpha = .065f))
+    }
+}
+
+private fun rankingValueLabel(kind: SiteRankingKind): String = when (kind) {
+    SiteRankingKind.SCORE -> "站点评分"
+    SiteRankingKind.POPULARITY -> "加入书单"
+    SiteRankingKind.TRENDING -> "趋势热度"
+    SiteRankingKind.FAVOURITES -> "收藏人数"
+    SiteRankingKind.NEWEST -> "首发日期"
 }
 
 @Composable

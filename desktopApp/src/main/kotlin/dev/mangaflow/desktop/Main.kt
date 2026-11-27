@@ -62,9 +62,9 @@ fun main() {
             var model by remember { mutableStateOf<MangaViewModel?>(null) }
             var closing by remember { mutableStateOf(false) }
             val scope = rememberCoroutineScope()
-            val title by produceState("漫流", model) {
+            val readerTitle by produceState<String?>(null, model) {
                 model?.reading?.map { reading ->
-                    reading?.manga?.title?.takeIf { it.isNotBlank() }?.let { "$it · 漫流" } ?: "漫流"
+                    reading?.manga?.title?.takeIf { it.isNotBlank() }
                 }?.distinctUntilChanged()?.collectLatest { value = it }
             }
             val windowState = rememberWindowState(
@@ -73,6 +73,10 @@ fun main() {
                 placement = windowPreferences.initialPlacement,
             )
             val fullscreen = remember { DesktopFullscreen() }
+            var playbackTitle by remember { mutableStateOf<String?>(null) }
+            val reportPlaybackTitle = remember { { value: String? -> playbackTitle = value } }
+            val taskTitle = readerTitle ?: playbackTitle.takeIf { fullscreen.animePlaybackVisible }
+            val title = taskTitle?.takeIf { it.isNotBlank() }?.let { "$it · 漫流" } ?: "漫流"
             val requestFullscreen: (Boolean) -> Unit = { enabled ->
                 if (enabled && !fullscreen.active && !fullscreen.restoring) {
                     windowPreferences.capture(windowState.desktopSnapshot())
@@ -155,7 +159,8 @@ fun main() {
                 }
                 CompositionLocalProvider(
                     LocalMangaContext provides context,
-                    LocalWindowFullscreen provides WindowFullscreen(fullscreen.active, requestFullscreen, reportPlaybackVisibility),
+                    LocalWindowFullscreen provides WindowFullscreen(fullscreen.active, requestFullscreen,
+                        reportPlaybackVisibility, reportPlaybackTitle),
                 ) {
                     MangaFlowTheme {
                         DesktopWindowChrome(window, MaterialTheme.colorScheme.background,
@@ -215,6 +220,12 @@ private fun List<DesktopWorkArea>.bestFor(bounds: DesktopWindowBounds): DesktopW
         intersection.width.coerceAtLeast(0).toLong() * intersection.height.coerceAtLeast(0)
     }?.takeIf { it.bounds.intersects(bounds.rectangle()) } ?: firstOrNull()
 
+private fun Rectangle.initialWindowBounds(): DesktopWindowBounds {
+    val w = (width * .85).roundToInt().coerceIn(minOf(960, width), minOf(1480, width))
+    val h = (height * .87).roundToInt().coerceIn(minOf(600, height), minOf(1000, height))
+    return DesktopWindowBounds(x + (width - w) / 2, y + (height - h) / 2, w, h)
+}
+
 private fun restoreWindowBounds(preferences: Preferences): DesktopWindowBounds? {
     val areas = desktopWorkAreas()
     if (areas.isEmpty()) return null
@@ -228,19 +239,18 @@ private fun restoreWindowBounds(preferences: Preferences): DesktopWindowBounds? 
         val area = areas.firstOrNull { it.id == preferences.getString("monitor") }
             ?: if (hasPosition) areas.bestFor(stored)!! else areas.first()
         val work = area.bounds
-        val width = stored.width.coerceIn(minOf(320, work.width), work.width)
-        val height = stored.height.coerceIn(minOf(320, work.height), work.height)
+        val initial = work.initialWindowBounds()
+        val width = if (preferences.contains("normalWidth")) stored.width.coerceIn(minOf(320, work.width), work.width)
+            else initial.width
+        val height = if (preferences.contains("normalHeight")) stored.height.coerceIn(minOf(320, work.height), work.height)
+            else initial.height
         val x = if (hasPosition) stored.x.coerceIn(work.x, work.x + work.width - width)
             else work.x + (work.width - width) / 2
         val y = if (hasPosition) stored.y.coerceIn(work.y, work.y + work.height - height)
             else work.y + (work.height - height) / 2
         DesktopWindowBounds(x, y, width, height)
     }.getOrElse {
-        val work = areas.first().bounds
-        val width = minOf(1120, work.width)
-        val height = minOf(800, work.height)
-        DesktopWindowBounds(work.x + (work.width - width) / 2,
-            work.y + (work.height - height) / 2, width, height)
+        areas.first().bounds.initialWindowBounds()
     }
 }
 
