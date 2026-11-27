@@ -25,6 +25,8 @@ internal data class AnimeMediaPreflight(
 )
 
 private const val PROBE_BYTES = 64 * 1024
+// The detail hint can read a root, one rendition playlist and one media prefix.
+internal const val ANIME_OPENING_PROBE_BYTES = 3L * PROBE_BYTES
 private const val PROBE_TRACK_BYTES = 256 * 1024
 private val DASH_HEIGHT = Regex("""(?i)\bheight\s*=\s*["'](\d+)["']""")
 private val HLS_MAP = Regex("(?i)\\bURI=\"([^\"]+)\"")
@@ -36,7 +38,7 @@ private data class ProbeSample(val url: HttpUrl, val response: NetworkResponse, 
     fun rate() = bytes.size.takeIf { it >= 48 * 1024 && bodyMs >= 100L }?.toLong()?.times(1_000L)?.div(bodyMs)
 }
 
-internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset): AnimeMediaPreflight {
+internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset, openingHint: Boolean = false): AnimeMediaPreflight {
     if (!animePlaybackFormatSupported(asset))
         return AnimeMediaPreflight(wallTimeMillis(), verified = false, failure = "当前平台暂不支持这条 DASH 线路")
     val origin = publicProbeUrl(asset.url)
@@ -44,13 +46,14 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
     val client = NetworkClient(route = asset.route, publicMediaOnly = true, connectTimeoutMillis = 2_500,
         readTimeoutMillis = 4_000, callTimeoutMillis = 4_500)
     val startedAt = monotonicTimeMillis()
+    val expiresAt = startedAt + if (openingHint) 2_000L else 8_000L
     fun result(code: Int? = null, verified: Boolean? = null, failure: String? = null,
         quality: String? = null, rate: Long? = null, height: Int? = null) =
-        AnimeMediaPreflight(wallTimeMillis(), code, verified, failure, quality, rate,
+        AnimeMediaPreflight(wallTimeMillis(), code, verified, failure, quality, rate.takeUnless { openingHint },
             (monotonicTimeMillis() - startedAt).coerceAtLeast(1L), height)
 
     suspend fun sample(initial: HttpUrl, range: LongRange? = null, maximumBytes: Int = PROBE_BYTES): ProbeSample? {
-        val deadline = minOf(monotonicTimeMillis() + 3_500L, startedAt + 8_000L)
+        val deadline = minOf(monotonicTimeMillis() + 3_500L, expiresAt)
         return try {
             var url = initial
             repeat(6) {
@@ -114,7 +117,7 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
             else -> null
         }, probeHttpMessage(code))
         if (isVideoPrefix(root.bytes, asset.sourceId)) return result(code, true, rate = root.rate(),
-            height = videoSampleHeight(root.bytes, asset.sourceId) ?: sampleMp4TrackHeight(root))
+            height = videoSampleHeight(root.bytes, asset.sourceId) ?: if (openingHint) null else sampleMp4TrackHeight(root))
         val text = root.text
         val hls = text.startsWith("#EXTM3U") && text.contains("#EXT-X-")
         val dash = text.startsWith("<MPD") || (text.startsWith("<?xml") && text.contains("<MPD"))
@@ -128,11 +131,11 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
                 val initTag = segment?.initTag.orEmpty()
                 val init = HLS_MAP.find(initTag)?.groupValues?.get(1)
                 val part = if (media != null && segment != null) publicProbeChild(media.url, segment.uri)?.let {
-                    sampleHlsPart(it, segment.byteRange, if (height == null) PROBE_TRACK_BYTES else PROBE_BYTES)
+                    sampleHlsPart(it, segment.byteRange, if (height == null && !openingHint) PROBE_TRACK_BYTES else PROBE_BYTES)
                 } else null
                 val goodPart = part?.takeIf { it.response.code in 200..299 && isVideoPrefix(it.bytes, asset.sourceId) }
                 val trackHeight = goodPart?.let { videoSampleHeight(it.bytes, asset.sourceId) }
-                val initUrl = if (trackHeight == null && height == null && goodPart != null && media != null && init != null)
+                val initUrl = if (!openingHint && trackHeight == null && height == null && goodPart != null && media != null && init != null)
                     publicProbeChild(media.url, init) else null
                 val headerHeight = trackHeight ?: initUrl?.let { sampleHlsPart(it, HLS_MAP_RANGE.find(initTag)?.groupValues?.get(1)) }
                     ?.takeIf { it.response.code in 200..299 }?.let { videoSampleHeight(it.bytes, asset.sourceId) }
@@ -152,9 +155,10 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
             var firstEvidence: AnimeMediaPreflight? = null
             val renditions = variants.mapNotNull { variant ->
                 publicProbeChild(root.url, lines[variant.uriIndex].trim())?.let { it to variant.height }
-            }.sortedBy { animeRenditionOrder(it.second, asset.preferredAdaptiveHeight) }.distinctBy { it.first }.take(3)
+            }.sortedBy { animeRenditionOrder(it.second, asset.preferredAdaptiveHeight) }.distinctBy { it.first }
+                .take(if (openingHint) 1 else 3)
             for ((url, height) in renditions) {
-                if (monotonicTimeMillis() >= startedAt + 8_000L) break
+                if (monotonicTimeMillis() >= expiresAt) break
                 val evidence = samplePlaylist(sample(url), height)
                 if (evidence.failure == null) return evidence
                 if (firstEvidence == null) firstEvidence = evidence

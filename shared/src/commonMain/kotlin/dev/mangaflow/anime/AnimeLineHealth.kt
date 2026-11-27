@@ -20,12 +20,26 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val HEALTH_MAX_AGE_MS = 72 * 60 * 60_000L
+private const val HEALTH_RECENT_AGE_MS = 6 * 60 * 60_000L
 private const val HEALTH_MAX_KEYS = 128
 private const val HEALTH_WINDOW_SIZE = 14
 private const val HEALTH_MAX_SAMPLE_MS = 180_000L
 private const val HEALTH_MAX_FILE_BYTES = 512 * 1024L
 
 internal data class AnimeLineHealthKey(val digest: String)
+
+/** One real viewing. Its identity and writes are only used in memory. */
+internal class AnimeLineViewing {
+    private val outcomes = mutableMapOf<AnimeLineHealthKey, Boolean>()
+
+    // The owning health store serializes updates for this viewing.
+    internal fun update(key: AnimeLineHealthKey, stalled: Boolean): Boolean {
+        val previous = outcomes[key]
+        if (previous == true || previous == stalled) return false
+        outcomes[key] = stalled
+        return true
+    }
+}
 
 /** An opaque hint for ordering confirmed candidates. An empty group aggregates a whole source. */
 internal fun animeLineHealthKey(sourceId: String, group: String, sourceRevision: String,
@@ -45,10 +59,33 @@ internal data class AnimeLineHealth(
     val earlyRebufferP50Ms: Long?,
     val decodedHeightP50: Int?,
     val earlyFailures: Int,
+    val sustainedPlaybackSamples: Int = 0,
+    val sustainedPlaybackStalls: Int = 0,
+    val firstFrameSamples: Int = 0,
 ) {
+    val hasPlaybackHistory get() = startupSucceeded + startupFailed + sustainedPlaybackSamples > 0
+    val hasWorkingHistory get() = startupSucceeded > startupFailed || sustainedPlaybackSamples > 2 * sustainedPlaybackStalls
     val repeatedPlaybackTrouble get() = startupFailed >= 2 && startupFailed > startupSucceeded ||
         earlyFailures >= 2 && earlyFailures >= earlyPlaybackSamples ||
-        earlyPlaybackSamples >= 2 && (earlyRebufferP50Ms ?: 0L) >= 1_000L
+        earlyPlaybackSamples >= 2 && (earlyRebufferP50Ms ?: 0L) >= 1_000L ||
+        sustainedPlaybackStalls >= 2 && sustainedPlaybackStalls * 2 >= sustainedPlaybackSamples
+
+    /** At comparable quality, displace the last working line only for a measured, stable advantage. */
+    fun startsNoticeablyFasterThan(previous: AnimeLineHealth?): Boolean {
+        val frame = firstFrameP50Ms ?: return false
+        val previousFrame = previous?.firstFrameP50Ms ?: return false
+        if (firstFrameSamples < 2 || previous.firstFrameSamples < 2 || repeatedPlaybackTrouble ||
+            startupSucceeded <= startupFailed) return false
+        val stable = sustainedPlaybackSamples > 2 * sustainedPlaybackStalls || earlyPlaybackSamples > earlyStallCount + earlyFailures
+        if (!stable) return false
+        var ours = frame
+        var theirs = previousFrame
+        if (addressP50Ms != null && previous.addressP50Ms != null) {
+            ours += addressP50Ms
+            theirs += previous.addressP50Ms
+        }
+        return theirs - ours >= 1_000L && ours * 4 <= theirs * 3
+    }
 }
 
 /** Rate from actual network bytes while this video is transferring. Buffered pauses supply no speed sample. */
@@ -76,17 +113,20 @@ internal class AnimePlaybackTransferWindow {
 
 /** The app-owned controller records observations in memory. Disk work never holds the playback lock. */
 internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineScope) {
-    private enum class Window { ADDRESS, STARTUP, EARLY_PLAYBACK, RESOLUTION }
+    private enum class Window { ADDRESS, STARTUP, EARLY_PLAYBACK, RESOLUTION, SUSTAINED_PLAYBACK }
     private enum class Kind(val window: Window) {
         ADDRESS(Window.ADDRESS), FIRST_FRAME(Window.STARTUP), PLAYABLE_OUTPUT(Window.STARTUP),
         STARTUP_FAILURE(Window.STARTUP), EARLY_REBUFFER(Window.EARLY_PLAYBACK),
-        EARLY_FAILURE(Window.EARLY_PLAYBACK), DECODED_HEIGHT(Window.RESOLUTION)
+        EARLY_FAILURE(Window.EARLY_PLAYBACK), DECODED_HEIGHT(Window.RESOLUTION),
+        SUSTAINED_CLEAR(Window.SUSTAINED_PLAYBACK), SUSTAINED_STALL(Window.SUSTAINED_PLAYBACK)
     }
 
-    private data class Observation(val kind: Kind, val time: Long, val value: Long)
+    private data class Observation(val kind: Kind, val time: Long, val value: Long, val viewing: AnimeLineViewing? = null)
+    private data class CachedEstimate(val computedAt: Long, val expiresAt: Long, val health: AnimeLineHealth)
 
     private val lock = StorageLock()
     private val history = linkedMapOf<AnimeLineHealthKey, List<Observation>>()
+    private val estimates = mutableMapOf<AnimeLineHealthKey, CachedEstimate>()
     private val writes = Channel<Unit>(Channel.CONFLATED)
 
     init {
@@ -102,7 +142,10 @@ internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineSc
                 val now = wallTimeMillis()
                 for ((key, rows) in restored) {
                     val merged = recent(rows + history[key].orEmpty(), now)
-                    if (merged.isNotEmpty()) history[key] = merged
+                    if (merged.isNotEmpty()) {
+                        history[key] = merged
+                        estimates.remove(key)
+                    }
                 }
                 capKeysLocked()
             }
@@ -131,36 +174,60 @@ internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineSc
     fun recordStartupFailure(key: AnimeLineHealthKey) = record(key, Kind.STARTUP_FAILURE, 0L)
     fun recordEarlyPlayback(key: AnimeLineHealthKey, rebufferMs: Long) = record(key, Kind.EARLY_REBUFFER, rebufferMs)
     fun recordEarlyFailure(key: AnimeLineHealthKey) = record(key, Kind.EARLY_FAILURE, 0L)
+    fun recordSustainedPlayback(key: AnimeLineHealthKey, viewing: AnimeLineViewing, stalled: Boolean) =
+        record(key, if (stalled) Kind.SUSTAINED_STALL else Kind.SUSTAINED_CLEAR, 0L, viewing)
     fun recordDecodedHeight(key: AnimeLineHealthKey, height: Int) {
         if (height in 144..8640) record(key, Kind.DECODED_HEIGHT, height.toLong())
     }
 
     fun estimate(key: AnimeLineHealthKey): AnimeLineHealth? {
         val now = wallTimeMillis()
-        val historyRows = synchronized(lock) { history[key] }?.filter { it.isRecent(now) }.orEmpty()
+        val observations = synchronized(lock) {
+            val cached = estimates[key]
+            if (cached != null && now >= cached.computedAt && now < cached.expiresAt) return cached.health
+            history[key]
+        } ?: return null
+        val historyRows = observations.filter { it.isRecent(now) }
         if (historyRows.isEmpty()) return null
         // Once the current conditions have three observations, old failures on this network class
         // no longer dominate a recovered line. Sparse windows can still use the 72-hour history.
         val rows = historyRows.groupBy { it.kind.window }.values.flatMap { window ->
-            window.filter { now - it.time < 6 * 60 * 60_000L }.takeIf { it.size >= 3 } ?: window
+            window.filter { now - it.time < HEALTH_RECENT_AGE_MS }.takeIf { it.size >= 3 } ?: window
         }
         val starts = rows.filter { it.kind == Kind.FIRST_FRAME }.map { it.value }
         val rebuffer = rows.filter { it.kind == Kind.EARLY_REBUFFER }.map { it.value }
         val heights = rows.filter { it.kind == Kind.DECODED_HEIGHT }.map { it.value }.sorted()
-        return AnimeLineHealth(starts.size + rows.count { it.kind == Kind.PLAYABLE_OUTPUT },
+        val health = AnimeLineHealth(starts.size + rows.count { it.kind == Kind.PLAYABLE_OUTPUT },
             rows.count { it.kind == Kind.STARTUP_FAILURE }, median(starts),
             median(rows.filter { it.kind == Kind.ADDRESS }.map { it.value }),
             rebuffer.size, rebuffer.count { it > 0L }, median(rebuffer),
-            heights.getOrNull((heights.size - 1) / 2)?.toInt(), rows.count { it.kind == Kind.EARLY_FAILURE })
+            heights.getOrNull((heights.size - 1) / 2)?.toInt(), rows.count { it.kind == Kind.EARLY_FAILURE },
+            rows.count { it.kind.window == Window.SUSTAINED_PLAYBACK }, rows.count { it.kind == Kind.SUSTAINED_STALL },
+            firstFrameSamples = starts.size)
+        val expiresAt = observations.minOf { observation ->
+            when {
+                observation.time > now -> observation.time
+                now - observation.time < HEALTH_RECENT_AGE_MS -> observation.time + HEALTH_RECENT_AGE_MS
+                now - observation.time < HEALTH_MAX_AGE_MS -> observation.time + HEALTH_MAX_AGE_MS
+                else -> Long.MAX_VALUE
+            }
+        }
+        synchronized(lock) {
+            if (history[key] === observations) estimates[key] = CachedEstimate(now, expiresAt, health)
+        }
+        return health
     }
 
-    private fun record(key: AnimeLineHealthKey, kind: Kind, value: Long) {
+    private fun record(key: AnimeLineHealthKey, kind: Kind, value: Long, viewing: AnimeLineViewing? = null) {
         if (value !in 0L..HEALTH_MAX_SAMPLE_MS) return
         val now = wallTimeMillis()
         if (now <= 0L) return
         synchronized(lock) {
+            if (viewing != null && !viewing.update(key, kind == Kind.SUSTAINED_STALL)) return
             val rows = history.remove(key).orEmpty()
-            history[key] = recent(rows + Observation(kind, now, value), now)
+            val retained = if (viewing == null) rows else rows.filterNot { it.viewing === viewing }
+            history[key] = recent(retained + Observation(kind, now, value, viewing), now)
+            estimates.remove(key)
             capKeysLocked()
         }
         writes.trySend(Unit)
@@ -169,7 +236,10 @@ internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineSc
     private fun capKeysLocked() {
         if (history.size <= HEALTH_MAX_KEYS) return
         val oldest = history.entries.sortedBy { it.value.last().time }.take(history.size - HEALTH_MAX_KEYS)
-        oldest.forEach { history.remove(it.key) }
+        oldest.forEach {
+            history.remove(it.key)
+            estimates.remove(it.key)
+        }
     }
 
     private fun recent(rows: List<Observation>, now: Long): List<Observation> = rows
@@ -189,8 +259,11 @@ internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineSc
         val data = JSONObject()
         for ((key, rows) in history) {
             val current = rows.filter { it.isRecent(now) }
-            if (current.isNotEmpty()) data.put(key.digest,
-                JSONArray(current.map { listOf(it.kind.name, it.time, it.value) }))
+            if (current.isNotEmpty()) {
+                // Older readers scan at most four windows. Keep all of their observations first.
+                val (sustained, original) = current.partition { it.kind.window == Window.SUSTAINED_PLAYBACK }
+                data.put(key.digest, JSONArray((original + sustained).map { listOf(it.kind.name, it.time, it.value) }))
+            }
         }
         return data.toString().encodeToByteArray()
     }
@@ -206,7 +279,11 @@ internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineSc
                     val row = samples.optJSONArray(index) ?: return@mapNotNull null
                     val kind = Kind.entries.firstOrNull { it.name == row.optString(0) } ?: return@mapNotNull null
                     val value = row.optLong(2, -1L)
-                    val range = if (kind == Kind.DECODED_HEIGHT) 144L..8640L else 0L..HEALTH_MAX_SAMPLE_MS
+                    val range = when {
+                        kind == Kind.DECODED_HEIGHT -> 144L..8640L
+                        kind.window == Window.SUSTAINED_PLAYBACK -> 0L..0L
+                        else -> 0L..HEALTH_MAX_SAMPLE_MS
+                    }
                     if (value !in range) return@mapNotNull null
                     Observation(kind, row.optLong(1), value)
                 }
