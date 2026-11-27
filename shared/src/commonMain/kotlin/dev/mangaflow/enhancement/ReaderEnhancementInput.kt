@@ -2,6 +2,7 @@ package dev.mangaflow.enhancement
 
 import dev.mangaflow.platform.storage.StorageFile
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
