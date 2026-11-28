@@ -404,7 +404,6 @@ fun DownloadsScreen(
         dispatchQueue(command, group, useLatestRoute)
     }
 
-    val usedBytes = visibleEntries.sumOf { it.downloadedBytes }
     var availableBytes by remember(store) { mutableStateOf<Long?>(null) }
     var spaceReadFailed by remember(store) { mutableStateOf(false) }
     LaunchedEffect(showQueueActions, active, store) {
@@ -674,7 +673,7 @@ fun DownloadsScreen(
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                         Text("下载占用", fontSize = 11.sp, color = secondary)
                                         Spacer(Modifier.weight(1f))
-                                        Text(downloadBytes(usedBytes), fontSize = 14.sp,
+                                        Text(downloadedSizeLabel(visibleEntries), fontSize = 14.sp,
                                             fontWeight = FontWeight.Medium, color = foreground)
                                     }
                                     Text(availableBytes?.let { "${downloadBytes(it)} 可用" }
@@ -1072,7 +1071,7 @@ fun DownloadsScreen(
             text = {
                 val titles = targets.map { it.manga.title }.distinct()
                 Text("${titles.take(3).joinToString("、")}${if (titles.size > 3) "等 ${titles.size} 部作品" else ""}\n" +
-                    "${targets.size} 话 · ${downloadBytes(targets.sumOf { it.downloadedBytes })}\n阅读记录和收藏保留。",
+                    "${targets.size} 话 · ${downloadedSizeLabel(targets)}\n阅读记录和收藏保留。",
                     style = MaterialTheme.typography.bodyMedium, color = secondary)
             },
             confirmButton = {
@@ -1370,7 +1369,7 @@ private fun DesktopDownloadChapterPane(
                     fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = if (alignedColumns) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.titleLarge,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 val saved = entries.count { it.status == DownloadStatus.COMPLETED }
-                Text("已保存 $saved / ${entries.size} 话 · ${downloadBytes(entries.sumOf { it.downloadedBytes })}",
+                Text("已保存 $saved / ${entries.size} 话 · ${downloadedSizeLabel(entries)}",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
             if (entries.isNotEmpty() && !managing && inspection == null) TextButton(onClick = {
@@ -1553,6 +1552,10 @@ private fun DownloadTextAction(
             horizontalArrangement = Arrangement.Center, content = content)
     }
 }
+
+// Keep the wide accumulator out of the Compose methods' JVM local slots.
+private fun downloadedSizeLabel(entries: List<DownloadEntry>): String =
+    downloadBytes(entries.sumOf(DownloadEntry::downloadedBytes))
 
 internal fun downloadBytes(bytes: Long): String = when {
     bytes >= 1024L * 1024 * 1024 -> formatDecimal(bytes / (1024.0 * 1024 * 1024), 1) + " GB"
