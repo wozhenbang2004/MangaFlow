@@ -112,8 +112,10 @@ internal fun ReaderEnhancedLayer(
     val context = LocalMangaContext.current
     val controller = LocalReaderEnhancementPresentation.current?.controller
     val policy = remember(context) { ExperiencePolicyStore.get(context) }
-    var lease by remember(controller, asset.identity) { mutableStateOf<EnhancedAssetLease?>(null) }
-    LaunchedEffect(controller, context, asset.identity) {
+    // A page can leave and re-enter the window with the same cached file, but the
+    // reader must reacquire its new publication if the old lease was already retired.
+    var lease by remember(controller, context, asset.attemptId) { mutableStateOf<EnhancedAssetLease?>(null) }
+    LaunchedEffect(controller, context, asset.attemptId) {
         var held: EnhancedAssetLease? = null
         try {
             held = if (controller != null) controller.retainForDisplay(asset)
@@ -286,8 +288,9 @@ internal fun ReaderEnhancedLayer(
         Canvas(Modifier.matchParentSize()) {
             val bounds = drawingBounds()
             if (bounds.width <= 0 || bounds.height <= 0) return@Canvas
-            val complete = batch
-            if (displayedPreview == null && complete?.covers(sourceBounds(bounds)) != true) return@Canvas
+            val visibleSource = sourceBounds(bounds)
+            val complete = batch?.takeIf { it.covers(visibleSource) }
+            if (displayedPreview == null && complete == null) return@Canvas
             val divider = fraction?.floatValue?.coerceIn(0f, 1f)?.let {
                 val comparison = comparisonBounds()
                 comparison.left + it * comparison.width

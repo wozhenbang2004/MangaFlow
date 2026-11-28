@@ -38,10 +38,12 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
             if (windows) animeJaNai.frames(inventoryDigests::digest) else emptyList()
         fun descriptor(pack: DesktopEnginePackage, title: String, video: Boolean): EngineDescriptor {
             val executable = if (windows) runtime.executable(pack, inventoryDigests::digest) else null
+            val missingMangaRuntime = pack == DesktopEnginePackages.manga && executable != null &&
+                !hasMangaGpuRuntime(executable)
             val installed = models.any { it.engineId == pack.id } || video && frameModels.any { it.engineId == pack.id }
             val ready = when {
                 !windows -> EngineReadiness.UNSUPPORTED
-                executable == null -> EngineReadiness.NOT_INSTALLED
+                executable == null || missingMangaRuntime -> EngineReadiness.NOT_INSTALLED
                 !installed -> EngineReadiness.NEEDS_MODELS
                 video && runtime.executable(DesktopEnginePackages.ffmpeg, inventoryDigests::digest) == null -> EngineReadiness.NEEDS_MODELS
                 else -> EngineReadiness.READY_FOR_TRIAL
@@ -50,7 +52,8 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                 if (video) "https://github.com/the-database/VideoJaNai" else "https://github.com/the-database/MangaJaNaiCLI",
                 ready, when (ready) {
                     EngineReadiness.UNSUPPORTED -> "当前高质量原生组件仅提供 Windows x64；原画和轻量处理继续可用"
-                    EngineReadiness.NOT_INSTALLED -> "下载固定版本组件并校验，再准备此设备所需的运行库与模型"
+                    EngineReadiness.NOT_INSTALLED -> if (missingMangaRuntime) "漫画组件已下载，仍需准备 GPU 运行库"
+                        else "下载固定版本组件并校验，再准备此设备所需的运行库与模型"
                     EngineReadiness.NEEDS_MODELS -> "组件已安装；继续准备模型、运行库和媒体校验工具"
                     else -> "已找到校验后的组件与模型；需在真实内容上试用，尚未证明设备长期稳定"
                 }, setOf(1, 2, 4), if (video) setOf(EngineContent.VIDEO) else setOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON),
@@ -98,6 +101,9 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                 completed = parts.getOrNull(2)?.toLongOrNull() ?: 0, total = parts.getOrNull(3)?.toLongOrNull(),
                 detail = "准备 GPU 组件"))
             else if (line.startsWith("SETUP_EXTRACT")) progress(EngineProgress(EngineStage.INSTALL, detail = "展开 GPU 组件"))
+        }
+        if (pack == DesktopEnginePackages.manga) {
+            check(hasMangaGpuRuntime(executable)) { "漫画增强 GPU 运行库尚未准备完成，请重试安装" }
         }
         if (pack == DesktopEnginePackages.video) runtime.install(DesktopEnginePackages.ffmpeg, progress)
         progress(EngineProgress(EngineStage.COMPLETE, detail = "组件准备完成；真实内容试用后才有设备性能记录"))
@@ -154,6 +160,7 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                 val weights = File(model.path)
                 check(engineSha256(weights) == model.sha256) { "模型文件已改变，请重新检查" }
                 val executable = runtime.executable(DesktopEnginePackages.manga) ?: error("请先准备漫画增强组件")
+                check(hasMangaGpuRuntime(executable)) { "请在画质与性能中准备漫画增强 GPU 运行库" }
                 val input = prepareMangaJaNaiInput(source, work, request.maximumWorkingBytes)
                 sourceSize = input.width to input.height
                 val inputPath = input.file.canonicalPath
@@ -165,6 +172,7 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                     "--overlap", maxOf(128, request.overlap).toString(), "--workers", "1", "--streams", "1",
                     "--progress", "lines")
                 var copiedAnimation = false
+                var engineFailure: String? = null
                 runEngineProcess(executable, args) { line ->
                     when {
                         line.startsWith("ENGINE_BUILD ") -> progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "首次准备此模型与分块尺寸"))
@@ -172,10 +180,21 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                         line.startsWith("NATIVE ") -> progress(EngineProgress(EngineStage.PROCESS, detail = "原生 GPU Kernel 已实际启用"))
                         line.startsWith("BACKEND_FALLBACK") -> progress(EngineProgress(EngineStage.PROCESS, detail = "引擎已切换到兼容后端"))
                         line.startsWith("$inputPath: animated ") && ", copied unchanged to " in line -> copiedAnimation = true
+                        line.startsWith("ERROR ") && engineFailure == null ->
+                            engineFailure = line.substringAfter(": ", "组件报告处理错误")
                         else -> Unit
                     }
                 }
                 currentCoroutineContext().ensureActive()
+                // In lines mode the CLI can emit a per-image error and still exit with status zero.
+                engineFailure?.let { reason ->
+                    val detail = reason.replace(inputPath, "原图", ignoreCase = true)
+                        .replace(weights.canonicalPath, "模型文件", ignoreCase = true)
+                        .replace(work.canonicalPath, "增强工作目录", ignoreCase = true)
+                        .replace(executable.parentFile.canonicalPath, "漫画增强组件目录", ignoreCase = true)
+                        .trim().take(180).ifBlank { "组件报告处理错误" }
+                    error("漫画增强引擎失败：$detail")
+                }
                 check(!copiedAnimation) { "此页是动图，已保留原有动画" }
                 output = results.listFiles().orEmpty().singleOrNull { it.extension.equals("png", true) }
                     ?: error("引擎未生成唯一的完整 PNG 输出")
@@ -238,6 +257,16 @@ private fun installedFrameModels(directory: File, digest: (File) -> String): Lis
             EngineModel("rife:$hash", EnhancementEngineIds.VIDEOJANAI, file.nameWithoutExtension, file.canonicalPath, hash, 1,
                 setOf(EngineContent.VIDEO), "MIT · RIFE（以组件内许可为准）", "sha256:${hash.take(12)}", file.length(), "RIFE_FRAME_PAIR")
         }.toList()
+
+/** Match the pinned CLI's private runtime and installed GUI lookup. */
+private fun hasMangaGpuRuntime(executable: File): Boolean {
+    val directory = executable.parentFile
+    if (File(directory, "aji.dll").isFile &&
+        listOf("onnxruntime.dll", "nvinfer_11.dll", "aji-runtime.json").any { File(directory, it).isFile }) return true
+    return System.getenv("LOCALAPPDATA")?.let {
+        File(it, "Programs/MangaJaNaiConverterGui/inference/aji.dll").isFile
+    } == true
+}
 
 private fun describeInstalledModel(file: File, engineId: String, digest: (File) -> String): EngineModel? = runCatching {
     val scale = Regex("(?:^|_)([124])x[_-]", RegexOption.IGNORE_CASE).find(file.name)?.groupValues?.get(1)?.toInt()

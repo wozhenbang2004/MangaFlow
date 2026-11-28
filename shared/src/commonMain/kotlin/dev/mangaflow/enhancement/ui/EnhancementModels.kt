@@ -84,7 +84,8 @@ private data class ModelChoice(
 }
 
 private fun EngineDescriptor?.needsMangaRuntime(): Boolean =
-    this != null && (id == EnhancementEngineIds.ANDROID_ONNX || id == EnhancementEngineIds.ANDROID_CUGAN) &&
+    this != null && (id == EnhancementEngineIds.ANDROID_ONNX || id == EnhancementEngineIds.ANDROID_CUGAN ||
+        id == EnhancementEngineIds.MANGAJANAI) &&
         (readiness == EngineReadiness.NOT_INSTALLED || readiness == EngineReadiness.FAILED)
 
 private fun EngineDescriptor.matches(content: EnhancementContent): Boolean =

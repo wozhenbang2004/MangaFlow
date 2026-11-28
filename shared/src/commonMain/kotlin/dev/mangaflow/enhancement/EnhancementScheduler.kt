@@ -62,7 +62,11 @@ class EnhancementScheduler(
         var pauseRequested: Boolean = false,
         var cancelRequested: Boolean = false,
         var lastProgressPublishedAt: Long = 0L,
-    )
+    ) {
+        val visibleMangaPage: Boolean
+            get() = task.priority == EnhancementPriority.P0 &&
+                task.sessionKey != null && task.content != EnhancementContent.ANIME
+    }
     private val lock = StorageLock()
     private val entries = linkedMapOf<String, Entry>()
     private val wake = Channel<Unit>(Channel.CONFLATED)
@@ -78,7 +82,8 @@ class EnhancementScheduler(
                 synchronized(lock) {
                     if (stopResourceObservation == null) return@collect
                     entries.values.filter { it.run != null }.forEach { entry ->
-                        resources.enhancementWaitReason(entry.task.priority.ordinal, running = true)?.let { reason ->
+                        resources.enhancementWaitReason(entry.task.priority.ordinal, running = true,
+                            visibleMangaPage = entry.visibleMangaPage)?.let { reason ->
                             entry.run?.cancel(EnhancementYield(reason))
                         }
                     }
@@ -198,8 +203,12 @@ class EnhancementScheduler(
                         if (!entry.isCurrent()) {
                             cancelEntry(entry, "内容已切换")
                         } else if (chosen == null) {
-                            val reason = resources.enhancementWaitReason(entry.task.priority.ordinal, entry.estimatedBytes)
-                            val release = if (reason == null) resources.tryAcquireEnhancement(entry.task.priority.ordinal, entry.estimatedBytes) else null
+                            val reason = resources.enhancementWaitReason(entry.task.priority.ordinal, entry.estimatedBytes,
+                                visibleMangaPage = entry.visibleMangaPage)
+                            val release = if (reason == null)
+                                resources.tryAcquireEnhancement(entry.task.priority.ordinal, entry.estimatedBytes,
+                                    visibleMangaPage = entry.visibleMangaPage)
+                            else null
                             if (release != null) {
                                 entry.task = entry.task.copy(phase = EnhancementTaskPhase.RUNNING, progress = null, reason = null)
                                 chosen = entry to release
@@ -226,7 +235,8 @@ class EnhancementScheduler(
                         }
                     }
                 } }, isCurrent = entry.isCurrent, admission = {
-                    resources.enhancementWaitReason(entry.task.priority.ordinal, running = true)
+                    resources.enhancementWaitReason(entry.task.priority.ordinal, running = true,
+                        visibleMangaPage = entry.visibleMangaPage)
                 })
                 val run = scope.async(start = CoroutineStart.LAZY) {
                     ctx.checkpoint()

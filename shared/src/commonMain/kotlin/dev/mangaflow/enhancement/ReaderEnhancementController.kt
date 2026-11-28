@@ -34,6 +34,7 @@ data class ReaderEnhancedPage(
     val sourceCacheIdentity: String,
     val elapsedMillis: Long,
     val cacheHit: Boolean,
+    internal val attemptId: String,
 )
 
 data class ReaderEnhancementState(
@@ -574,7 +575,7 @@ internal class ReaderEnhancementController(
                 held.remove(index)?.close(); held[index] = lease; heldBytes[index] = bytes
                 completedLease = null
                 assets[index] = ReaderEnhancedPage(lease.identity, lease.file.toURI(), lease.width, lease.height,
-                    original.diskKey, result.elapsedMillis, cacheHit)
+                    original.diskKey, result.elapsedMillis, cacheHit, id)
                 if (!cacheHit) {
                     durations.addLast(result.elapsedMillis)
                     if (durations.size > 128) durations.removeFirst()

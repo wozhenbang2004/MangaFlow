@@ -334,12 +334,13 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     fun startReading(): () -> Unit = retainActivity(reader = true)
 
     /** Enhancement shares these observations and this admission owner with reading/downloads. */
-    internal fun enhancementWaitReason(priority: Int, estimatedBytes: Long = 0L, running: Boolean = false): String? = synchronized(lock) {
-        enhancementWaitReasonLocked(priority, estimatedBytes, running = running)
+    internal fun enhancementWaitReason(priority: Int, estimatedBytes: Long = 0L, running: Boolean = false,
+        visibleMangaPage: Boolean = false): String? = synchronized(lock) {
+        enhancementWaitReasonLocked(priority, estimatedBytes, running = running, visibleMangaPage = visibleMangaPage)
     }
 
     private fun enhancementWaitReasonLocked(priority: Int, estimatedBytes: Long,
-        sharedRealtimeOwner: String? = null, running: Boolean = false): String? {
+        sharedRealtimeOwner: String? = null, running: Boolean = false, visibleMangaPage: Boolean = false): String? {
         val current = mutableState.value
         val now = monotonicTimeMillis()
         return when {
@@ -347,7 +348,10 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             storageLow || resources.freeDiskBytes?.let { it <= current.diskReserveBytes } == true -> "存储空间不足"
             platformKind != PlatformKind.DESKTOP && !current.foreground -> "返回应用后继续处理"
             realtimeEnhancementOwners.any { it != sharedRealtimeOwner } -> "当前播放优先"
-            platformKind == PlatformKind.DESKTOP && current.foreground && framePressureUntil > now -> "等待界面帧工作负载回落"
+            // A busy render window defers speculative work. Restarting the visible page's
+            // model for every slow frame can keep it from producing any output.
+            platformKind == PlatformKind.DESKTOP && current.foreground && !visibleMangaPage &&
+                framePressureUntil > now -> "等待界面帧工作负载回落"
             platformKind == PlatformKind.DESKTOP && current.foreground && priority >= 1 && interactionUntil > now -> "当前交互优先"
             platformKind == PlatformKind.DESKTOP && priority >= 1 && readerWaiting -> "当前可见图片优先"
             priority >= 2 && (readerUsers > 0 || readerWaiting) -> "当前阅读优先"
@@ -365,10 +369,11 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var activeEnhancementSharedOwner: String? = null
 
     internal fun tryAcquireEnhancement(priority: Int, estimatedBytes: Long = 0L,
-        sharedRealtimeOwner: String? = null): (() -> Unit)? = synchronized(lock) {
+        sharedRealtimeOwner: String? = null, visibleMangaPage: Boolean = false): (() -> Unit)? = synchronized(lock) {
         val sameRealtimeSession = sharedRealtimeOwner != null && sharedRealtimeOwner == activeEnhancementSharedOwner
         if (activeEnhancements > 0 && !sameRealtimeSession ||
-            enhancementWaitReasonLocked(priority, estimatedBytes, sharedRealtimeOwner) != null)
+            enhancementWaitReasonLocked(priority, estimatedBytes, sharedRealtimeOwner,
+                visibleMangaPage = visibleMangaPage) != null)
             return@synchronized null
         if (activeEnhancements == 0) activeEnhancementSharedOwner = sharedRealtimeOwner
         activeEnhancements++
