@@ -6,14 +6,21 @@ import coil3.disk.DiskCache
 import dev.mangaflow.data.Page
 import dev.mangaflow.enhancement.engine.*
 import dev.mangaflow.experience.ExperienceBudget
+import dev.mangaflow.experience.OriginalPagePrefetchResult
+import dev.mangaflow.experience.PrefetchByteBudget
+import dev.mangaflow.experience.PrefetchWork
+import dev.mangaflow.experience.prefetchOriginalPageResult
 import dev.mangaflow.experience.readerPageCacheKey
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.imagePlatformContext
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.randomUuid
 import dev.mangaflow.platform.sha256File
 import dev.mangaflow.platform.storage.StorageFile
 import dev.mangaflow.platform.storage.StorageLock
 import dev.mangaflow.reader.readerFilePath
+import dev.mangaflow.reader.readerPrefetchErrorLabel
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -84,6 +91,7 @@ internal class ReaderEnhancementController(
     private val failed = mutableMapOf<Int, PageFailure>()
     private val cacheMisses = mutableMapOf<Int, String>()
     private val waitingOriginals = mutableMapOf<Int, String>()
+    private val originalRecoveryAttempts = mutableMapOf<Int, Original>()
     private val details = mutableMapOf<Int, String>()
     private val held = mutableMapOf<Int, EnhancedAssetLease>()
     private val heldBytes = mutableMapOf<Int, Long>()
@@ -220,6 +228,7 @@ internal class ReaderEnhancementController(
             current = page; direction = if (readDirection < 0) -1 else 1
             visible = visiblePages.filterTo(linkedSetOf()) { it in 0 until totalPages }
                 .ifEmpty { setOf(page).filterTo(linkedSetOf()) { it in 0 until totalPages } }
+            originalRecoveryAttempts.keys.retainAll(visible)
             (visible - previousVisible).forEach { index ->
                 if (failed[index]?.retryWhenVisible == true) {
                     failed.remove(index)
@@ -257,6 +266,7 @@ internal class ReaderEnhancementController(
             }
             // Completed assets remain useful even when every live processing mode is off.
             val enabled = active && selected.tier != QualityTier.ORIGINAL
+            if (!enabled || pixelsChanged || processingChanged) originalRecoveryAttempts.clear()
             // The shared reading budget already applies manual values and device protection.
             // Do not replace it with a private two-page/slow-model cap, or count the second
             // visible page as the next page. Admission can pause this window without erasing it.
@@ -337,6 +347,7 @@ internal class ReaderEnhancementController(
                 releaseHeldLocked(index)
                 pageOutputBytes.remove(index)
                 failed.remove(index); cacheMisses.remove(index); waitingOriginals.remove(index)
+                originalRecoveryAttempts.remove(index)
                 lastAttempts.remove(index); details.remove(index); manuallyStopped.remove(index)
             } else if (waitingOriginals.remove(index) != null) {
                 // The same exact original can reappear after cache eviction. A cache wait is
@@ -350,10 +361,82 @@ internal class ReaderEnhancementController(
         queueIfUseful(index)
     }
 
+    /**
+     * A visible desktop preview can outlive the original in Coil's disk cache.
+     * The renderer calls this after confirming that the exact disk entry is missing.
+     * Restore it outside the enhancement queue so a transfer cannot occupy the model slot.
+     */
+    suspend fun recoverMissingVisibleOriginal(index: Int, page: Page, diskKey: String) {
+        val (original, epoch) = synchronized(lock) {
+            val current = originals[index] ?: return
+            if (closed || index !in visible || index !in wanted || !policy.allowsReaderProcessing() ||
+                current.page != page || current.diskKey != diskKey || waitingOriginals[index] != current.identity ||
+                originalRecoveryAttempts[index]?.identity == current.identity ||
+                platformKind != PlatformKind.DESKTOP || current.source == "jmcomic" ||
+                !(page.url.startsWith("https:") || page.url.startsWith("http:"))) return
+            originalRecoveryAttempts[index] = current
+            details[index] = "正在补取本页原图，先显示预览"
+            publishLocked()
+            current to generation
+        }
+        try {
+            val timeout = center.resources.state.value.recovery.imageTimeoutSeconds.coerceAtLeast(1).toLong() * 1000L
+            val work = PrefetchWork().also(PrefetchWork::promote)
+            val result = try {
+                withTimeoutOrNull(timeout) {
+                    // This is the foreground page, so it does not consume the speculative byte window.
+                    prefetchOriginalPageResult(context, page, original.headers, original.source,
+                        PrefetchByteBudget(0L), work, diskCacheKey = diskKey)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                OriginalPagePrefetchResult(false, failure = error)
+            }
+            val available = withContext(Dispatchers.IO) {
+                try { openOriginal(original)?.use { true } == true }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { false }
+            }
+            val retry = synchronized(lock) {
+                if (closed || index !in visible || index !in wanted || epoch != generation ||
+                    originalRecoveryAttempts[index] !== original || originals[index]?.identity != original.identity ||
+                    waitingOriginals[index] != original.identity) return
+                if (available) {
+                    waitingOriginals.remove(index)
+                    cancelPendingLocked(index, "原图已准备，继续增强")
+                    details.remove(index)
+                } else {
+                    details[index] = when {
+                        result == null -> "补取原图超时，当前显示预览"
+                        result.failure != null -> "补取原图失败 · ${readerPrefetchErrorLabel(result.failure)}"
+                        result.deferred -> "本页原图暂不可写入缓存，当前显示预览"
+                        else -> "本页原图未能保存在缓存中，当前显示预览"
+                    }
+                }
+                publishLocked()
+                available
+            }
+            if (retry) queueIfUseful(index)
+        } catch (cancelled: CancellationException) {
+            synchronized(lock) {
+                if (originalRecoveryAttempts[index] === original) {
+                    originalRecoveryAttempts.remove(index)
+                    if (waitingOriginals[index] == original.identity) {
+                        details[index] = "等待原图缓存，先显示预览"
+                        publishLocked()
+                    }
+                }
+            }
+            throw cancelled
+        }
+    }
+
     fun invalidate(index: Int) = synchronized(lock) {
         cancelPendingLocked(index, "本页正在重新加载")
         originals.remove(index); releaseHeldLocked(index); pageOutputBytes.remove(index)
         failed.remove(index); cacheMisses.remove(index); waitingOriginals.remove(index)
+        originalRecoveryAttempts.remove(index)
         lastAttempts.remove(index); details.remove(index); manuallyStopped.remove(index)
         publishLocked()
     }
@@ -674,6 +757,7 @@ internal class ReaderEnhancementController(
             budgetDeferred.clear(); pageOutputBytes.clear()
             pending.values.forEach { it.job.cancel() }; pending.clear()
             lastAttempts.clear(); failed.clear(); cacheMisses.clear(); waitingOriginals.clear()
+            originalRecoveryAttempts.clear()
             details.clear(); manuallyStopped.clear()
             scope.cancel()
             center.settings.clearSession(sessionKey)

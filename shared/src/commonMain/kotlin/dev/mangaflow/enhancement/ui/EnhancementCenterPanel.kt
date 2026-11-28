@@ -299,7 +299,7 @@ internal fun EnhancementSettingsContent(
                     val stopped = task?.takeIf { enabled && it.id in readerState?.manuallyStoppedTaskIds.orEmpty() }
                     EnhancementValue("当前画面", when {
                         !enabled -> "原图 · 增强已关闭"
-                        readerState?.currentEnhanced == true -> "增强已就绪"
+                        readerState?.currentEnhanced == true -> "已生成增强文件"
                         failure != null -> "增强未完成 · 原图可读"
                         stopped != null -> "增强已停止 · 原图可读"
                         task?.phase == EnhancementTaskPhase.RUNNING -> "${task.title ?: "当前页"} · 正在增强"

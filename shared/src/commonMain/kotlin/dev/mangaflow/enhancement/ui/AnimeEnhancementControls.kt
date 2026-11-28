@@ -169,8 +169,15 @@ internal fun EnhancementQuality(content: EnhancementContent, policy: Enhancement
             }, description = "切换预设算法，保持输出倍率")
         val preset = enhancementPresetDescription(content, policy, inventory)
         EnhancementValue("预设算法", preset.algorithm, preset.detail)
-        if (preset.unavailable) AnimeEnhancementNavigation(Icons.Outlined.Memory, "准备兼容模型",
-            "查看模型与运行组件", onClick = onOpenModels)
+        if (preset.unavailable) {
+            if (!anime && policy.scale !in supportedScales && supportedScales.isNotEmpty()) {
+                val scales = supportedScales.joinToString(" / ") { "${it}×" }
+                EnhancementQuiet("当前 ${policy.scale}× 无法使用此预设。可在「输出与策略」选择 $scales。")
+            } else {
+                AnimeEnhancementNavigation(Icons.Outlined.Memory, "准备兼容模型",
+                    "查看模型与运行组件", onClick = onOpenModels)
+            }
+        }
     }
     if (anime && !custom && policy.tier != QualityTier.ORIGINAL) {
         SettingsToggle("播放时画质增强", policy.realtimeEnhancementEnabled, Icons.Outlined.AutoAwesome,

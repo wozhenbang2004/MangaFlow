@@ -299,14 +299,17 @@ private fun readRuntimeModelDirectories(file: File): List<File> = runCatching {
     visit(json); result
 }.getOrDefault(emptyList())
 
-private inline fun <T> withImageReader(file: File, block: (ImageReader) -> T): T {
+private inline fun <T> withImageReader(file: File, block: (ImageReader) -> T): T = try {
     val input: ImageInputStream = ImageIO.createImageInputStream(file) ?: error("页面格式无法读取")
     input.use {
         val readers = ImageIO.getImageReaders(input)
         check(readers.hasNext()) { "当前增强器不支持此图片格式" }
         val reader = readers.next()
-        try { reader.input = input; return block(reader) } finally { reader.dispose() }
+        try { reader.input = input; block(reader) } finally { reader.dispose() }
     }
+} catch (failure: LinkageError) {
+    // A native decoder that cannot load should fail this page, not the shared queue.
+    throw IOException("本页的原图解码组件无法加载，已保留原图", failure)
 }
 
 private data class MangaJaNaiInput(val file: File, val width: Int, val height: Int)

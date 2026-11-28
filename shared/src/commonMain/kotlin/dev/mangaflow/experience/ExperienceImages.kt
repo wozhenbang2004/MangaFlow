@@ -329,11 +329,13 @@ internal data class OriginalPagePrefetchResult(
 internal suspend fun prefetchOriginalPageResult(
     context: PlatformContext, page: Page, headers: Map<String, String>,
     source: String, bytes: PrefetchByteBudget, work: PrefetchWork = PrefetchWork(),
+    diskCacheKey: String? = null,
 ): OriginalPagePrefetchResult {
     if (source == "jmcomic" || (!page.url.startsWith("https:") && !page.url.startsWith("http:")))
         return OriginalPagePrefetchResult(false)
     val imageContext = imagePlatformContext(context)
     val request = readerPageRequest(context, page, headers, source)
+        .apply { if (diskCacheKey != null) this.diskCacheKey(diskCacheKey) }
         .prefetchPriority(bytes, source, work).size(1)
         .memoryCachePolicy(CachePolicy.DISABLED).diskCachePolicy(CachePolicy.ENABLED)
         .decoderFactory(BlackholeDecoder.Factory()).build()

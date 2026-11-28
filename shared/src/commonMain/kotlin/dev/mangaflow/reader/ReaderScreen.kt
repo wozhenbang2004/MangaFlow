@@ -4606,6 +4606,10 @@ private fun ReaderPageImage(
                     preparationTracker?.artifact(page.index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident,
                         freshnessMillis = (interval + monotonicTimeMillis() - started) * 2L, startedAt = started)
                     preparationTracker?.sample()
+                    if (artifact.missingFile && resolvedImage != null &&
+                        (resolvedCacheKey != rejectedCacheKey || prefetchCacheRecovery.recovered)) {
+                        enhancementController?.recoverMissingVisibleOriginal(logicalPageIndex, resource, resolvedCacheKey)
+                    }
                 }
                 delay(interval)
             }
