@@ -12,9 +12,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
-import androidx.compose.foundation.hoverable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -263,17 +260,27 @@ internal fun AnimePlayerPane(
     val touchExploration = LocalTouchExplorationEnabled.current
     var videoWorkspaceFocused by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
+    var desktopChromeHidden by remember { mutableStateOf(false) }
+    var keyboardChrome by remember { mutableStateOf(false) }
+    var interactionEpoch by remember { mutableIntStateOf(0) }
     var chromeContacts by remember { mutableIntStateOf(0) }
     val onChromeContact: (Boolean) -> Unit = remember {
         { pressed ->
             chromeContacts += if (pressed) 1 else -1
-            if (pressed) controlsVisible = true
+            if (pressed) {
+                if (desktop) {
+                    keyboardChrome = false
+                    interactionEpoch++
+                }
+                controlsVisible = true
+            }
         }
     }
     var readingsHeld by remember { mutableStateOf(false) }
     var headerFocused by remember { mutableStateOf(false) }
     var transportFocused by remember { mutableStateOf(false) }
     var centerFocused by remember { mutableStateOf(false) }
+    var readingsFocused by remember { mutableStateOf(false) }
     var focusChromeOnReveal by remember { mutableStateOf<FocusRequester?>(null) }
     var locked by rememberSaveable { mutableStateOf(false) }
     var episodesVisible by rememberSaveable { mutableStateOf(true) }
@@ -287,23 +294,20 @@ internal fun AnimePlayerPane(
     var holdingFast by remember { mutableStateOf(false) }
     var settingsVisible by remember { mutableStateOf(false) }
     var settingsPresent by remember { mutableStateOf(false) }
-    var interactionEpoch by remember { mutableIntStateOf(0) }
     var hadBrowseVisit by remember { mutableStateOf(false) }
     val panelPresent = settingsPresent || watchPanelPresent
-    val requiredControls = blockingResolution || failure != null || awaitingVideo ||
-        playback.phase != AnimePlayerPhase.READY || !playback.playWhenReady || obscured || settingsPresent || watchPanelPresent ||
-        state.notice != null || touchExploration
-    val titlePointer = remember { MutableInteractionSource() }
-    val headerPointer = remember { MutableInteractionSource() }
-    val transportPointer = remember { MutableInteractionSource() }
-    val titleHovered = if (desktop) titlePointer.collectIsHoveredAsState().value else false
-    val headerHovered = if (desktop) headerPointer.collectIsHoveredAsState().value else false
-    val transportHovered = if (desktop) transportPointer.collectIsHoveredAsState().value else false
-    val pointerOverTools = desktop && (titleHovered || headerHovered || transportHovered)
-    val forceControls = requiredControls || chromeContacts > 0 || headerFocused || transportFocused || centerFocused ||
-        readingsHeld || pointerOverTools
+    val essentialControls = blockingResolution || failure != null || awaitingVideo ||
+        playback.phase != AnimePlayerPhase.READY || obscured || panelPresent || touchExploration
+    val requiredControls = essentialControls || !playback.playWhenReady || !desktop && state.notice != null
+    val chromeHasFocus = headerFocused || transportFocused || centerFocused || readingsFocused
+    val latestChromeFocus by rememberUpdatedState(chromeHasFocus)
+    // Mouse clicks can leave a focused slider or button behind. Only deliberate
+    // keyboard navigation keeps a focused control open on desktop.
+    val focusKeepsControls = chromeHasFocus && (!desktop || keyboardChrome && windowInfo.isWindowFocused)
+    val forceControls = requiredControls || chromeContacts > 0 || focusKeepsControls || readingsHeld
+    val latestForceControls by rememberUpdatedState(forceControls)
     val showChrome = !playback.inPictureInPicture && !panelPresent && !(obscured && headerOverVideo) && (!locked || touchExploration) &&
-        (controlsVisible || forceControls)
+        (if (desktopChromeHidden) essentialControls else controlsVisible || forceControls)
     val motion = LocalMotionEnabled.current
     val reveal = animateFloatAsState(if (showChrome) 1f else 0f,
         if (!motion) snap() else if (showChrome) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness)
@@ -330,6 +334,8 @@ internal fun AnimePlayerPane(
     val canControl = showingCurrentPlayback && !blockingResolution && failure == null &&
         (playback.phase == AnimePlayerPhase.READY || playback.ended)
     val hoverEnabled = active && !locked && !obscured && !panelPresent && !playback.inPictureInPicture
+    val chromeInputActive = hoverEnabled && (!desktop || windowInfo.isWindowFocused)
+    val desktopMouseActivity = desktop && chromeInputActive
     val timelineInteractive = canControl && hoverEnabled && showChrome && windowInfo.isWindowFocused
     val seekPreview = remember(player, playback.sessionGeneration, playback.timelineGeneration, playback.assetKey,
         playback.episodeId, fullscreen, timelineInteractive) { mutableStateOf<AnimeSeekPreview?>(null) }
@@ -383,9 +389,33 @@ internal fun AnimePlayerPane(
         }
     } else null
     val controlBackdrop = videoDockSource?.haze ?: artwork
-    fun interact() { controlsVisible = true; interactionEpoch++ }
-    LaunchedEffect(resumeOffer, active, obscured, panelPresent, locked, playback.inPictureInPicture) {
-        if (resumeOffer != null && active && !obscured && !panelPresent && !locked && !playback.inPictureInPicture) interact()
+    fun interact() {
+        desktopChromeHidden = false
+        controlsVisible = true
+        interactionEpoch++
+    }
+    fun onMouseActivity() {
+        keyboardChrome = false
+        interact()
+    }
+    fun hideControls() {
+        if (desktop) {
+            keyboardChrome = false
+            if (latestChromeFocus && windowInfo.isWindowFocused) focus.requestFocus()
+        }
+        controlsVisible = false
+    }
+    fun toggleDesktopControls() {
+        if (!showChrome) interact()
+        else if (!essentialControls && chromeContacts == 0) {
+            focusChromeOnReveal = null
+            desktopChromeHidden = true
+            hideControls()
+        }
+    }
+    val desktopNotice = state.notice.takeIf { desktop }
+    LaunchedEffect(resumeOffer, desktopNotice, hoverEnabled) {
+        if ((resumeOffer != null || desktopNotice != null) && hoverEnabled) interact()
     }
     fun keepTransportVisibility() {
         // A keyboard or bare-video command can acknowledge itself while the movie stays clear.
@@ -500,7 +530,14 @@ internal fun AnimePlayerPane(
         return true
     }
     LaunchedEffect(Unit) { focus.requestFocus() }
-    LaunchedEffect(fullscreen) { controlsVisible = true; if (!fullscreen) locked = false }
+    LaunchedEffect(fullscreen) {
+        desktopChromeHidden = false
+        controlsVisible = true
+        if (!fullscreen) locked = false
+    }
+    LaunchedEffect(playback.sessionGeneration, playback.assetKey) {
+        if (desktop) interact()
+    }
     LaunchedEffect(touchExploration) {
         if (touchExploration) { locked = false; controlsVisible = true }
     }
@@ -522,8 +559,10 @@ internal fun AnimePlayerPane(
     MotionBackHandler(active && locked && !obscured, state = null, onBack = { locked = false; interact() })
     LaunchedEffect(controlsVisible, forceControls, interactionEpoch, active) {
         if (active && controlsVisible && !forceControls) {
+            val lastInteraction = interactionEpoch
             delay(3_500L)
-            controlsVisible = false
+            if (controlsVisible && interactionEpoch == lastInteraction && chromeContacts == 0 && !latestForceControls)
+                hideControls()
         }
     }
     AnimePlayerOrientation(fullscreen, active = active && !playback.inPictureInPicture)
@@ -548,12 +587,22 @@ internal fun AnimePlayerPane(
                 if (!it.isFocused) heldArrow = null
             }
             .onPreviewKeyEvent { event ->
-                if (active && (!desktop || videoWorkspaceFocused) && !showChrome && !locked && !obscured &&
-                    !settingsPresent && !watchPanelPresent &&
-                    !playback.inPictureInPicture && event.key == Key.Tab && event.type == KeyEventType.KeyDown) {
-                    focusChromeOnReveal = chromeFocus
-                    interact()
+                val ownsDesktopKeys = desktopMouseActivity && (videoWorkspaceFocused || chromeHasFocus)
+                if (ownsDesktopKeys && !touchExploration && !event.isCtrlPressed &&
+                    !event.isAltPressed && !event.isMetaPressed && event.key == Key.H) {
+                    if (event.type == KeyEventType.KeyUp) toggleDesktopControls()
                     true
+                } else if (hoverEnabled && (!desktop || ownsDesktopKeys) &&
+                    event.key == Key.Tab && event.type == KeyEventType.KeyDown) {
+                    if (desktop) {
+                        keyboardChrome = true
+                        if (showChrome) interactionEpoch++
+                    }
+                    if (showChrome) false else {
+                        focusChromeOnReveal = chromeFocus
+                        interact()
+                        true
+                    }
                 } else false
             }
             .onKeyEvent { event ->
@@ -605,7 +654,7 @@ internal fun AnimePlayerPane(
                     Key.Escape -> if (fullscreen) { onFullscreenChange(false); true } else browseBack()
                     else -> false
                 }
-            }.revealOnMouseMove(fullscreen && hoverEnabled, ::interact).focusable()) {
+            }.revealOnMouseMove(!desktop && fullscreen && hoverEnabled, ::interact).focusable()) {
             val videoTop = if (headerOverVideo) 0.dp else headerHeight
             val room = (maxHeight - videoTop - bottomInset).coerceAtLeast(1.dp)
             val desktopScale = density.fontScale.coerceAtLeast(1f)
@@ -692,7 +741,7 @@ internal fun AnimePlayerPane(
 
             // One native surface keeps its composition identity through fullscreen and size changes.
             Box(Modifier.padding(top = videoTop).width(videoWidth).height(videoHeight)
-                .background(Color.Black).clipToBounds().revealOnMouseMove(desktop && !fillVideo && hoverEnabled, ::interact)
+                .background(Color.Black).clipToBounds().revealOnMouseMove(desktopMouseActivity, ::onMouseActivity)
                 .pointerInput(pointerMedia.sessionGeneration, pointerMedia.assetKey, active, locked, fullscreen, canControl,
                     state.settings.longPressSpeed, obscured, settingsPresent, watchPanelPresent, playback.inPictureInPicture) {
                     if (!active || locked || obscured || settingsPresent || watchPanelPresent || playback.inPictureInPicture) return@pointerInput
@@ -702,6 +751,10 @@ internal fun AnimePlayerPane(
                     detectTapGestures(
                         onTap = {
                             if (!accelerated) {
+                                if (desktop) {
+                                    desktopChromeHidden = false
+                                    keyboardChrome = false
+                                }
                                 if (latestRequiredControls) {
                                     if (desktop) focus.requestFocus()
                                     controlsVisible = true
@@ -834,7 +887,9 @@ internal fun AnimePlayerPane(
                                 onHoldControls = { readingsHeld = it },
                                 modifier = Modifier.align(Alignment.TopStart)
                                     .padding(start = 14.dp, end = 14.dp, top = statusTop + 8.dp)
-                                    .widthIn(max = 320.dp),
+                                    .widthIn(max = 320.dp)
+                                    .then(if (desktop) Modifier.onFocusChanged { readingsFocused = it.hasFocus }.focusGroup()
+                                        else Modifier),
                                 nextPreparation = state.nextEpisodePreparation,
                                 nextPreparationEnabled = state.settings.prepareNextEpisode)
                         }
@@ -944,7 +999,8 @@ internal fun AnimePlayerPane(
                     .padding(horizontal = 8.dp, vertical = 5.dp)
                 Row(headerShell, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     AnimePlaybackSurface(headerBackdrop, Modifier.weight(1f, fill = false).widthIn(max = 440.dp)
-                        .playerChromeContact(hoverEnabled && headerInteractive, onChromeContact).hoverable(titlePointer, enabled = desktop && hoverEnabled),
+                        .playerChromeContact(chromeInputActive && headerInteractive, onChromeContact)
+                        .revealOnMouseMove(desktopMouseActivity && headerInteractive, ::onMouseActivity),
                         overVideo = headerOverVideo) {
                         Row(Modifier.heightIn(min = 46.dp).padding(start = 2.dp, end = 14.dp),
                             verticalAlignment = Alignment.CenterVertically) {
@@ -976,7 +1032,8 @@ internal fun AnimePlayerPane(
                         !fillVideo && widePlayer && detail != null
                     if (hasHeaderActions) {
                         AnimePlaybackSurface(headerBackdrop,
-                            Modifier.playerChromeContact(hoverEnabled && headerInteractive, onChromeContact).hoverable(headerPointer, enabled = desktop && hoverEnabled),
+                            Modifier.playerChromeContact(chromeInputActive && headerInteractive, onChromeContact)
+                                .revealOnMouseMove(desktopMouseActivity && headerInteractive, ::onMouseActivity),
                             overVideo = headerOverVideo) {
                             Row(Modifier.padding(horizontal = 2.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
                                 if (fullscreen && canControl && !touchExploration) MotionIconButton(onClick = { locked = true },
@@ -1050,8 +1107,8 @@ internal fun AnimePlayerPane(
                         else -> 18.dp + 44.dp * (1 + (if (canOpenSources) 1 else 0) + (if (canOpenWatching) 1 else 0))
                     }
                     AnimePlaybackSurface(controlBackdrop,
-                        Modifier.widthIn(max = dockWidth).fillMaxWidth().playerChromeContact(hoverEnabled && showChrome, onChromeContact)
-                            .hoverable(transportPointer, enabled = desktop && hoverEnabled),
+                        Modifier.widthIn(max = dockWidth).fillMaxWidth().playerChromeContact(chromeInputActive && showChrome, onChromeContact)
+                            .revealOnMouseMove(desktopMouseActivity && showChrome, ::onMouseActivity),
                         cornerRadius = if (desktop) 16.dp else 23.dp) {
                         AnimePlayerControls(player, playback, observations,
                             previous, next, onEpisode, onToggle = { toggle() },
@@ -1152,21 +1209,27 @@ internal fun AnimePlayerPane(
     }
 }
 
-private fun Modifier.revealOnMouseMove(enabled: Boolean, onMove: () -> Unit): Modifier =
-    if (!enabled) this else pointerInput(Unit) {
+@Composable
+private fun Modifier.revealOnMouseMove(enabled: Boolean, onMove: () -> Unit): Modifier {
+    val currentOnMove by rememberUpdatedState(onMove)
+    return if (!enabled) this else pointerInput(Unit) {
         awaitPointerEventScope {
             var lastRevealMs = -1L
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
-                if (event.type != PointerEventType.Move || event.changes.any { it.pressed || it.previousPressed }) continue
-                val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse } ?: continue
+                if (event.type != PointerEventType.Move && event.type != PointerEventType.Enter) continue
+                if (event.buttons.areAnyPressed || event.changes.any { it.pressed || it.previousPressed }) continue
+                val mouse = event.changes.firstOrNull {
+                    it.type == PointerType.Mouse && it.position != it.previousPosition
+                } ?: continue
                 if (lastRevealMs < 0 || mouse.uptimeMillis - lastRevealMs >= 240L) {
                     lastRevealMs = mouse.uptimeMillis
-                    onMove()
+                    currentOnMove()
                 }
             }
         }
     }
+}
 
 // Match an ordinary click rather than treating a drag, wheel or mouse chord as a seek.
 // Read raw Press/Release because Foundation's tap detector is primary-button oriented.

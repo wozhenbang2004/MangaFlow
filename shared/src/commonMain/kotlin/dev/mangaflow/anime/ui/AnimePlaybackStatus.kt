@@ -230,8 +230,10 @@ internal fun AnimePlaybackStatus(
     val expanded = details && canExpand && !quiet
     val desktop = platformKind == PlatformKind.DESKTOP
     val holdControls by rememberUpdatedState(onHoldControls)
-    DisposableEffect(interactive, expanded, focused, summaryScroll.isScrollInProgress, detailScroll.isScrollInProgress) {
-        holdControls(interactive && (expanded || focused || summaryScroll.isScrollInProgress || detailScroll.isScrollInProgress))
+    val scrolling = summaryScroll.isScrollInProgress || detailScroll.isScrollInProgress
+    val holdForReadings = interactive && (scrolling || !desktop && (expanded || focused))
+    DisposableEffect(holdForReadings) {
+        holdControls(holdForReadings)
         onDispose { holdControls(false) }
     }
     AnimePlaybackSurface(null, modifier.heightIn(max = maximumHeight).onFocusChanged { focused = it.hasFocus },
